@@ -282,7 +282,6 @@ static int actionRotate(Object* obj, int delta, int animationSequenceIndex);
 static int _anim_hide(Object* object, int animationSequenceIndex);
 static int _anim_change_fid(Object* obj, int animationSequenceIndex, int fid);
 static int _check_gravity(int tile, int elevation);
-static unsigned int animationComputeTicksPerFrame(Object* object, int fid);
 
 static void reportOverloaded(Object* critter);
 
@@ -3284,7 +3283,7 @@ static int _check_gravity(int tile, int elevation)
 }
 
 // 0x418794
-static unsigned int animationComputeTicksPerFrame(Object* object, int fid)
+unsigned int animationComputeTicksPerFrame(Object* object, int fid)
 {
     int fps;
 

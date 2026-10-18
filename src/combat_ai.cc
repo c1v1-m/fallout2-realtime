@@ -122,7 +122,6 @@ static void _ai_sort_list_weakness(Object** critterList, int length);
 static Object* _ai_find_nearest_team(Object* a1, Object* a2, int flags);
 static Object* _ai_find_nearest_team_in_combat(Object* a1, Object* a2, int flags);
 static int aiFindAttackers(Object* critter, Object** whoHitMePtr, Object** whoHitFriendPtr, Object** whoHitByFriendPtr);
-static Object* _ai_danger_source(Object* a1);
 static bool aiHaveAmmo(Object* critter, Object* weapon, Object** ammoPtr);
 static bool _caiHasWeapPrefType(AiPacket* ai, int attackType);
 static Object* _ai_best_weapon(Object* a1, Object* a2, Object* a3, Object* a4);
@@ -1526,7 +1525,7 @@ static int aiFindAttackers(Object* critter, Object** whoHitMePtr, Object** whoHi
 
 // ai_danger_source
 // 0x428F4C
-static Object* _ai_danger_source(Object* a1)
+Object* _ai_danger_source(Object* a1)
 {
     if (a1 == nullptr) {
         return nullptr;

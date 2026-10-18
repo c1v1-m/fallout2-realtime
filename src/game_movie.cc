@@ -21,6 +21,8 @@
 #include "touch.h"
 #include "window_manager.h"
 
+#include "rt/game/gamepad_ui.h"
+
 namespace fallout {
 
 #define GAME_MOVIE_WINDOW_WIDTH 640
@@ -246,7 +248,9 @@ int gameMoviePlay(int movie, int flags)
     int v11 = 0;
     int buttons;
     do {
-        if (!_moviePlaying() || _game_user_wants_to_quit || inputGetInput() != -1) {
+        // Realtime build: any fresh pad press skips too. Movies hide the mouse, which switches the
+        // gamepad's mouse hook off, so the pad cannot reach this loop the usual way.
+        if (!_moviePlaying() || _game_user_wants_to_quit || inputGetInput() != -1 || gamepad_ui_skip_pressed()) {
             break;
         }
 

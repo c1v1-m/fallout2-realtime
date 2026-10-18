@@ -185,40 +185,8 @@ typedef enum InventoryArrowFrm {
     INVENTORY_ARROW_FRM_COUNT,
 } InventoryArrowFrm;
 
-typedef enum InventoryWindowCursor {
-    INVENTORY_WINDOW_CURSOR_HAND,
-    INVENTORY_WINDOW_CURSOR_ARROW,
-    INVENTORY_WINDOW_CURSOR_PICK,
-    INVENTORY_WINDOW_CURSOR_MENU,
-    INVENTORY_WINDOW_CURSOR_BLANK,
-    INVENTORY_WINDOW_CURSOR_COUNT,
-} InventoryWindowCursor;
-
-typedef enum InventoryWindowType {
-    // Normal inventory window with quick character sheet.
-    INVENTORY_WINDOW_TYPE_NORMAL,
-
-    // Narrow inventory window with just an item scroller that's shown when
-    // a "Use item on" is selected from context menu.
-    INVENTORY_WINDOW_TYPE_USE_ITEM_ON,
-
-    // Looting/strealing interface.
-    INVENTORY_WINDOW_TYPE_LOOT,
-
-    // Barter interface.
-    INVENTORY_WINDOW_TYPE_TRADE,
-
-    // Supplementary "Move items" window. Used to set quantity of items when
-    // moving items between inventories.
-    INVENTORY_WINDOW_TYPE_MOVE_ITEMS,
-
-    // Supplementary "Set timer" window. Internally it's implemented as "Move
-    // items" window but with timer overlay and slightly different adjustment
-    // mechanics.
-    INVENTORY_WINDOW_TYPE_SET_TIMER,
-
-    INVENTORY_WINDOW_TYPE_COUNT,
-} InventoryWindowType;
+// Realtime build: InventoryWindowCursor and InventoryWindowType moved to inventory.h (the gamepad
+// layer sets the cursor and asks which window is up).
 
 typedef struct InventoryWindowConfiguration {
     int frmId; // artId
@@ -254,7 +222,6 @@ static void _display_inventory_info(Object* item, int quantity, unsigned char* d
 static void _display_body(int fid, int inventoryWindowType);
 static int inventoryCommonInit();
 static void inventoryCommonFree();
-static void inventorySetCursor(int cursor);
 static void inventoryItemSlotOnMouseEnter(int btn, int keyCode);
 static void inventoryItemSlotOnMouseExit(int btn, int keyCode);
 static void _inven_update_lighting(Object* activeItem);
@@ -263,7 +230,6 @@ static void _switch_hand(Object* sourceItem, Object** targetSlot, Object** sourc
 static void _adjust_fid();
 static void inventoryRenderSummary();
 static int _inven_from_button(int keyCode, Object** outItem, Object*** outItemSlot, Object** outOwner);
-static void inventoryRenderItemDescription(char* string);
 static void inventoryExamineItem(Object* critter, Object* item);
 static void inventoryWindowOpenContextMenu(int eventCode, int inventoryWindowType);
 static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* targetObj, bool isPlanting);
@@ -2191,7 +2157,7 @@ static void inventoryCommonFree()
 }
 
 // 0x470BCC
-static void inventorySetCursor(int cursor)
+void inventorySetCursor(int cursor)
 {
     gInventoryCursor = cursor;
 
@@ -3555,7 +3521,7 @@ static int _inven_from_button(int keyCode, Object** outItem, Object*** outItemSl
 //
 // inven_display_msg
 // 0x472D24
-static void inventoryRenderItemDescription(char* string)
+void inventoryRenderItemDescription(char* string)
 {
     int oldFont = fontGetCurrent();
     fontSetCurrent(101);

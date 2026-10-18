@@ -105,6 +105,10 @@ void _gmouse_remove_item_outline(Object* object);
 void gameMouseRefreshImmediately();
 Object* gmouse_get_outlined_object();
 
+// Realtime build: no longer static -- the gamepad layer (src/rt) calls these.
+void _gmouse_3d_enable_modes();
+Object* gameMouseGetObjectUnderCursor(int objectType, bool a2, int elevation);
+
 } // namespace fallout
 
 #endif /* GAME_MOUSE_H */

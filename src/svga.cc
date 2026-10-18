@@ -1,11 +1,18 @@
 #include "svga.h"
 
 #include <limits.h>
+#include <math.h>
 #include <string.h>
 
+#include <algorithm>
+
 #include <SDL.h>
+#include <SDL_opengl.h>
 
 #include "config.h"
+#include "debug.h"
+#include "game_config.h"
+#include "rt/game/game_trace.h"
 #include "draw.h"
 #include "interface.h"
 #include "memory.h"
@@ -36,6 +43,133 @@ SDL_Surface* gSdlTextureSurface = nullptr;
 
 // TODO: Remove once migration to update-render cycle is completed.
 FpsLimiter sharedFpsLimiter;
+
+// --- VSYNC (MODS "VSync", cfg vsync) -- ported from fallout1-ce svga.cc ------------------------------
+//
+// ⚠️ WITHOUT IT NOTHING ON SCREEN CAN MOVE SMOOTHLY. The renderer had no present-vsync and the loop
+// slept to 1000/60 = 16 WHOLE ms -- 62.5 fps handed to the display whenever ready. On a 240 Hz panel a
+// frame stayed up for 4 refreshes, sometimes 3, in no fixed rhythm: a camera gliding at constant speed
+// moved in uneven jerks.
+//
+// With it: the swap interval is round(refresh / 60) -- 4 at 240 Hz, 2 at 120/144, 1 at 60 -- so the
+// game still runs ~60 fps and everything tuned per frame stays tuned, but every frame is on screen for
+// the same number of refreshes. glFinish after the swap keeps the driver from queueing frames ahead,
+// and FpsLimiter steps back to a floor.
+//
+// ⚠️ A DRIVER CAN REFUSE (vsync forced off in the panel, an occluded window). Frames then arrive faster
+// than the display shows them; svga_vsync_check sees that and hands pacing back to the sleep.
+static bool vsync_wanted = false;
+static bool vsync_dirty = true; // apply at the next present, with the renderer's GL context current
+static int vsync_interval = 0; // swap interval in force; 0 = not waiting for the display
+static int vsync_refresh = 0;
+static double vsync_period_ms = 0.0;
+static bool vsync_effective = false;
+// A map is loading (svga_vsync_suspend). Its reads present a frame every few KB to keep the cursor
+// alive, and with each present waiting for the display that turned into seconds of extra loading.
+static bool vsync_suspended = false;
+static bool vsync_suspend_applied = false;
+static Uint64 vsync_last_present = 0;
+static double vsync_acc_ms = 0.0;
+static int vsync_acc_frames = 0;
+
+typedef void(APIENTRY* SvgaGlFinishProc)(void);
+static SvgaGlFinishProc vsync_gl_finish = nullptr;
+
+static void svga_vsync_apply()
+{
+    vsync_dirty = false;
+    vsync_interval = 0;
+    vsync_period_ms = 0.0;
+    vsync_effective = false;
+    vsync_last_present = 0;
+    vsync_acc_ms = 0.0;
+    vsync_acc_frames = 0;
+
+    if (!vsync_wanted || gSdlWindow == nullptr) {
+        SDL_GL_SetSwapInterval(0);
+        sharedFpsLimiter.setVsyncPeriod(0.0);
+        return;
+    }
+
+    int refresh = 60;
+    SDL_DisplayMode mode;
+    int display = SDL_GetWindowDisplayIndex(gSdlWindow);
+    if (SDL_GetCurrentDisplayMode(display >= 0 ? display : 0, &mode) == 0 && mode.refresh_rate > 0) {
+        refresh = mode.refresh_rate;
+    }
+
+    int interval = (int)floor(refresh / 60.0 + 0.5);
+    if (interval < 1) {
+        interval = 1;
+    }
+
+    if (SDL_GL_SetSwapInterval(interval) != 0) {
+        // Some drivers take only 0/1. One refresh per frame on a fast panel is still tear-free.
+        if (interval == 1 || SDL_GL_SetSwapInterval(1) != 0) {
+            sharedFpsLimiter.setVsyncPeriod(0.0);
+            return;
+        }
+        interval = 1;
+    }
+
+    if (vsync_gl_finish == nullptr) {
+        vsync_gl_finish = (SvgaGlFinishProc)SDL_GL_GetProcAddress("glFinish");
+    }
+
+    vsync_refresh = refresh;
+    vsync_interval = interval;
+    vsync_period_ms = interval * 1000.0 / refresh;
+    vsync_effective = true; // until the check says otherwise
+    sharedFpsLimiter.setVsyncPeriod(vsync_period_ms);
+}
+
+// Is the display really pacing us? Averaged over two seconds of presents.
+static void svga_vsync_check()
+{
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (vsync_last_present != 0) {
+        double ms = (double)(now - vsync_last_present) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+        if (ms < 250.0) {
+            vsync_acc_ms += ms;
+            vsync_acc_frames++;
+        }
+    }
+    vsync_last_present = now;
+
+    if (vsync_acc_frames >= 120) {
+        double avg = vsync_acc_ms / vsync_acc_frames;
+        if (vsync_effective && avg < vsync_period_ms - 1.5) {
+            // Faster than the display can show them: the interval is not being honoured.
+            vsync_effective = false;
+            sharedFpsLimiter.setVsyncPeriod(0.0);
+        }
+        vsync_acc_ms = 0.0;
+        vsync_acc_frames = 0;
+    }
+}
+
+void svga_vsync_suspend(bool on)
+{
+    vsync_suspended = on;
+}
+
+void svga_set_vsync(bool on)
+{
+    vsync_wanted = on;
+    vsync_dirty = true;
+}
+
+bool svga_get_vsync()
+{
+    return vsync_wanted;
+}
+
+void svga_vsync_state(int* interval, int* refresh, bool* effective)
+{
+    *interval = vsync_interval;
+    *refresh = vsync_refresh;
+    *effective = vsync_interval > 0 && vsync_effective;
+}
 
 // 0x4CAD08
 int _init_mode_320_200()
@@ -106,15 +240,19 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
 
     Config resolutionConfig;
     if (configInit(&resolutionConfig)) {
-        if (configRead(&resolutionConfig, "f2_res.ini", false)) {
+        // Realtime build (ported from fallout1-ce game.cc, where F1 reads f1_res.ini): NO FILE STILL
+        // RUNS THE MATHS BELOW. Every key simply falls back to its default, so a missing f2_res.ini
+        // behaves like an empty one instead of leaving a fixed, pillarboxed 640x480.
+        configRead(&resolutionConfig, "f2_res.ini", false);
+        {
             int screenWidth;
             if (configGetInt(&resolutionConfig, "MAIN", "SCR_WIDTH", &screenWidth)) {
-                width = screenWidth;
+                width = std::max(screenWidth, 640);
             }
 
             int screenHeight;
             if (configGetInt(&resolutionConfig, "MAIN", "SCR_HEIGHT", &screenHeight)) {
-                height = screenHeight;
+                height = std::max(screenHeight, 480);
             }
 
             bool windowed;
@@ -122,16 +260,79 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
                 fullscreen = !windowed;
             }
 
-            int scaleValue;
-            if (configGetInt(&resolutionConfig, "MAIN", "SCALE_2X", &scaleValue)) {
-                scale = scaleValue + 1; // 0 = 1x, 1 = 2x
-                // Only allow scaling if resulting game resolution is >= 640x480
-                if ((width / scale) < 640 || (height / scale) < 480) {
-                    scale = 1;
-                } else {
-                    width /= scale;
-                    height /= scale;
+            // ⚠️ WHAT THE GAME ACTUALLY RENDERS AT. SCR_WIDTH/SCR_HEIGHT are the OUTPUT (the screen);
+            // the engine draws into output / scale and SDL stretches that to fill the screen, so the
+            // INTERNAL size decides how big everything looks. The original shipped at 640x480, so 480
+            // internal lines reproduce its element size on any panel; the width only decides how much
+            // map you see left and right.
+            //
+            // SCALE_2X divides by a whole number only -- fine on a 1440p desktop (2560 / 3 = 853x480),
+            // useless on a Steam Deck (1280x800: scale 1 = tiny elements, scale 2 = 640x400, under the
+            // floor). INTERNAL_WIDTH / INTERNAL_HEIGHT name the internal size outright; either one
+            // alone derives the other from the screen's aspect (INTERNAL_HEIGHT=480 = 768x480 on a Deck).
+            //
+            // ⚠️ THE FLOOR IS 640x480, HARD: the character editor, the Pip-Boy and the world map are
+            // fixed-size 640x480 windows and have nowhere to go below it.
+            int internalWidth = 0;
+            int internalHeight = 0;
+            configGetInt(&resolutionConfig, "MAIN", "INTERNAL_WIDTH", &internalWidth);
+            configGetInt(&resolutionConfig, "MAIN", "INTERNAL_HEIGHT", &internalHeight);
+
+            // ⚠️ WITH NEITHER KEY, THE DEFAULT IS THE ORIGINAL'S SCALING: 480 lines. Steam and GOG ship
+            // the High Resolution Patch's f2_res.ini (SCALE_2X=0, no INTERNAL_*), and SCALE_2X=0 would
+            // mean "render at the full screen size" -- a postage-stamp interface on a 1440p desktop.
+            // So SCALE_2X counts only when it asks for a divider (1 or more).
+            int legacyScale = 0;
+            bool haveLegacyScale = configGetInt(&resolutionConfig, "MAIN", "SCALE_2X", &legacyScale) && legacyScale > 0;
+            if (internalWidth <= 0 && internalHeight <= 0 && !haveLegacyScale) {
+                internalHeight = 480;
+            }
+
+            // ⚠️ FULLSCREEN IS THE SCREEN, WHATEVER SCR_* SAYS. Fullscreen is SDL_WINDOW_FULLSCREEN_DESKTOP,
+            // so the real output is always the desktop; deriving the internal aspect from SCR_* instead
+            // letterboxed a 16:9 picture on the Deck's 16:10 panel. SCR_* only sizes the window.
+            if (fullscreen) {
+                SDL_DisplayMode desktop;
+                if (SDL_GetDesktopDisplayMode(0, &desktop) == 0 && desktop.w >= 640 && desktop.h >= 480) {
+                    width = desktop.w;
+                    height = desktop.h;
                 }
+            }
+
+            int outputWidth = width;
+            int outputHeight = height;
+
+            if (internalWidth > 0 || internalHeight > 0) {
+                if (internalWidth <= 0) {
+                    internalWidth = (int)((double)internalHeight * outputWidth / outputHeight + 0.5);
+                } else if (internalHeight <= 0) {
+                    internalHeight = (int)((double)internalWidth * outputHeight / outputWidth + 0.5);
+                }
+
+                width = internalWidth;
+                height = internalHeight;
+
+                // Only the WINDOWED window is sized from this (fullscreen ignores it); the renderer's
+                // logical size is the internal resolution either way. Biggest whole multiple that fits.
+                int fitX = outputWidth / internalWidth;
+                int fitY = outputHeight / internalHeight;
+                int fit = fitX < fitY ? fitX : fitY;
+                scale = fit < 1 ? 1 : fit;
+            } else if (haveLegacyScale) {
+                scale = legacyScale + 1;
+                width /= scale;
+                height /= scale;
+            }
+
+            // The floor, whichever path produced the numbers -- clamped, and said out loud.
+            if (width < 640 || height < 480) {
+                debugPrint("f2_res.ini: internal %dx%d is below the 640x480 floor the fixed-size "
+                           "interfaces need; clamping. Set INTERNAL_WIDTH/INTERNAL_HEIGHT (or a "
+                           "smaller SCALE_2X) for %dx%d output.\n",
+                    width, height, outputWidth, outputHeight);
+                width = std::max(width, 640);
+                height = std::max(height, 480);
+                scale = 1;
             }
 
             configGetBool(&resolutionConfig, "IFACE", "IFACE_BAR_MODE", &gInterfaceBarMode);
@@ -160,6 +361,13 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
     _zero_mem = _GNW95_zero_vid_mem;
     _mouse_blit = _GNW95_ShowRect;
 
+    // Realtime build: MODS "VSync" -- default ON (his setting); 0 = the original sleep-paced present.
+    // The game config is already loaded here (settingsInit runs before _initWindow). Applied at the
+    // first present, when the renderer's GL context is current.
+    int vsync = 1;
+    configGetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_VSYNC_KEY, &vsync);
+    svga_set_vsync(vsync != 0);
+
     return 0;
 }
 
@@ -178,7 +386,11 @@ int _GNW95_init_window(int width, int height, bool fullscreen, int scale)
         Uint32 windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
 
         if (fullscreen) {
-            windowFlags |= SDL_WINDOW_FULLSCREEN;
+            // Realtime build: _DESKTOP, not plain SDL_WINDOW_FULLSCREEN. A real fullscreen window
+            // switches the display mode, and SDL then minimizes it on ANY focus loss (alt-tab, a
+            // notification, Steam) -- the game sits at 0% CPU behind the taskbar looking exactly like
+            // a crash. _DESKTOP never minimizes; the output is the desktop size anyway (see above).
+            windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
         }
 
         gSdlWindow = SDL_CreateWindow(gProgramWindowTitle, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width * scale, height * scale, windowFlags);
@@ -380,6 +592,9 @@ static bool createRenderer(int width, int height)
         return false;
     }
 
+    // A new renderer is a new GL context, born with its own swap interval.
+    vsync_dirty = true;
+
     return true;
 }
 
@@ -409,10 +624,37 @@ void handleWindowSizeChanged()
 
 void renderPresent()
 {
+    trace_alive(); // the hang watchdog's pulse (rt/game/game_trace.cc)
+
     SDL_UpdateTexture(gSdlTexture, nullptr, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, nullptr, nullptr);
+
+    // The renderer's GL context is current here -- it has just drawn -- which makes this the one
+    // safe place to change its swap interval.
+    if (vsync_dirty) {
+        svga_vsync_apply();
+        vsync_suspend_applied = false;
+    }
+
+    // Loading: present at once, as without VSync. Back on with the first present after it.
+    if (vsync_interval > 0 && vsync_suspend_applied != vsync_suspended) {
+        SDL_GL_SetSwapInterval(vsync_suspended ? 0 : vsync_interval);
+        vsync_suspend_applied = vsync_suspended;
+        vsync_last_present = 0;
+        vsync_acc_ms = 0.0;
+        vsync_acc_frames = 0;
+    }
+
     SDL_RenderPresent(gSdlRenderer);
+
+    if (vsync_interval > 0 && !vsync_suspended) {
+        // Wait for the swap itself, so the driver never queues frames ahead of the display.
+        if (vsync_gl_finish != nullptr) {
+            vsync_gl_finish();
+        }
+        svga_vsync_check();
+    }
 }
 
 } // namespace fallout

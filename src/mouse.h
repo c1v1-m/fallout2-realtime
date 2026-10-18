@@ -54,6 +54,16 @@ void mouseGetWheel(int* x, int* y);
 void convertMouseWheelToArrowKey(int* keyCodePtr);
 int mouse_get_last_buttons();
 
+// Realtime build (ported from fallout1-ce): an optional input contributor folded into _mouse_info()
+// each frame before _mouse_simulate_input -- the game controller adds cursor delta and ORs in
+// MOUSE_STATE_* bits, so synthetic movement and clicks reach the same edge detection as the mouse.
+typedef void MouseInputHook(int* dx, int* dy, int* buttons);
+void mouse_set_input_hook(MouseInputHook* hook);
+// Predicate consulted every frame: true = the cursor is NOT drawn, but input still flows (unlike
+// mouseHideCursor, which also gates input off). Hides the pointer during gamepad free-play.
+typedef bool MouseDrawSuppressHook();
+void mouse_set_draw_suppress_hook(MouseDrawSuppressHook* hook);
+
 } // namespace fallout
 
 #endif /* FALLOUT_MOUSE_H_ */

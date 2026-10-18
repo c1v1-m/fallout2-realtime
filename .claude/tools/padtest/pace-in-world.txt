@@ -1,0 +1,19 @@
+7 axis LY -24000
+7.2 axis LY 0
+7.45 axis LY -24000
+7.65 axis LY 0
+7.9 axis LY -24000
+8.1 axis LY 0
+8.35 axis LY -24000
+8.55 axis LY 0
+8.8 axis LY -24000
+9 axis LY 0
+9.25 axis LY -24000
+9.45 axis LY 0
+10.0 axis LY 24000
+10.2 axis LY 0
+11.0 tap A
+16.0 axis LY 24000
+16.2 axis LY 0
+17.0 tap A
+21.0 tap A

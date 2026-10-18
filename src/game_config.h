@@ -124,4 +124,7 @@ bool gameConfigExit(bool shouldSave);
 
 } // namespace fallout
 
+// Realtime build: the cfg keys our modules add (shared with fallout1-ce's gconfig.h).
+#include "rt/rt_gconfig_keys.h"
+
 #endif /* GAME_CONFIG_H */

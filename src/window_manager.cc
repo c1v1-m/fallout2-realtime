@@ -27,8 +27,6 @@ namespace fallout {
 #define BUTTON_GROUP_LIST_CAPACITY (64)
 
 static void windowFree(int win);
-static void _win_buffering(bool a1);
-static void _win_move(int win_index, int x, int y);
 static void _win_clip(Window* window, RectListNode** rect, unsigned char* a3);
 static void win_drag(int win);
 static void _refresh_all(Rect* rect, unsigned char* a2);
@@ -1149,6 +1147,55 @@ int windowGetAtPoint(int x, int y)
     }
 
     return -1;
+}
+
+// Realtime build (ported from fallout1-ce gnw.cc): the id of the topmost visible modal window, or
+// -1 if none is open. Tells the gamepad layer whether a menu/dialog has control.
+int win_get_top_modal()
+{
+    for (int index = gWindowsLength - 1; index >= 0; index--) {
+        Window* w = gWindows[index];
+        if ((w->flags & WINDOW_HIDDEN) != 0) {
+            continue;
+        }
+
+        if ((w->flags & WINDOW_MODAL) != 0) {
+            return w->id;
+        }
+    }
+
+    return -1;
+}
+
+// Realtime build (ported from fallout1-ce gnw.cc): fills xs/ys with the SCREEN-space centres of the
+// enabled buttons of the topmost visible window that has any, up to maxCount, and returns the count.
+// Button rects are window-relative, so each centre is offset by the window's origin. Used for
+// controller menu/dialog item snapping.
+int win_get_top_button_centers(int* xs, int* ys, int maxCount)
+{
+    for (int index = gWindowsLength - 1; index >= 0; index--) {
+        Window* w = gWindows[index];
+        if ((w->flags & WINDOW_HIDDEN) != 0) {
+            continue;
+        }
+
+        int count = 0;
+        for (Button* b = w->buttonListHead; b != nullptr && count < maxCount; b = b->next) {
+            if ((b->flags & BUTTON_FLAG_DISABLED) != 0) {
+                continue;
+            }
+
+            xs[count] = w->rect.left + (b->rect.left + b->rect.right) / 2;
+            ys[count] = w->rect.top + (b->rect.top + b->rect.bottom) / 2;
+            count++;
+        }
+
+        if (count > 0) {
+            return count;
+        }
+    }
+
+    return 0;
 }
 
 // 0x4D7918

@@ -59,6 +59,24 @@ static int last_buttons = 0;
 // 0x6AC790
 static bool gCursorIsHidden;
 
+// Realtime build (ported from fallout1-ce mouse.cc): live predicate -- when it returns true the
+// cursor is not drawn (mouseShowCursor erases instead of blitting) but _mouse_info /
+// _mouse_simulate_input keep running so gamepad input still flows. Distinct from gCursorIsHidden,
+// which gates BOTH drawing and input. See mouse_set_draw_suppress_hook.
+static MouseDrawSuppressHook* mouse_draw_suppress_hook = nullptr;
+
+static bool mouse_draw_suppressed()
+{
+    return mouse_draw_suppress_hook != nullptr && mouse_draw_suppress_hook();
+}
+
+// Tracks the suppression edge so the cursor is erased exactly once when drawing is
+// suppressed (then simply not redrawn), without ever touching gCursorIsHidden.
+static bool mouse_draw_prev_suppressed = false;
+
+// External input contributor (the game controller). See mouse_set_input_hook.
+static MouseInputHook* mouse_input_hook = nullptr;
+
 // 0x6AC794
 static int _raw_x;
 
@@ -293,6 +311,24 @@ void mouseShowCursor()
 
     v2 = gMouseCursorData;
     if (gMouseInitialized) {
+        // Drawing suppressed (gamepad free-play): DON'T draw the cursor, but do NOT touch
+        // gCursorIsHidden -- _mouse_info gates INPUT on it, and setting it here would strand
+        // controller input. Erase the cursor ONCE on the suppression edge, then no-op.
+        if (mouse_draw_suppressed()) {
+            if (!mouse_draw_prev_suppressed) {
+                mouse_draw_prev_suppressed = true;
+                Rect rect;
+                rect.left = gMouseCursorX;
+                rect.top = gMouseCursorY;
+                rect.right = gMouseCursorX + gMouseCursorWidth - 1;
+                rect.bottom = gMouseCursorY + gMouseCursorHeight - 1;
+                windowRefreshAll(&rect);
+            }
+            gMouseCursorData = v2;
+            return;
+        }
+        mouse_draw_prev_suppressed = false;
+
         if (!_mouse_blit_trans || !gCursorIsHidden) {
             _win_get_mouse_buf(gMouseCursorData);
             v2 = gMouseCursorData;
@@ -364,6 +400,16 @@ void mouseHideCursor()
             windowRefreshAll(&rect);
         }
     }
+}
+
+void mouse_set_draw_suppress_hook(MouseDrawSuppressHook* hook)
+{
+    mouse_draw_suppress_hook = hook;
+}
+
+void mouse_set_input_hook(MouseInputHook* hook)
+{
+    mouse_input_hook = hook;
 }
 
 // 0x4CA59C
@@ -453,6 +499,12 @@ void _mouse_info()
     // Adjust for mouse senstivity.
     x = (int)(x * gMouseSensitivity);
     y = (int)(y * gMouseSensitivity);
+
+    // Realtime build: fold in the game controller after sensitivity, so its cursor delta and
+    // button bits reach the same edge detection and button-check pass as the real mouse.
+    if (mouse_input_hook != nullptr) {
+        mouse_input_hook(&x, &y, &buttons);
+    }
 
     _mouse_simulate_input(x, y, buttons);
 

@@ -21,6 +21,10 @@
 #include "tile.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define OPTIONS_WINDOW_BUTTONS_COUNT (10)
@@ -95,11 +99,18 @@ int showOptions()
         return -1;
     }
 
+    // Realtime build: B on the pad backs out, like ESC (armed on release -- see rt_pad_pressed).
+    bool padBArmed = false;
+
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        if (keyCode == -1 && rt_pad_pressed(SDL_CONTROLLER_BUTTON_B, &padBArmed)) {
+            keyCode = KEY_ESCAPE;
+        }
 
         if (keyCode == KEY_ESCAPE || keyCode == 504 || _game_user_wants_to_quit != 0) {
             rc = 0;
@@ -134,6 +145,8 @@ int showOptions()
             case 502:
                 // PREFERENCES
                 doPreferences(false);
+                // The B that closed Preferences is still down: it must not close this menu too.
+                padBArmed = false;
                 break;
             case KEY_PLUS:
             case KEY_EQUAL:

@@ -173,6 +173,9 @@ void _win_get_mouse_buf(unsigned char* a1);
 Window* windowGetWindow(int win);
 unsigned char* windowGetBuffer(int win);
 int windowGetAtPoint(int x, int y);
+// Realtime build (ported from fallout1-ce): see window_manager.cc.
+int win_get_top_modal();
+int win_get_top_button_centers(int* xs, int* ys, int maxCount);
 int windowGetWidth(int win);
 int windowGetHeight(int win);
 int windowGetRect(int win, Rect* rect);
@@ -197,6 +200,10 @@ int buttonDisable(int btn);
 int _win_set_button_rest_state(int btn, bool checked, int flags);
 int _win_group_radio_buttons(int buttonCount, int* btns);
 int _win_button_press_and_release(int btn);
+
+// Realtime build: no longer static -- the gamepad layer (src/rt) calls these.
+void _win_buffering(bool a1);
+void _win_move(int win_index, int x, int y);
 
 } // namespace fallout
 

@@ -812,6 +812,16 @@ int mapLoadById(int map)
     return rc;
 }
 
+// Realtime build: set for exactly as long as mapLoad holds the file read callback.
+static bool gMapLoading = false;
+
+// True from the moment mapLoad arms the read callback until it drops it again. Every exit of that
+// stretch funnels through the same line, so the flag cannot be left stuck on by an error path.
+bool map_is_loading()
+{
+    return gMapLoading;
+}
+
 // 0x482B74
 static int mapLoad(File* stream)
 {
@@ -823,6 +833,13 @@ static int mapLoad(File* stream)
 
     int savedMouseCursorId = gameMouseGetCursor();
     gameMouseSetCursor(MOUSE_CURSOR_WAIT_PLANET);
+    // Realtime build (ported from fallout1-ce): ⚠️ THE WORLD IS NOT INSPECTABLE FROM HERE UNTIL THE
+    // READ CALLBACK IS DROPPED AGAIN (below). It pumps the mouse every 32 KB read, which reaches the
+    // gamepad's mouse hook -- while the old map is already freed and the script lists are still being
+    // built. F1 crashed exactly there (Shady Sands -> Raiders, with Ian in the party). See
+    // map_is_loading(). And every pump PRESENTS a frame: with VSync each would wait for the display.
+    gMapLoading = true;
+    svga_vsync_suspend(true);
     fileSetReadProgressHandler(gameMouseRefreshImmediately, 32768);
     tileDisable();
 
@@ -999,6 +1016,8 @@ err:
     _proto_dude_update_gender();
     _map_place_dude_and_mouse();
     fileSetReadProgressHandler(nullptr, 0);
+    gMapLoading = false;
+    svga_vsync_suspend(false);
     isoEnable();
     _gmouse_disable_scrolling();
     gameMouseSetCursor(MOUSE_CURSOR_WAIT_PLANET);

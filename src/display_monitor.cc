@@ -41,8 +41,6 @@ namespace fallout {
 
 static void display_clear();
 static void displayMonitorRefresh();
-static void displayMonitorScrollUpOnMouseDown(int btn, int keyCode);
-static void displayMonitorScrollDownOnMouseDown(int btn, int keyCode);
 static void displayMonitorScrollUpOnMouseEnter(int btn, int keyCode);
 static void displayMonitorScrollDownOnMouseEnter(int btn, int keyCode);
 static void displayMonitorOnMouseExit(int btn, int keyCode);
@@ -379,7 +377,7 @@ static void displayMonitorRefresh()
 }
 
 // 0x431B70
-static void displayMonitorScrollUpOnMouseDown(int btn, int keyCode)
+void displayMonitorScrollUpOnMouseDown(int btn, int keyCode)
 {
     if ((gDisplayMonitorLinesCapacity + _disp_curr - 1) % gDisplayMonitorLinesCapacity != _disp_start) {
         _disp_curr = (gDisplayMonitorLinesCapacity + _disp_curr - 1) % gDisplayMonitorLinesCapacity;
@@ -388,7 +386,7 @@ static void displayMonitorScrollUpOnMouseDown(int btn, int keyCode)
 }
 
 // 0x431B9C
-static void displayMonitorScrollDownOnMouseDown(int btn, int keyCode)
+void displayMonitorScrollDownOnMouseDown(int btn, int keyCode)
 {
     if (_disp_curr != _disp_start) {
         _disp_curr = (_disp_curr + 1) % gDisplayMonitorLinesCapacity;

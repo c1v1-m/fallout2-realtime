@@ -43,7 +43,8 @@ static int gMainMenuWindow = -1;
 static unsigned char* gMainMenuWindowBuffer = nullptr;
 
 // 0x519504
-static bool _in_main_menu = false;
+// Realtime build: not static -- the gamepad layer reads it (rt/f1compat.h maps F1's in_main_menu here).
+bool _in_main_menu = false;
 
 // 0x519508
 static bool gMainMenuWindowInitialized = false;

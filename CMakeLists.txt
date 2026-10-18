@@ -285,6 +285,39 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/touch.h"
 )
 
+# FALLOUT 2 REALTIME: our modules, shared with fallout1-ce (Fallout 1 Realtime). The files under
+# src/rt/game are kept as close to the F1 copies as possible; they speak F1's engine names, which
+# src/rt/f1compat.h maps onto fallout2-ce's. src/rt/compat holds one forwarding header per F1 header
+# path the modules include, so `#include "game/anim.h"` needs no edit.
+target_sources(${EXECUTABLE_NAME} PUBLIC
+    "src/rt/f1compat.h"
+    "src/rt/f1compat_gen.h"
+    "src/rt/rt_f2_hooks.cc"
+    "src/rt/rt_gconfig_keys.h"
+    "src/rt/rt_hooks.h"
+    "src/rt/game/autotest.h"
+    "src/rt/game/combat_rt.h"
+    "src/rt/game/game_trace.cc"
+    "src/rt/game/game_trace.h"
+    "src/rt/game/gamepad_ui.cc"
+    "src/rt/game/gamepad_ui.h"
+    "src/rt/game/interact_prompt.cc"
+    "src/rt/game/interact_prompt.h"
+    "src/rt/game/mods_page.cc"
+    "src/rt/game/mods_page.h"
+    "src/rt/game/radial_wheel.cc"
+    "src/rt/game/radial_wheel.h"
+)
+
+target_include_directories(${EXECUTABLE_NAME} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/rt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/rt/compat"
+)
+
+# Which game the shared modules are built for (see mods_page.cc).
+target_compile_definitions(${EXECUTABLE_NAME} PRIVATE FALLOUT_RT_GAME=2)
+
 if(IOS)
     target_sources(${EXECUTABLE_NAME} PUBLIC
         "src/platform/ios/paths.h"
@@ -304,7 +337,16 @@ endif()
 if(WIN32)
     target_link_libraries(${EXECUTABLE_NAME}
         winmm
+        dbghelp
     )
+endif()
+
+# Emit a PDB even for Release so the game_trace crash handler can resolve symbolic
+# stack frames (function + file:line). /Zi adds debug info, /DEBUG generates the PDB,
+# and /OPT:REF,ICF restore the size optimizations that /DEBUG otherwise disables.
+if(MSVC)
+    target_compile_options(${EXECUTABLE_NAME} PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(${EXECUTABLE_NAME} PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
 endif()
 
 if(WIN32)

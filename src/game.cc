@@ -68,6 +68,8 @@
 #include "window_manager_private.h"
 #include "worldmap.h"
 
+#include "rt/game/gamepad_ui.h"
+
 namespace fallout {
 
 #define HELP_SCREEN_WIDTH (640)
@@ -306,6 +308,9 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
         return -1;
     }
 
+    // Realtime build: the always-on controller layer (cursor, clicks, menu navigation, wheels).
+    gamepad_ui_init();
+
     debugPrint(">combat_init\t");
 
     if (automapInit() != 0) {
@@ -445,6 +450,7 @@ void gameExit()
     tileDisable();
     messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_MISC, nullptr);
     messageListFree(&gMiscMessageList);
+    gamepad_ui_exit();
     combatExit();
     gameDialogExit();
     _scr_game_exit();

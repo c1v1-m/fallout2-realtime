@@ -70,6 +70,9 @@ void _combatai_notify_onlookers(Object* a1);
 void _combatai_notify_friends(Object* a1);
 void _combatai_delete_critter(Object* obj);
 
+// Realtime build: no longer static -- the gamepad layer (src/rt) calls these.
+Object* _ai_danger_source(Object* a1);
+
 } // namespace fallout
 
 #endif /* COMBAT_AI_H */

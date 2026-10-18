@@ -16,6 +16,9 @@ typedef enum MainMenuOption {
     MAIN_MENU_OPTIONS,
 } MainMenuOption;
 
+// Realtime build: true while the main menu runs (read by the gamepad layer).
+extern bool _in_main_menu;
+
 int mainMenuWindowInit();
 void mainMenuWindowFree();
 void mainMenuWindowHide(bool animate);

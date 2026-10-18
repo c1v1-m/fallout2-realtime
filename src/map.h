@@ -105,6 +105,9 @@ int mapSetEnteringLocation(int a1, int a2, int a3);
 void mapNewMap();
 int mapLoadByName(char* fileName);
 int mapLoadById(int map_index);
+// Realtime build (ported from fallout1-ce): true while mapLoad holds the file read callback, i.e.
+// while the world is half torn down -- nothing may inspect objects or scripts then. See map.cc.
+bool map_is_loading();
 int mapLoadSaved(char* fileName);
 int _map_target_load_area();
 int mapSetTransition(MapTransition* transition);

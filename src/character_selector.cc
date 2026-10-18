@@ -104,7 +104,9 @@ static PremadeCharacterDescription gPremadeCharacterDescriptions[PREMADE_CHARACT
 static int gPremadeCharacterCount = PREMADE_CHARACTER_COUNT;
 
 // 0x51C7F8
-static int gCharacterSelectorWindow = -1;
+// Realtime build: not static -- the gamepad layer snaps the stick between this screen's buttons
+// (rt/f1compat.h maps F1's select_window_id here).
+int gCharacterSelectorWindow = -1;
 
 // 0x51C7FC
 static unsigned char* gCharacterSelectorWindowBuffer = nullptr;

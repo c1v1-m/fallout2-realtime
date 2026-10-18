@@ -25,6 +25,11 @@
 #include "text_object.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+#include "rt/game/mods_page.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define PREFERENCES_WINDOW_WIDTH 640
@@ -1219,11 +1224,25 @@ int doPreferences(bool animated)
         paletteFadeTo(_cmap);
     }
 
+    // Realtime build: X on the pad (M on the keyboard) opens the MODS screen -- this build's own
+    // settings. A keypress, not a row: every position on this panel is painted into its background
+    // art. B backs out like ESC. Both armed on release (rt_pad_pressed).
+    bool padXArmed = false;
+    bool padBArmed = false;
+
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
         int eventCode = inputGetInput();
+
+        if (eventCode == -1) {
+            if (rt_pad_pressed(SDL_CONTROLLER_BUTTON_X, &padXArmed)) {
+                eventCode = KEY_LOWERCASE_M;
+            } else if (rt_pad_pressed(SDL_CONTROLLER_BUTTON_B, &padBArmed)) {
+                eventCode = KEY_ESCAPE;
+            }
+        }
 
         switch (eventCode) {
         case KEY_RETURN:
@@ -1233,6 +1252,14 @@ int doPreferences(bool animated)
             // FALLTHROUGH
         case 504:
             rc = 1;
+            break;
+        case KEY_UPPERCASE_M:
+        case KEY_LOWERCASE_M:
+            mods_page();
+            // The MODS window sat on top of this one; repaint so the panel has no hole in it.
+            windowRefresh(gPreferencesWindow);
+            // The B that closed MODS is still down: it must not close this screen too.
+            padBArmed = false;
             break;
         case KEY_CTRL_Q:
         case KEY_CTRL_X:

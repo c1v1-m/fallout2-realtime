@@ -1338,7 +1338,18 @@ int interfaceGetActiveItem(Object** itemPtr)
         return -1;
     }
 
-    *itemPtr = gInterfaceItemStates[gInterfaceCurrentHand].item;
+    // Realtime build (ported from fallout1-ce intface.cc): ⚠️ THE "NO ITEM" SENTINEL HERE IS
+    // (Object*)-1, NOT NULL. The interface seeds both hands with it, and vanilla only ever reaches
+    // this getter in-game, after a real item or NULL has replaced it. The gamepad's mouse hook runs
+    // in PRE-GAME loops too: A in the main menu got the sentinel, a NULL check waved it through, and
+    // item->pid read 0xFFFF...FFFF + offsetof(Object, pid) = 0x77 -- the F1 credits crash, met again
+    // in F2's main menu on the port's first pad test. Answer "no item": it fixes every caller at once.
+    Object* item = gInterfaceItemStates[gInterfaceCurrentHand].item;
+    if (item == (Object*)-1) {
+        return -1;
+    }
+
+    *itemPtr = item;
 
     return 0;
 }

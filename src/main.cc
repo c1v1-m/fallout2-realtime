@@ -3,6 +3,8 @@
 #include <limits.h>
 #include <string.h>
 
+#include <SDL.h>
+
 #include "art.h"
 #include "autorun.h"
 #include "character_selector.h"
@@ -41,6 +43,9 @@
 #include "word_wrap.h"
 #include "worldmap.h"
 
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+
 namespace fallout {
 
 #define DEATH_WINDOW_WIDTH 640
@@ -52,6 +57,7 @@ static void main_exit_system();
 static int _main_load_new(char* fname);
 static int main_loadgame_new();
 static void main_unload_new();
+static void main_frame_meter();
 static void mainLoop();
 static void showDeath();
 static void _main_death_voiceover_callback();
@@ -234,6 +240,10 @@ static bool falloutInit(int argc, char** argv)
         return false;
     }
 
+    // Realtime build: the flight recorder -- trace log + crash handler, now that the config is
+    // loaded (cfg trace_log). No heartbeat snapshot yet: that is combat_rt's, and it arrives with it.
+    trace_init();
+
     return true;
 }
 
@@ -253,6 +263,8 @@ static int main_reset_system()
 static void main_exit_system()
 {
     backgroundSoundDelete();
+
+    trace_shutdown();
 
     gameExit();
 }
@@ -304,6 +316,61 @@ static int main_loadgame_new()
     return 0;
 }
 
+// Realtime build: the frame-pace meter, a small cousin of fallout1-ce's main_frame_meter. Every 30 s
+// of the main loop, one `[ANIM/pace]` trace line: frames per second, average and worst frame, how
+// many frames ran late (> 1.5x the period), and whether VSync is really pacing the game -- the line
+// says IGNORED when the driver refused the swap interval (svga.cc hands pacing back to the sleep).
+static void main_frame_meter()
+{
+    static Uint64 last = 0;
+    static Uint64 windowStart = 0;
+    static int frames = 0;
+    static double sumMs = 0.0;
+    static double worstMs = 0.0;
+    static int late = 0;
+
+    Uint64 now = SDL_GetPerformanceCounter();
+    double freq = (double)SDL_GetPerformanceFrequency();
+    if (last == 0) {
+        last = now;
+        windowStart = now;
+        return;
+    }
+
+    double ms = (double)(now - last) * 1000.0 / freq;
+    last = now;
+    if (ms > 250.0) {
+        return; // a pause (a modal screen ran its own loop), not a frame
+    }
+
+    int interval;
+    int refresh;
+    bool effective;
+    svga_vsync_state(&interval, &refresh, &effective);
+    double period = interval > 0 && refresh > 0 ? interval * 1000.0 / refresh : 1000.0 / 60.0;
+
+    frames++;
+    sumMs += ms;
+    if (ms > worstMs) {
+        worstMs = ms;
+    }
+    if (ms > period * 1.5) {
+        late++;
+    }
+
+    double windowSec = (double)(now - windowStart) / freq;
+    if (windowSec >= 30.0) {
+        trace_event(TRACE_ANIM, "pace", "fps=%.1f avg=%.2fms worst=%.1fms late=%d vsync=%d@%dHz%s",
+            frames / windowSec, sumMs / frames, worstMs, late, interval, refresh,
+            interval > 0 && !effective ? " IGNORED" : "");
+        windowStart = now;
+        frames = 0;
+        sumMs = 0.0;
+        worstMs = 0.0;
+        late = 0;
+    }
+}
+
 // 0x480E34
 static void main_unload_new()
 {
@@ -323,15 +390,41 @@ static void mainLoop()
 
     scriptsEnable();
 
+    unsigned int rtLastTime = getTicks();
+
     while (_game_user_wants_to_quit == 0) {
         sharedFpsLimiter.mark();
+
+        // Realtime build: frame delta for the flight recorder. Capped like F1's: a modal loop
+        // (inventory, options) does not run this loop, and on resume the whole stay would land in
+        // one frame.
+        unsigned int rtNow = getTicks();
+        float rtDelta = (rtNow - rtLastTime) / 1000.0f;
+        rtLastTime = rtNow;
+        if (rtDelta > 0.25f) {
+            rtDelta = 0.25f;
+        }
 
         int keyCode = inputGetInput();
 
         // SFALL: MainLoopHook.
         sfall_gl_scr_process_main();
 
+        // ⚠️ NOT YET: gamepad_ui_handle_key (the keyboard as a controller -- arrows walk, Space uses,
+        // Q/E switch target). It swallows the arrows, and without the realtime layer (phase 2)
+        // nothing would walk: the arrows would simply stop scrolling the map.
+        if (keyCode >= 0) {
+            trace_event(TRACE_INPUT, "key", "code=%d", keyCode);
+        }
         gameHandleKey(keyCode, false);
+
+        // Realtime build: flight-recorder pump (frame counter, coalesce ageing).
+        trace_tick(rtDelta);
+        main_frame_meter();
+
+        // Realtime build: the gamepad overlays that touch windows (wheels, the interact prompt) run
+        // here, at a safe point outside the input/mouse hook, to avoid re-entrant windowing.
+        gamepad_ui_tick();
 
         scriptsHandleRequests();
 

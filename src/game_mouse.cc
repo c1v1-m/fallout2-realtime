@@ -306,9 +306,7 @@ Object* gGameMouseHexCursor;
 static Object* gGameMousePointedObject;
 
 static int _gmouse_get_click_to_scroll();
-static void _gmouse_3d_enable_modes();
 static int gameMouseSetBouncingCursorFid(int fid);
-static Object* gameMouseGetObjectUnderCursor(int objectType, bool a2, int elevation);
 static int gameMouseRenderAccuracy(const char* string, int color);
 static int gameMouseRenderActionPoints(const char* string, int color);
 static int gameMouseObjectsInit();
@@ -1338,6 +1336,13 @@ void gmouse_set_mapper_mode(int mode)
 void _gmouse_3d_enable_modes()
 {
     _gmouse_3d_modes_enabled = 1;
+}
+
+// Realtime build (F1's gmouse_3d_modes_are_enabled, declared in rt/rt_hooks.h): the gamepad layer
+// must not switch the cursor mode while a screen has the 3D modes off.
+int gmouse_3d_modes_are_enabled()
+{
+    return _gmouse_3d_modes_enabled;
 }
 
 // 0x44CA18

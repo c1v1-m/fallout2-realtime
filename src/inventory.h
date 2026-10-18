@@ -13,6 +13,41 @@ typedef enum Hand {
     HAND_COUNT,
 } Hand;
 
+typedef enum InventoryWindowCursor {
+    INVENTORY_WINDOW_CURSOR_HAND,
+    INVENTORY_WINDOW_CURSOR_ARROW,
+    INVENTORY_WINDOW_CURSOR_PICK,
+    INVENTORY_WINDOW_CURSOR_MENU,
+    INVENTORY_WINDOW_CURSOR_BLANK,
+    INVENTORY_WINDOW_CURSOR_COUNT,
+} InventoryWindowCursor;
+
+typedef enum InventoryWindowType {
+    // Normal inventory window with quick character sheet.
+    INVENTORY_WINDOW_TYPE_NORMAL,
+
+    // Narrow inventory window with just an item scroller that's shown when
+    // a "Use item on" is selected from context menu.
+    INVENTORY_WINDOW_TYPE_USE_ITEM_ON,
+
+    // Looting/strealing interface.
+    INVENTORY_WINDOW_TYPE_LOOT,
+
+    // Barter interface.
+    INVENTORY_WINDOW_TYPE_TRADE,
+
+    // Supplementary "Move items" window. Used to set quantity of items when
+    // moving items between inventories.
+    INVENTORY_WINDOW_TYPE_MOVE_ITEMS,
+
+    // Supplementary "Set timer" window. Internally it's implemented as "Move
+    // items" window but with timer overlay and slightly different adjustment
+    // mechanics.
+    INVENTORY_WINDOW_TYPE_SET_TIMER,
+
+    INVENTORY_WINDOW_TYPE_COUNT,
+} InventoryWindowType;
+
 typedef void InventoryPrintItemDescriptionHandler(char* string);
 
 void _inven_reset_dude();
@@ -41,6 +76,10 @@ int inventoryOpenStealing(Object* thief, Object* target);
 void inventoryOpenTrade(int win, Object* barterer, Object* playerTable, Object* bartererTable, int barterMod);
 int _inven_set_timer(Object* item);
 Object* inven_get_current_target_obj();
+
+// Realtime build: no longer static -- the gamepad layer (src/rt) calls these.
+void inventorySetCursor(int cursor);
+void inventoryRenderItemDescription(char* string);
 
 } // namespace fallout
 

@@ -158,6 +158,9 @@ void animationStop();
 
 int animationRegisterSetLightIntensity(Object* owner, int lightDistance, int lightIntensity, int delay);
 
+// Realtime build: no longer static -- the gamepad layer (src/rt) calls these.
+unsigned int animationComputeTicksPerFrame(Object* object, int fid);
+
 } // namespace fallout
 
 #endif /* ANIMATION_H */
