@@ -1,0 +1,17 @@
+# F2 map edges (2026-10-27, "při hraní F2 vidím za mapu"): the HRP's maps\ARTEMPLE.edg makes the visible
+# area 704 px wide -- narrower than our 853 px view, so the view is centred on it and the strips left and
+# right of it are black. Walks to the left end and the right end of the area; the camera must not follow
+# past it. The old exe (no edges) shows the void past the map there. Screenshots: build/Release/scr*.bmp.
+name screen-edges-temple
+map ARTEMPLE.MAP
+seed 1
+duration 16
+dude tile 17288 rot 2
+
+shot 1500
+walkto 2000 17296
+shot 6500
+walkto 7000 17278
+shot 12500
+
+expect map-edges\] map=ARTEMPLE ver=1 ok=1 rects=1/0/0

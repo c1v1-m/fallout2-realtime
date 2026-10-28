@@ -191,6 +191,8 @@ Object* obj_wall_blocking_at(Object* a1, int tile, int elevation);
 void tile_take_refresh_stats(int* count, long long* pixels, double* ms);
 int tile_take_full_refreshes();
 int tile_set_center_offset(int tile, int flags, int offsetX, int offsetY);
+void tile_view_save();
+void tile_view_restore();
 void tile_debug_ring_set(int radius);
 int tile_debug_ring_get();
 typedef void (*TileOverlayFn)(Rect* rect, int elevation);

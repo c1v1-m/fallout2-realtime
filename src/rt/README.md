@@ -156,6 +156,20 @@ each one that SEES him turns on him again (`[FLOW/fled-reaggro]`), one already f
 dropped (`fled-forget why=hostile`), older ones are forgotten (`fled-expired`). Travels through saves
 in `RTFM`. `rtfled-*.txt` (leave and return, expired, random map, save away + load and return).
 
+**Map edges** (2026-10-27, "při hraní F2 vidím za mapu"): Steam's Fallout 2 ships the High Resolution
+Patch, and its `f2_res.dat` holds `maps\<map>.edg` for 155 maps — per elevation the tiles at the
+left / top / right / bottom extremes of what the player may see. fallout2-ce never read them, so our
+853-wide view showed the void past the art. `tile.cc` now loads them (`[FLOW/map-edges]`), clamps the
+FINAL view into that area after every centring (`tile_set_center_offset` clamps after its pixel shift,
+so the follow camera slides up to the edge), centres it where it is narrower than the window
+(ARTEMPLE: 704 px) and paints the rest black. Never off the dude: the clamp stops while he is 48 px
+inside the window (an area does not always cover every walkable hex), and no black while he stands
+outside it. `mapScroll` (mouse at the screen edge) undoes a step the edge stopped, like a scroll
+blocker, and redraws in full a partial one (its strip blit assumes a whole step). f2_res.ini `[MAPS]`
+keeps the HRP's switches (`IGNORE_MAP_EDGES`, `EDGE_CLIPPING_ON`). No `.edg` = vanilla behaviour.
+`screen-edges-temple.txt`, `screen-edges-pasture.txt` (screenshots; the test folder needs Steam's
+`f2_res.dat`).
+
 **AddressSanitizer build** (2026-10-27, fallout1-ce's recipe): `option(ASAN)` in CMakeLists.txt;
 configure `build-asan` with `-DASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5` and the three
 `FETCHCONTENT_SOURCE_DIR_*` pointing into `build/_deps`, copy the exe to

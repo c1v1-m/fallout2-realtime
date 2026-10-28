@@ -23,6 +23,10 @@
 // Realtime (fallout1-ce's tile.cc changes, ported).
 #include "rt/rt_hooks.h"
 
+// Realtime build: the High Resolution Patch's map edges (tileEdgeClampView below).
+#include "db.h"
+#include "rt/game/game_trace.h"
+
 namespace fallout {
 
 typedef struct RightsideUpTableEntry {
@@ -536,6 +540,321 @@ void tileWindowRefresh()
     }
 }
 
+// Realtime build: the High Resolution Patch's map edges. Vanilla's scroll blockers stop the CENTRE
+// tile where a 640x480 view just reaches the end of the art; our 853 px wide view (768 on the Deck)
+// then shows a strip past it on both sides -- black void, unfinished map borders ("vidím za mapu",
+// 2026-10-27). The HRP fixed exactly that with one maps\<map>.edg per map (155 of them in
+// f2_res.dat): per elevation, the tiles at the left, top, right and bottom extremes of the area the
+// player may see. fallout2-ce never read them. Here the view is clamped into that area (centred on
+// it where it is narrower than the window -- ARTEMPLE is 704 px wide) and what still lies outside
+// it is painted black. f2_res.ini [MAPS] keeps the HRP's own switches: IGNORE_MAP_EDGES=1 drops the
+// clamp, EDGE_CLIPPING_ON=0 the black. No .edg (no HRP installed) = vanilla behaviour.
+//
+// File (big-endian ints): 'EDGE', version (1 or 2), then for elevations 0..2: the elevation number,
+// [version 2: a square rect (4) + a clip value (1) -- not used, sfall ignores them too], and one or
+// more rects of 4 tile numbers (left, top, right, bottom) -- a rect followed by the SAME elevation
+// number again is a further area of that elevation (maps made of separate parts, e.g. NCR1).
+#define TILE_EDGE_MAX_RECTS 8
+#define TILE_EDGE_MAGIC 0x45444745 // 'EDGE'
+
+typedef struct TileEdgeRect {
+    int left;
+    int top;
+    int right;
+    int bottom;
+} TileEdgeRect;
+
+static TileEdgeRect gTileEdges[ELEVATION_COUNT][TILE_EDGE_MAX_RECTS];
+static int gTileEdgeCount[ELEVATION_COUNT];
+static int gTileEdgeActive = 0;
+static char gTileEdgeMapName[sizeof(gMapHeader.name) + 1] = "\x01";
+static bool gTileEdgeConfigRead = false;
+static bool gTileEdgeClampOn = true;
+static bool gTileEdgeClipOn = true;
+static bool gTileEdgeClampDeferred = false;
+
+// fileReadInt32 does not report EOF, and the loader needs it (the list simply ends after elevation 2).
+static bool tileEdgeReadInt(File* stream, int* value)
+{
+    unsigned char b[4];
+    if (fileRead(b, 1, 4, stream) != 4) {
+        return false;
+    }
+    *value = (int)(((unsigned int)b[0] << 24) | ((unsigned int)b[1] << 16) | ((unsigned int)b[2] << 8) | b[3]);
+    return true;
+}
+
+static void tileEdgesLoad()
+{
+    if (!gTileEdgeConfigRead) {
+        gTileEdgeConfigRead = true;
+        Config config;
+        if (configInit(&config)) {
+            if (configRead(&config, "f2_res.ini", false)) {
+                bool value;
+                if (configGetBool(&config, "MAPS", "IGNORE_MAP_EDGES", &value)) {
+                    gTileEdgeClampOn = !value;
+                }
+                if (configGetBool(&config, "MAPS", "EDGE_CLIPPING_ON", &value)) {
+                    gTileEdgeClipOn = value;
+                }
+            }
+            configFree(&config);
+        }
+    }
+
+    char name[sizeof(gMapHeader.name) + 1];
+    strncpy(name, gMapHeader.name, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    char* dot = strchr(name, '.');
+    if (dot != nullptr) {
+        *dot = '\0';
+    }
+    if (compat_stricmp(name, gTileEdgeMapName) == 0) {
+        return;
+    }
+    strcpy(gTileEdgeMapName, name);
+    for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
+        gTileEdgeCount[elevation] = 0;
+    }
+    gTileEdgeActive = 0;
+    if (name[0] == '\0') {
+        return;
+    }
+
+    char path[COMPAT_MAX_PATH];
+    snprintf(path, sizeof(path), "maps\\%s.edg", name);
+    File* stream = fileOpen(path, "rb");
+    if (stream == nullptr) {
+        trace_event(TRACE_FLOW, "map-edges", "map=%s none", name);
+        return;
+    }
+
+    bool ok = true;
+    int magic;
+    int version = 0;
+    int tag = -1;
+    if (!tileEdgeReadInt(stream, &magic) || magic != TILE_EDGE_MAGIC
+        || !tileEdgeReadInt(stream, &version) || (version != 1 && version != 2)
+        || !tileEdgeReadInt(stream, &tag)) {
+        ok = false;
+    }
+    for (int elevation = 0; ok && elevation < ELEVATION_COUNT; elevation++) {
+        if (tag != elevation) {
+            ok = false;
+            break;
+        }
+        if (version == 2) {
+            int unused;
+            for (int index = 0; index < 5; index++) {
+                if (!tileEdgeReadInt(stream, &unused)) {
+                    ok = false;
+                }
+            }
+        }
+        while (ok) {
+            int t[4];
+            for (int index = 0; index < 4; index++) {
+                if (!tileEdgeReadInt(stream, &t[index]) || !tileIsValid(t[index])) {
+                    ok = false;
+                }
+            }
+            if (!ok) {
+                break;
+            }
+            // The HRP's "no edge" default is the whole 200x200 grid: nothing to clamp to.
+            bool whole = t[0] == 199 && t[1] == 0 && t[2] == 39800 && t[3] == 39999;
+            if (!whole && gTileEdgeCount[elevation] < TILE_EDGE_MAX_RECTS) {
+                TileEdgeRect* rect = &(gTileEdges[elevation][gTileEdgeCount[elevation]++]);
+                rect->left = t[0];
+                rect->top = t[1];
+                rect->right = t[2];
+                rect->bottom = t[3];
+            }
+            if (!tileEdgeReadInt(stream, &tag)) {
+                // The file ends after the last elevation's rects; anywhere else it is broken.
+                tag = -1;
+                if (elevation != ELEVATION_COUNT - 1) {
+                    ok = false;
+                }
+                break;
+            }
+            if (tag != elevation) {
+                break;
+            }
+        }
+    }
+    fileClose(stream);
+
+    if (!ok) {
+        for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
+            gTileEdgeCount[elevation] = 0;
+        }
+    }
+    trace_event(TRACE_FLOW, "map-edges", "map=%s ver=%d ok=%d rects=%d/%d/%d clamp=%d clip=%d", name, version, ok ? 1 : 0,
+        gTileEdgeCount[0], gTileEdgeCount[1], gTileEdgeCount[2], gTileEdgeClampOn ? 1 : 0, gTileEdgeClipOn ? 1 : 0);
+}
+
+// One edge rect in CURRENT window coordinates, half-open [left, right) x [top, bottom): the left
+// tile's left corner to the right tile's right corner (a hex is 32x16 px).
+static void tileEdgeScreenRect(const TileEdgeRect* edge, Rect* rect)
+{
+    int x;
+    int y;
+    tileToScreenXY(edge->left, &x, &y, gElevation);
+    rect->left = x;
+    tileToScreenXY(edge->top, &x, &y, gElevation);
+    rect->top = y;
+    tileToScreenXY(edge->right, &x, &y, gElevation);
+    rect->right = x + 32;
+    tileToScreenXY(edge->bottom, &x, &y, gElevation);
+    rect->bottom = y + 16;
+}
+
+// The active edge of this elevation in window coordinates, or false when it has none.
+static bool tileEdgeCurrentRect(Rect* rect)
+{
+    if (gElevation < 0 || gElevation >= ELEVATION_COUNT || gTileEdgeCount[gElevation] == 0) {
+        return false;
+    }
+    if (gTileEdgeActive >= gTileEdgeCount[gElevation]) {
+        gTileEdgeActive = 0;
+    }
+    tileEdgeScreenRect(&(gTileEdges[gElevation][gTileEdgeActive]), rect);
+    return true;
+}
+
+// Limits `shift` so a point at `pos` (inside [low, high] before the shift) stays inside after it.
+static int tileEdgeKeepVisible(int pos, int shift, int low, int high)
+{
+    if (pos < low || pos > high) {
+        return shift;
+    }
+    if (pos + shift < low) {
+        return low - pos;
+    }
+    if (pos + shift > high) {
+        return high - pos;
+    }
+    return shift;
+}
+
+// Shifts the view (both anchor pairs, like tile_set_center_offset) so it stays inside the current
+// map edge. Runs after every centring; continuous, so the realtime follow camera simply slides up
+// to the edge and stops there instead of stepping.
+static void tileEdgeClampView()
+{
+    tileEdgesLoad();
+    if (!gTileEdgeClampOn || gElevation < 0 || gElevation >= ELEVATION_COUNT || gTileEdgeCount[gElevation] == 0) {
+        return;
+    }
+
+    // A map made of separate parts: the part holding the window's centre, else the nearest one.
+    int cx = gTileWindowWidth / 2;
+    int cy = gTileWindowHeight / 2;
+    int best = -1;
+    int bestDistance = 0;
+    for (int index = 0; index < gTileEdgeCount[gElevation]; index++) {
+        Rect r;
+        tileEdgeScreenRect(&(gTileEdges[gElevation][index]), &r);
+        int dx = cx < r.left ? r.left - cx : (cx >= r.right ? cx - r.right + 1 : 0);
+        int dy = cy < r.top ? r.top - cy : (cy >= r.bottom ? cy - r.bottom + 1 : 0);
+        if (best == -1 || dx + dy < bestDistance) {
+            best = index;
+            bestDistance = dx + dy;
+        }
+    }
+    gTileEdgeActive = best;
+
+    Rect r;
+    tileEdgeScreenRect(&(gTileEdges[gElevation][best]), &r);
+
+    int shiftX = 0;
+    if (r.right - r.left <= gTileWindowWidth) {
+        shiftX = (gTileWindowWidth - (r.right - r.left)) / 2 - r.left;
+    } else if (r.left > 0) {
+        shiftX = -r.left;
+    } else if (r.right < gTileWindowWidth) {
+        shiftX = gTileWindowWidth - r.right;
+    }
+
+    int shiftY = 0;
+    if (r.bottom - r.top <= gTileWindowHeight) {
+        shiftY = (gTileWindowHeight - (r.bottom - r.top)) / 2 - r.top;
+    } else if (r.top > 0) {
+        shiftY = -r.top;
+    } else if (r.bottom < gTileWindowHeight) {
+        shiftY = gTileWindowHeight - r.bottom;
+    }
+
+    // The edge must never push the dude off the screen: where he stands past it (the HRP areas do
+    // not always cover every walkable hex -- a teleport put him beyond KLAGRAZ's tree line), the
+    // shift stops while he is still 48 px in (72 at the top, his sprite). Only when he was on screen before
+    // the shift, so a script's camera aimed elsewhere keeps its framing.
+    if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
+        int x;
+        int y;
+        tileToScreenXY(gDude->tile, &x, &y, gElevation);
+        x += 16 + gDude->x;
+        y += 8 + gDude->y;
+        shiftX = tileEdgeKeepVisible(x, shiftX, 48, gTileWindowWidth - 48);
+        shiftY = tileEdgeKeepVisible(y, shiftY, 72, gTileWindowHeight - 24);
+    }
+
+    _tile_offx += shiftX;
+    _tile_offy += shiftY;
+    _square_offx += shiftX;
+    _square_offy += shiftY;
+}
+
+// Paints what lies outside the current map edge black (EDGE_CLIPPING_ON), after the map is drawn
+// into `rect` and before the overlays.
+static void tileEdgeClip(const Rect* rect)
+{
+    if (!gTileEdgeClipOn) {
+        return;
+    }
+    Rect edge;
+    if (!tileEdgeCurrentRect(&edge)) {
+        return;
+    }
+
+    // The dude past the edge (see tileEdgeClampView) walks in the plain map, never in the black.
+    if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
+        int x;
+        int y;
+        tileToScreenXY(gDude->tile, &x, &y, gElevation);
+        if (x + 32 <= edge.left || x >= edge.right || y + 16 <= edge.top || y >= edge.bottom) {
+            return;
+        }
+    }
+
+    // `rect` is inclusive, `edge` half-open.
+    int left = rect->left;
+    int right = rect->right + 1;
+    int top = rect->top;
+    int bottom = rect->bottom + 1;
+
+    int bandTop = std::min(std::max(edge.top, top), bottom);
+    int bandBottom = std::max(std::min(edge.bottom, bottom), bandTop);
+    if (bandTop > top) {
+        bufferFill(gTileWindowBuffer + top * gTileWindowPitch + left, right - left, bandTop - top, gTileWindowPitch, 0);
+    }
+    if (bottom > bandBottom) {
+        bufferFill(gTileWindowBuffer + bandBottom * gTileWindowPitch + left, right - left, bottom - bandBottom, gTileWindowPitch, 0);
+    }
+    if (bandBottom > bandTop) {
+        int innerLeft = std::min(std::max(edge.left, left), right);
+        int innerRight = std::max(std::min(edge.right, right), innerLeft);
+        if (innerLeft > left) {
+            bufferFill(gTileWindowBuffer + bandTop * gTileWindowPitch + left, innerLeft - left, bandBottom - bandTop, gTileWindowPitch, 0);
+        }
+        if (right > innerRight) {
+            bufferFill(gTileWindowBuffer + bandTop * gTileWindowPitch + innerRight, right - innerRight, bandBottom - bandTop, gTileWindowPitch, 0);
+        }
+    }
+}
+
 // 0x4B12F8
 int tileSetCenter(int tile, int flags)
 {
@@ -600,6 +919,12 @@ int tileSetCenter(int tile, int flags)
         _square_offx -= 16;
     }
 
+    // Realtime build: keep the view inside the HRP map edge (tile_set_center_offset clamps itself,
+    // after its pixel shift).
+    if (!gTileEdgeClampDeferred) {
+        tileEdgeClampView();
+    }
+
     gCenterTile = tile;
 
     if ((flags & TILE_SET_CENTER_REFRESH_WINDOW) != 0) {
@@ -619,7 +944,9 @@ int tileSetCenter(int tile, int flags)
 int tile_set_center_offset(int tile, int flags, int offsetX, int offsetY)
 {
     // Center without refreshing yet -- refreshed once below, after the pixel shift.
+    gTileEdgeClampDeferred = true;
     int rc = tileSetCenter(tile, flags & ~TILE_SET_CENTER_REFRESH_WINDOW);
+    gTileEdgeClampDeferred = false;
     if (rc != 0) {
         return rc;
     }
@@ -629,11 +956,47 @@ int tile_set_center_offset(int tile, int flags, int offsetX, int offsetY)
     _square_offx += offsetX;
     _square_offy += offsetY;
 
+    // The map edge clamps the FINAL view, shift included -- clamping before the shift would let the
+    // shift push the view back out (and a clamp of a clamp is not smooth).
+    tileEdgeClampView();
+
     if ((flags & TILE_SET_CENTER_REFRESH_WINDOW) != 0) {
         tileWindowRefresh();
     }
 
     return 0;
+}
+
+// A snapshot of the view (centre + both anchor pairs) for mapScroll: a scroll the map edge stopped
+// must leave the view exactly as it was, follow-camera pixel shift included.
+static int gTileViewSaved[9];
+
+void tile_view_save()
+{
+    int* s = gTileViewSaved;
+    s[0] = gCenterTile;
+    s[1] = _tile_x;
+    s[2] = _tile_y;
+    s[3] = _tile_offx;
+    s[4] = _tile_offy;
+    s[5] = _square_x;
+    s[6] = _square_y;
+    s[7] = _square_offx;
+    s[8] = _square_offy;
+}
+
+void tile_view_restore()
+{
+    const int* s = gTileViewSaved;
+    gCenterTile = s[0];
+    _tile_x = s[1];
+    _tile_y = s[2];
+    _tile_offx = s[3];
+    _tile_offy = s[4];
+    _square_x = s[5];
+    _square_y = s[6];
+    _square_offx = s[7];
+    _square_offy = s[8];
 }
 
 // Debug overlay: radius (in hex tiles) of a red ring drawn around gDude, or 0 for off. Used to
@@ -785,6 +1148,7 @@ static void tileRefreshGame(Rect* rect, int elevation)
     _obj_render_pre_roof(&rectToUpdate, elevation);
     tileRenderRoofsInRect(&rectToUpdate, elevation);
     _obj_render_post_roof(&rectToUpdate, elevation);
+    tileEdgeClip(&rectToUpdate);
     tile_render_debug_ring(&rectToUpdate, elevation);
     if (tile_overlay != nullptr) {
         tile_overlay(&rectToUpdate, elevation);

@@ -1,0 +1,15 @@
+# F2 map edges: KLAGRAZ (Torr's pasture) is wider than the view; with the dude at the left end of its
+# HRP edge (tile 19151) the camera stops at the edge instead of showing past it (shot 1); walked PAST the
+# edge (beyond the tree line) the dude must stay on screen and out of the black (shot 2). Screenshots:
+# build/Release/scr*.bmp.
+name screen-edges-pasture
+map KLAGRAZ.MAP
+seed 1
+duration 8
+dude tile 19145 rot 2
+
+shot 1500
+walkto 2000 18555
+shot 6500
+
+expect map-edges\] map=KLAGRAZ ver=1 ok=1 rects=1/0/0

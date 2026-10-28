@@ -638,8 +638,29 @@ int mapScroll(int dx, int dy)
         return -1;
     }
 
+    // Realtime build: the HRP map edge (tile.cc) clamps the view, so the new centre may move the
+    // picture by less than the step the strip blit below assumes, or not at all. Measured on the old
+    // centre tile: not moved = a wall, undone like a scroll blocker; partly moved = full redraw.
+    int oldCenterTile = gCenterTile;
+    int beforeX;
+    int beforeY;
+    tileToScreenXY(oldCenterTile, &beforeX, &beforeY, gElevation);
+    tile_view_save();
+
     if (tileSetCenter(newCenterTile, 0) == -1) {
         return -1;
+    }
+
+    int afterX;
+    int afterY;
+    tileToScreenXY(oldCenterTile, &afterX, &afterY, gElevation);
+    if (beforeX - afterX != screenDx || beforeY - afterY != screenDy) {
+        if (beforeX == afterX && beforeY == afterY) {
+            tile_view_restore();
+            return -1;
+        }
+        tileWindowRefresh();
+        return 0;
     }
 
     Rect r1;
