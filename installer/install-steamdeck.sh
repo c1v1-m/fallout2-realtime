@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# Fallout 2 Realtime -- installer for the STEAM version on a Steam Deck (or any Linux with Steam).
+#
+# Does what Fallout2-Realtime-Setup.exe does on Windows. Steam's Play button runs
+# Fallout2Launcher.exe (through Proton here), so that file is backed up as
+# Fallout2Launcher.original.exe and the game takes its place: Play then starts Fallout 2 Realtime,
+# in Game Mode too -- no non-Steam shortcut, no Proton settings.
+#
+#   bash install-steamdeck.sh                        install (or update)
+#   bash install-steamdeck.sh uninstall              put Steam's launcher back, remove our files
+#   bash install-steamdeck.sh install --target DIR   a Fallout 2 folder that was not found by itself
+#
+# fallout2-realtime.exe must sit next to this script. BEFORE anything is written, fallout2.cfg and the
+# saved games are copied into Fallout2-Realtime-backup/<date time>/ -- the game writes both while you
+# play, and they are the same files the original game uses. The backups stay on uninstall.
+# Steam's "Verify integrity of game files" also restores the original launcher.
+
+set -u
+
+VERSION="0.1.0" # kept equal to REALTIME_VERSION (src/rt/rt_version.h)
+MARKER="Fallout 2 Realtime" # RT_GAME_TITLE: every build of the game carries it; Steam's launcher does not
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GAME_EXE="$HERE/fallout2-realtime.exe"
+
+pause() {
+    # Started by a double-click the terminal would vanish with the result; keep it readable.
+    if [ -t 0 ]; then
+        echo
+        read -r -p "Press Enter to close..." _
+    fi
+}
+
+fail() {
+    echo "FAILED: $*"
+    pause
+    exit 1
+}
+
+# Linux file names are case-sensitive and the game's files are not (Proton resolves either way):
+# find a name in one folder whatever its case. -type is optional (f or d).
+ci_find() {
+    local dir="$1" name="$2" type="${3:-}"
+    if [ -n "$type" ]; then
+        find "$dir" -maxdepth 1 -type "$type" -iname "$name" -print -quit 2>/dev/null
+    else
+        find "$dir" -maxdepth 1 -iname "$name" -print -quit 2>/dev/null
+    fi
+}
+
+vdf_values() { # every "key" "value" pair's value for one key, from a Steam .vdf/.acf
+    grep -o "\"$2\"[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null | sed "s/^\"$2\"[[:space:]]*\"\(.*\)\"$/\1/" | sed 's/\\\\/\\/g'
+}
+
+find_fallout() {
+    local roots=(
+        "$HOME/.local/share/Steam"
+        "$HOME/.steam/steam"
+        "$HOME/.steam/root"
+        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+    )
+    local libraries=() root lib seen known dir acf installdir
+    for root in "${roots[@]}"; do
+        [ -d "$root/steamapps" ] || continue
+        libraries+=("$root")
+        while IFS= read -r lib; do
+            [ -n "$lib" ] && libraries+=("$lib")
+        done < <(vdf_values "$root/steamapps/libraryfolders.vdf" path)
+    done
+
+    seen=()
+    for lib in "${libraries[@]}"; do
+        lib="$(readlink -f "$lib" 2>/dev/null || echo "$lib")"
+        for known in "${seen[@]+"${seen[@]}"}"; do
+            [ "$known" = "$lib" ] && continue 2
+        done
+        seen+=("$lib")
+
+        acf="$lib/steamapps/appmanifest_38410.acf"
+        [ -f "$acf" ] || continue
+        installdir="$(vdf_values "$acf" installdir | head -n 1)"
+        dir="$lib/steamapps/common/${installdir:-Fallout 2}"
+        if [ -n "$(ci_find "$dir" master.dat f)" ]; then
+            echo "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The saved games: <master_patches>/SAVEGAME, master_patches from fallout2.cfg's [system] section
+# ("data" when it is not there), relative to the game folder; every part matched whatever its case.
+savegame_dir() {
+    local target="$1" cfg patches dir part found
+    cfg="$(ci_find "$target" fallout2.cfg f)"
+    patches=""
+    if [ -n "$cfg" ]; then
+        patches="$(tr -d '\r' < "$cfg" | awk -F= '
+            /^[[:space:]]*\[/ { insys = (tolower($0) ~ /^[[:space:]]*\[system\]/) ; next }
+            insys && tolower($1) ~ /^[[:space:]]*master_patches[[:space:]]*$/ { v = $2; sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); print v }' | tail -n 1)"
+    fi
+    [ -n "$patches" ] || patches="data"
+    case "$patches" in
+        *:*) return 1 ;; # a Windows drive path: not something to follow from here
+    esac
+    dir="$target"
+    for part in $(echo "$patches/SAVEGAME" | tr '\\' '/' | tr '/' ' '); do
+        found="$(ci_find "$dir" "$part" d)"
+        [ -n "$found" ] || return 1
+        dir="$found"
+    done
+    echo "$dir"
+}
+
+ACTION="install"
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        install|uninstall) ACTION="$1" ;;
+        --target) TARGET="${2:-}"; shift ;;
+        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        *) fail "unknown argument: $1 (try --help)" ;;
+    esac
+    shift
+done
+
+echo "Fallout 2 Realtime $VERSION -- Steam installer for Steam Deck / Linux"
+echo
+
+if [ -z "$TARGET" ]; then
+    TARGET="$(find_fallout)" || fail "the Steam version of Fallout 2 was not found. Is it installed? If it is, run: bash install-steamdeck.sh $ACTION --target \"/path/to/Fallout 2\""
+    echo "Found the Steam version of Fallout 2 in $TARGET"
+fi
+TARGET="${TARGET%/}"
+[ -d "$TARGET" ] || fail "$TARGET is not a folder."
+if [ -z "$(ci_find "$TARGET" master.dat f)" ] || [ -z "$(ci_find "$TARGET" critter.dat f)" ]; then
+    fail "$TARGET is not a Fallout 2 folder (MASTER.DAT and CRITTER.DAT are missing)."
+fi
+
+LAUNCHER="$(ci_find "$TARGET" fallout2launcher.exe f)"
+BACKUP="$(ci_find "$TARGET" fallout2launcher.original.exe f)"
+MANIFEST="$TARGET/Fallout2-Realtime.txt"
+OURS=0
+if [ -n "$LAUNCHER" ] && grep -qaF "$MARKER" "$LAUNCHER"; then
+    OURS=1
+fi
+
+if [ "$ACTION" = "install" ]; then
+    [ -f "$GAME_EXE" ] || fail "fallout2-realtime.exe must be in the same folder as this script ($HERE)."
+    echo "Installing into $TARGET"
+
+    # First, before a single file of the game is touched: a backup that fails stops everything.
+    CFG="$(ci_find "$TARGET" fallout2.cfg f)"
+    SAVES="$(savegame_dir "$TARGET" || true)"
+    BACKUP_DIR=""
+    if [ -n "$CFG" ] || [ -n "$SAVES" ]; then
+        BACKUP_DIR="Fallout2-Realtime-backup/$(date '+%Y-%m-%d_%H%M%S')"
+        mkdir -p "$TARGET/$BACKUP_DIR" || fail "could not create the backup folder $BACKUP_DIR. Nothing was installed."
+        if [ -n "$CFG" ]; then
+            cp -p "$CFG" "$TARGET/$BACKUP_DIR/fallout2.cfg" || fail "could not back up fallout2.cfg. Nothing was installed."
+            echo "  Backed up fallout2.cfg."
+        fi
+        if [ -n "$SAVES" ]; then
+            cp -rp "$SAVES" "$TARGET/$BACKUP_DIR/SAVEGAME" || fail "could not back up the saved games. Nothing was installed."
+            echo "  Backed up the saved games: $(find "$TARGET/$BACKUP_DIR/SAVEGAME" -type f | wc -l | tr -d ' ') files, $(du -sh "$TARGET/$BACKUP_DIR/SAVEGAME" | cut -f1)."
+        fi
+        echo "  The backup is in $BACKUP_DIR."
+    else
+        echo "  No fallout2.cfg and no saved games yet: nothing to back up."
+    fi
+
+    if [ -n "$LAUNCHER" ] || [ -n "$BACKUP" ]; then
+        if [ -z "$LAUNCHER" ]; then
+            LAUNCHER="$TARGET/Fallout2Launcher.exe"
+        fi
+        if [ -f "$LAUNCHER" ] && [ "$OURS" = 0 ]; then
+            # Steam's launcher -- maybe a fresh one after "Verify integrity", so it replaces any older backup.
+            cp -f "$LAUNCHER" "$TARGET/Fallout2Launcher.original.exe" || fail "could not back up Fallout2Launcher.exe."
+            echo "  Backed up Steam's Fallout2Launcher.exe as Fallout2Launcher.original.exe."
+        elif [ -z "$BACKUP" ]; then
+            echo "  Note: there is no backup of Steam's original launcher. To go back to the original game,"
+            echo "  use Steam: Fallout 2 > Properties > Installed Files > Verify integrity of game files."
+        fi
+        # Beside it first, then over it: a failure never leaves half an exe where Play points.
+        cp -f "$GAME_EXE" "$LAUNCHER.new" && mv -f "$LAUNCHER.new" "$LAUNCHER" || { rm -f "$LAUNCHER.new"; fail "could not write Fallout2Launcher.exe. Is the game running? Close it and try again."; }
+        if [ "$OURS" = 1 ]; then echo "  Updated the game (Fallout2Launcher.exe)."; else echo "  Installed the game as Fallout2Launcher.exe."; fi
+        MODE="steam"
+        FILES="Fallout2Launcher.exe (the game; Steam's original is Fallout2Launcher.original.exe)"
+    else
+        cp -f "$GAME_EXE" "$TARGET/fallout2-realtime.exe" || fail "could not write fallout2-realtime.exe."
+        echo "  Installed fallout2-realtime.exe."
+        MODE="plain"
+        FILES="fallout2-realtime.exe"
+    fi
+
+    {
+        printf 'Fallout 2 Realtime\r\nversion=%s\r\nmode=%s\r\ninstalled=%s\r\nbackup=%s\r\n\r\n' "$VERSION" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$BACKUP_DIR"
+        printf 'Files installed by install-steamdeck.sh:\r\n%s\r\nFallout2-Realtime.txt (this file)\r\n\r\n' "$FILES"
+        printf 'Before installing, fallout2.cfg and the saved games were copied into\r\nFallout2-Realtime-backup/<date time>/ (every install and update makes a new one).\r\n'
+        printf 'To uninstall: bash install-steamdeck.sh uninstall\r\nThe backups stay where they are.\r\n'
+    } > "$MANIFEST" || fail "could not write Fallout2-Realtime.txt."
+
+    echo
+    if [ "$MODE" = "steam" ]; then
+        echo "Done. One more step before you play, in Game Mode:"
+        echo "  Fallout 2's page > controller settings > Templates > \"Gamepad with Mouse Trackpad\"."
+        echo "Steam's default layout for Fallout 2 turns the buttons into keyboard keys, and the game"
+        echo "then never sees a controller. After that, press Play on Fallout 2 to start Fallout 2 Realtime."
+    else
+        echo "Done. This is not the Steam version: start fallout2-realtime.exe from that folder with Proton or Wine."
+    fi
+    pause
+    exit 0
+fi
+
+# --- uninstall ---
+if [ "$OURS" = 0 ] && [ -z "$BACKUP" ] && [ ! -f "$TARGET/fallout2-realtime.exe" ] && [ ! -f "$MANIFEST" ]; then
+    echo "Fallout 2 Realtime is not installed in $TARGET. Nothing to do."
+    pause
+    exit 0
+fi
+
+echo "Uninstalling from $TARGET"
+if [ "$OURS" = 1 ]; then
+    if [ -n "$BACKUP" ]; then
+        mv -f "$BACKUP" "$LAUNCHER" || fail "could not restore Steam's Fallout2Launcher.exe. Is the game running? Close it and try again."
+        echo "  Restored Steam's original Fallout2Launcher.exe."
+    else
+        echo "  The backup of Steam's launcher is missing, so Play still starts Fallout 2 Realtime."
+        echo "  To get the original back: Fallout 2 > Properties > Installed Files > Verify integrity of game files."
+    fi
+elif [ -n "$BACKUP" ]; then
+    rm -f "$BACKUP" && echo "  Removed the old launcher backup (Steam had already restored its launcher)."
+fi
+[ -f "$TARGET/fallout2-realtime.exe" ] && rm -f "$TARGET/fallout2-realtime.exe" && echo "  Removed fallout2-realtime.exe."
+[ -f "$MANIFEST" ] && rm -f "$MANIFEST" && echo "  Removed Fallout2-Realtime.txt."
+if [ -d "$TARGET/Fallout2-Realtime-backup" ]; then
+    echo "  Your backups of fallout2.cfg and the saved games stay in Fallout2-Realtime-backup."
+fi
+echo
+echo "Done. fallout2.cfg and the saved games were left as they are now."
+pause
+exit 0

@@ -354,6 +354,32 @@ if(WIN32)
     )
 endif()
 
+# Fallout 2 Realtime's Windows installer: ONE exe carrying the game as a resource, which installs it into an
+# existing Fallout 2 (on Steam it takes Fallout2Launcher.exe's place, so Steam's Play button starts the
+# game) after backing up fallout2.cfg and the saved games -- see installer/setup.cc.
+#   cmake --build build --config Release --target fallout2-realtime-setup
+# The payload .rc is generated per configuration because it names the game exe of THAT build.
+if(WIN32)
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/setup_payload_$<CONFIG>.rc" CONTENT
+"1 ICON \"${CMAKE_SOURCE_DIR}/os/windows/fallout2-ce.ico\"
+101 RCDATA \"$<TARGET_FILE:${EXECUTABLE_NAME}>\"
+")
+    add_executable(fallout2-realtime-setup WIN32
+        "installer/setup.cc"
+        "installer/setup.manifest"
+        "${CMAKE_CURRENT_BINARY_DIR}/setup_payload_$<CONFIG>.rc"
+    )
+    target_include_directories(fallout2-realtime-setup PRIVATE "src")
+    target_compile_definitions(fallout2-realtime-setup PRIVATE
+        UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(fallout2-realtime-setup comctl32 ole32 shell32 advapi32 uuid)
+    set_target_properties(fallout2-realtime-setup PROPERTIES OUTPUT_NAME "Fallout2-Realtime-Setup")
+    # The payload is the game exe: build it first, and re-pack whenever it changes.
+    add_dependencies(fallout2-realtime-setup ${EXECUTABLE_NAME})
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/setup_payload_$<CONFIG>.rc" PROPERTIES
+        OBJECT_DEPENDS "$<TARGET_FILE:${EXECUTABLE_NAME}>")
+endif()
+
 # Emit a PDB even for Release so the game_trace crash handler can resolve symbolic
 # stack frames (function + file:line). /Zi adds debug info, /DEBUG generates the PDB,
 # and /OPT:REF,ICF restore the size optimizations that /DEBUG otherwise disables.
