@@ -153,8 +153,12 @@ namespace fallout {
 //   mapgo <ms> <MAP.MAP> [tile] [elev] (Fallout 2) a map change the way a script's load_map asks for one
 //                                      (mapSetTransition): mid-fight it is a SCRIPTED exit, as the stairs
 //                                      are; tile -1 = the map's own entrance. ⚠️ Not DESERT1: map index 0
-//                                      means the world map to mapSetTransition
+//                                      means the world map to mapSetTransition -- `mapgo <ms> WORLDMAP`
+//                                      opens the world map that way on purpose
 //   clock <ms> <hours>                 game time jumps that many hours (set_game_time) -- for game-time windows
+//   area <ms> <area> [state]           (Fallout 2) a world map place shown (state 1, the default) or hidden
+//                                      (0), as a script's mark_area_known does (wmAreaSetVisibleState)
+//   wmat <ms> <area>                   (Fallout 2) the party stands on that world map place (wmTeleportToArea)
 //
 //   buttons: a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown
 //            dpleft dpright, or A B X Y BACK START L3 R3 LB RB UP DOWN LEFT RIGHT
@@ -306,6 +310,8 @@ enum {
     AT_STEP_SHOT, // a screenshot of whatever is up, a modal screen included
     AT_STEP_MAPGO, // text = map file, index = tile (-1 = its entrance), value = elevation
     AT_STEP_CLOCK, // index = game hours added
+    AT_STEP_AREA, // index = world map area, value = its CityState
+    AT_STEP_WMAT, // index = world map area the party is put on
 };
 
 enum {
@@ -589,7 +595,9 @@ static bool at_parse_step(char** tok, int n)
     bool shot = strcmp(tok[0], "shot") == 0;
     bool mapgo = strcmp(tok[0], "mapgo") == 0;
     bool clock = strcmp(tok[0], "clock") == 0;
-    if (!button && !tap && !axis && !open && !note && !walkto && !talk && !shot && !mapgo && !clock) {
+    bool area = strcmp(tok[0], "area") == 0;
+    bool wmat = strcmp(tok[0], "wmat") == 0;
+    if (!button && !tap && !axis && !open && !note && !walkto && !talk && !shot && !mapgo && !clock && !area && !wmat) {
         return false;
     }
     if (shot && n >= 2) {
@@ -619,6 +627,14 @@ static bool at_parse_step(char** tok, int n)
     }
     if (clock) {
         at_add_step(ms, AT_STEP_CLOCK, atoi(tok[2]), 0);
+        return true;
+    }
+    if (area) {
+        at_add_step(ms, AT_STEP_AREA, atoi(tok[2]), n >= 4 ? atoi(tok[3]) : 1);
+        return true;
+    }
+    if (wmat) {
+        at_add_step(ms, AT_STEP_WMAT, atoi(tok[2]), 0);
         return true;
     }
     if (button || tap) {
@@ -1518,9 +1534,10 @@ static void at_tl_bk()
             // mapSetTransition arms combat_rt's scripted exit, exactly as the stairs or a script's load_map do.
             char name[64];
             SDL_strlcpy(name, st->text, sizeof(name)); // wmMapMatchNameToIdx lower-cases its argument in place
-            int map = wmMapMatchNameToIdx(name);
+            bool worldmap = SDL_strcasecmp(name, "WORLDMAP") == 0;
+            int map = worldmap ? 0 : wmMapMatchNameToIdx(name);
             int rc = -1;
-            if (map > 0) { // 0 is DESERT1, which mapSetTransition reads as "the world map"
+            if (map > 0 || worldmap) { // 0 is DESERT1, which mapSetTransition reads as "the world map"
                 MapTransition transition;
                 memset(&transition, 0, sizeof(transition));
                 transition.map = map;
@@ -1546,6 +1563,24 @@ static void at_tl_bk()
             set_game_time((int)(before + (unsigned int)st->index * GAME_TIME_TICKS_PER_HOUR));
             trace_event(TRACE_FLOW, "autotest", "clock t=%d hours=%d game=%u->%u", t, st->index, before,
                 (unsigned int)game_time());
+            break;
+        }
+        case AT_STEP_AREA: {
+#if FALLOUT_RT_GAME == 2
+            bool ok = wmAreaSetVisibleState(st->index, st->value, true);
+            trace_event(TRACE_FLOW, "autotest", "area t=%d area=%d state=%d ok=%d", t, st->index, st->value, ok ? 1 : 0);
+#else
+            trace_event(TRACE_WARN, "autotest", "area t=%d not in this game", t);
+#endif
+            break;
+        }
+        case AT_STEP_WMAT: {
+#if FALLOUT_RT_GAME == 2
+            int rc = wmTeleportToArea(st->index);
+            trace_event(TRACE_FLOW, "autotest", "wmat t=%d area=%d rc=%d", t, st->index, rc);
+#else
+            trace_event(TRACE_WARN, "autotest", "wmat t=%d not in this game", t);
+#endif
             break;
         }
         }

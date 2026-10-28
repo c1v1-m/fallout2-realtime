@@ -53,6 +53,7 @@
 #include <SDL.h>
 
 // Realtime / controller (fallout1-ce's worldmap.cc changes, rebuilt for this world map).
+#include "rt/game/game_trace.h"
 #include "rt/game/gamepad_ui.h"
 #include "rt/rt_hooks.h"
 
@@ -2983,11 +2984,16 @@ void wmWorldMap()
 // The same rules as fallout1-ce's pad world map, on Fallout 2's own screen: the LEFT STICK steers the
 // party, the D-pad walks the list of known places on the right, A travels to the picked place -- or
 // enters it when the party is standing on it -- and a pointer the player has MOVED onto something
-// (the right stick, a trackpad, a mouse) wins over the list. The town map: the D-pad / left stick pick
-// an entrance (its name lit), A enters, B goes back to the world.
+// (the right stick, a trackpad, a mouse) wins over the list. Letting go of the left stick next to a
+// place pulls the party into it (wmPadSteer), because the small places have no list entry. The town
+// map: the D-pad / left stick pick an entrance (its name lit), A enters, B goes back to the world.
 
 // How far ahead of the party a left-stick steer projects its travel target.
 #define WM_STICK_TRAVEL_LOOKAHEAD 50
+
+// How far past the edge of a place's circle a let-go stick still pulls the party into it (world map
+// pixels). A small place's circle is only 12 px wide.
+#define WM_STICK_PLACE_SLACK 6
 
 // The world map reads the pad itself, so the gameplay shortcut layer stands down while it is up --
 // SCOPED, because wmWorldMapFunc returns from several places and a leaked self_nav kills the pad.
@@ -3062,6 +3068,10 @@ static int wmPadUpdate(int* keyCode, int mouseX, int mouseY)
     static bool wasWalking = false;
     static unsigned int lastStep = 0;
 
+    // Where the pointer was on the last frame the party stood still, i.e. when it set off.
+    static int standMouseX = -1;
+    static int standMouseY = -1;
+
     // Re-assert every frame: a modal opened from here may have cleared it on its own way out.
     gamepad_ui_set_self_nav(true);
     gamepad_ui_set_self_nav_cursor(true);
@@ -3104,8 +3114,21 @@ static int wmPadUpdate(int* keyCode, int mouseX, int mouseY)
                 break;
             }
         }
+
+        // A place with no list entry (the small ones): a pointer left where it was when the party set
+        // off no longer counts as pointed, so A enters the place instead of walking off to it. One the
+        // player moved on the way still wins.
+        if (wm_pad_label == -1 && wmGenData.currentAreaId != -1
+            && abs(mouseX - standMouseX) + abs(mouseY - standMouseY) <= 3) {
+            wm_park_x = mouseX;
+            wm_park_y = mouseY;
+        }
     }
     wasWalking = wmGenData.isWalking;
+    if (!wmGenData.isWalking) {
+        standMouseX = mouseX;
+        standMouseY = mouseY;
+    }
 
     int dir = 0;
     bool repeat = getTicksSince(lastStep) >= 180;
@@ -3199,24 +3222,172 @@ static int wmPadUpdate(int* keyCode, int mouseX, int mouseY)
     return action;
 }
 
-// Left stick steers travel like character movement: a destination a short way ahead of the party in
-// the stick's direction, re-aimed every frame it is held. `armed`: the stick must read neutral once
-// before it steers, so a stick held from the map just left does not walk the party off at once.
-static void wmPadSteer(bool* armed)
+// The pad's left stick on the world map, one per visit (see wmPadSteer).
+struct WmPadStick {
+    // The stick must read neutral once before it steers, so a stick held from the map just left does
+    // not walk the party off at once.
+    bool armed = false;
+
+    // It steered on the previous frame: letting go is the moment a place nearby pulls the party in.
+    bool steering = false;
+
+    // The place the party set off from -- by the stick, A or the pointer -- until it is clear of it:
+    // letting go on the way out must not pull it back in. -1 = none.
+    int leaving = -1;
+
+    // The last steer target. The pull looks only at a coast still headed there, not at a journey A
+    // has just started.
+    int targetX = 0;
+    int targetY = 0;
+
+    // The input epoch of the last steer. A modal in between (an encounter's yes / no box, answered
+    // with the stick let go) is no let-go: it must not pull the party onto the encounter's circle.
+    unsigned int epoch = 0;
+};
+
+// The centre of place `areaIdx`'s circle in world position coordinates -- where wmPadTravelToArea
+// walks to -- and how far around it the pull of a let-go stick reaches.
+static void wmPadPlaceCircle(int areaIdx, float* cx, float* cy, float* reach)
 {
+    CityInfo* city = &(wmAreaInfoList[areaIdx]);
+    CitySizeDescription* citySizeDescription = &(wmSphereData[city->size]);
+    *cx = (float)(city->x + citySizeDescription->frmImage.getWidth() / 2 - WM_VIEW_X);
+    *cy = (float)(city->y + citySizeDescription->frmImage.getHeight() / 2 - WM_VIEW_Y);
+    *reach = citySizeDescription->frmImage.getWidth() / 2.0f + WM_STICK_PLACE_SLACK;
+}
+
+// A place whose circle is drawn on the map -- the same test as the city pass of the map render.
+static bool wmPadPlaceShown(int areaIdx)
+{
+    int state = wmAreaInfoList[areaIdx].state;
+    return state != CITY_STATE_UNKNOWN && state != CITY_STATE_INVISIBLE;
+}
+
+// Is the party still at place `areaIdx`: inside the square wmMatchWorldPosToArea matches it on (a
+// large place's corners lie outside the circle), or within the pull's reach around its centre?
+static bool wmPadPartyAtPlace(int areaIdx)
+{
+    CityInfo* city = &(wmAreaInfoList[areaIdx]);
+    CitySizeDescription* citySizeDescription = &(wmSphereData[city->size]);
+    int x = wmGenData.worldPosX + WM_VIEW_X;
+    int y = wmGenData.worldPosY + WM_VIEW_Y;
+    if (x >= city->x && y >= city->y
+        && x <= city->x + citySizeDescription->frmImage.getWidth()
+        && y <= city->y + citySizeDescription->frmImage.getHeight()) {
+        return true;
+    }
+
+    float cx;
+    float cy;
+    float reach;
+    wmPadPlaceCircle(areaIdx, &cx, &cy, &reach);
+    float dx = wmGenData.worldPosX - cx;
+    float dy = wmGenData.worldPosY - cy;
+    return dx * dx + dy * dy <= reach * reach;
+}
+
+// The shown place the party's coast runs into: the line from the party to its walk destination (the
+// last steer target, WM_STICK_TRAVEL_LOOKAHEAD ahead) passes within its reach. The first one along
+// the way wins, then the closer one. `skip` is the place being left. -1 = none.
+static int wmPadPlaceOnCoast(int skip)
+{
+    float x0 = (float)wmGenData.worldPosX;
+    float y0 = (float)wmGenData.worldPosY;
+    float dx = (float)(wmGenData.walkDestinationX - wmGenData.worldPosX);
+    float dy = (float)(wmGenData.walkDestinationY - wmGenData.worldPosY);
+    float len2 = dx * dx + dy * dy;
+
+    int best = -1;
+    float bestT = 0.0f;
+    float bestDist2 = 0.0f;
+    for (int index = 0; index < wmMaxAreaNum; index++) {
+        if (index == skip || !wmPadPlaceShown(index)) {
+            continue;
+        }
+
+        float cx;
+        float cy;
+        float reach;
+        wmPadPlaceCircle(index, &cx, &cy, &reach);
+
+        // The point of the coast closest to the circle's centre.
+        float t = 0.0f;
+        if (len2 > 0.0f) {
+            t = ((cx - x0) * dx + (cy - y0) * dy) / len2;
+            t = std::max(0.0f, std::min(t, 1.0f));
+        }
+        float px = x0 + t * dx - cx;
+        float py = y0 + t * dy - cy;
+        float dist2 = px * px + py * py;
+        if (dist2 > reach * reach) {
+            continue;
+        }
+
+        if (best == -1 || t < bestT || (t == bestT && dist2 < bestDist2)) {
+            best = index;
+            bestT = t;
+            bestDist2 = dist2;
+        }
+    }
+    return best;
+}
+
+// Left stick steers travel like character movement: a destination a short way ahead of the party in
+// the stick's direction, re-aimed every frame it is held. Let go and the party coasts on to that last
+// destination -- unless a place is on the way there or right beside the party, in which case it walks
+// to the middle of that place and stops, so the 12 px circles of the small places can be hit at all.
+static void wmPadSteer(WmPadStick* stick)
+{
+    // Standing on a place is setting off from it, whatever then starts the walk. Walking, it stays the
+    // place being left until the party is clear of it -- a place being APPROACHED is never one.
+    if (!wmGenData.isWalking) {
+        stick->leaving = wmGenData.currentAreaId;
+    } else if (stick->leaving != -1 && !wmPadPartyAtPlace(stick->leaving)) {
+        stick->leaving = -1;
+    }
+
     float stickX;
     float stickY;
     if (!gamepad_ui_get_left_stick(&stickX, &stickY)) {
-        *armed = true;
+        stick->armed = true;
+
+        if (stick->steering && wmGenData.isWalking
+            && wmGenData.walkDestinationX == stick->targetX && wmGenData.walkDestinationY == stick->targetY
+            && stick->epoch == gamepad_ui_input_epoch()) {
+            int areaIdx = wmPadPlaceOnCoast(stick->leaving);
+            trace_event(TRACE_FLOW, "wm-pull", "area=%d leaving=%d pos=%d,%d dest=%d,%d", areaIdx,
+                stick->leaving, wmGenData.worldPosX, wmGenData.worldPosY, wmGenData.walkDestinationX,
+                wmGenData.walkDestinationY);
+            if (areaIdx != -1) {
+                wmPadTravelToArea(areaIdx);
+
+                // A on the way in means this place (or, with no list entry, waits for the arrival).
+                for (int i = 0; i < wmLabelCount; i++) {
+                    if (wmLabelList[i] == areaIdx) {
+                        wm_pad_label = i;
+                        break;
+                    }
+                }
+            }
+        }
+        stick->steering = false;
         return;
     }
-    if (!*armed) {
+    if (!stick->armed) {
         return;
     }
 
     float mag = sqrtf(stickX * stickX + stickY * stickY);
     if (mag <= 0.0f) {
         return;
+    }
+
+    if (!stick->steering) {
+        stick->steering = true;
+
+        // The stick takes over from the list: A no longer means the place picked there, which would
+        // send the party back to the town it set off from.
+        wm_pad_label = -1;
     }
 
     int worldW = WM_TILE_WIDTH * wmNumHorizontalTiles;
@@ -3229,6 +3400,9 @@ static void wmPadSteer(bool* armed)
 
     wmPartyInitWalking(steerX, steerY);
     wmGenData.mousePressed = false;
+    stick->targetX = steerX;
+    stick->targetY = steerY;
+    stick->epoch = gamepad_ui_input_epoch();
 }
 
 // The town map's picked entrance: its name re-drawn in the highlight colour over a fresh refresh, and
@@ -3384,7 +3558,7 @@ static int wmWorldMapFunc(int a1)
     wm_pad_label = -1;
     wm_park_x = -1;
     wm_park_y = -1;
-    bool wmStickArmed = false;
+    WmPadStick wmStick;
 
     while (true) {
         sharedFpsLimiter.mark();
@@ -3405,7 +3579,7 @@ static int wmWorldMapFunc(int a1)
 
         // The pad: the list, A, and the left stick's steering (see WmPadAction).
         int padAction = wmPadUpdate(&keyCode, mouseX, mouseY);
-        wmPadSteer(&wmStickArmed);
+        wmPadSteer(&wmStick);
         if (padAction == WM_PAD_WALK_TO_POINTER) {
             wmPartyInitWalking(worldX, worldY);
             wmGenData.mousePressed = false;

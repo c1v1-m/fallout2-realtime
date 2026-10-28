@@ -1,0 +1,24 @@
+# World map, leaving a place (2026-10-28, with wm-pull-small): the pull must not drag the party back
+# into the place it is setting off from. From the middle of Klamath (area 2, 49 px circle) the left
+# stick steers east for a moment and lets go while the party is still inside Klamath's circle: no
+# pull (Klamath is the place being left), the coast runs on out of town, and A then enters the open
+# desert, not Klamath.
+name wm-pull-leave
+map KLADWTWN.MAP
+seed 1
+duration 18
+
+wmat 600 2
+mapgo 1000 WORLDMAP
+note 3400 steer-east-out-of-klamath
+axis 3500 LX 32767
+axis 3700 LX 0
+shot 3800
+shot 7000
+tap 8000 A
+shot 11000
+
+expect autotest\] wmat t=\d+ area=2 rc=0
+expect wm-pull\] area=-1 leaving=2
+expect map-load-stage\] done name=desert
+expect-count 1 map-load-stage\] done name=kladwtwn

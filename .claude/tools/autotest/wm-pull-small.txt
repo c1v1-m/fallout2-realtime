@@ -1,0 +1,30 @@
+# World map, small places (2026-10-28, "při cestování nemohu trefit malé osady které mají malou zelený
+# kruh"): a small place's circle is 12 px, and the left stick's coast runs 50 px past where it is let go.
+# Klamath Toxic Caves (area 23, small) is made known, the party sets off from Klamath (area 2) toward it
+# with the left stick and lets go short of it: the pull walks it into the caves' circle, and A enters.
+# Without the pull the coast ends at about 311,81 -- outside the circle (308..320, 86..98) -- and A
+# would enter the open desert (DESERT1).
+name wm-pull-small
+map KLADWTWN.MAP
+seed 1
+duration 20
+
+area 500 23 1
+wmat 600 2
+mapgo 1000 WORLDMAP
+shot 3000
+note 3400 steer-toward-toxic-caves
+axis 3500 LX -28900
+axis 3500 LY -15700
+axis 3900 LX 0
+axis 3900 LY 0
+shot 4000
+shot 8000
+tap 9000 A
+shot 12000
+
+expect autotest\] area t=\d+ area=23 state=1 ok=1
+expect autotest\] wmat t=\d+ area=2 rc=0
+expect wm-pull\] area=23 leaving=2
+expect map-load-stage\] done name=\S*tox
+expect-not map-load-stage\] done name=desert
