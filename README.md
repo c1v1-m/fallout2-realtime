@@ -1,119 +1,144 @@
-# Fallout 2 Community Edition
+# Fallout 2 Realtime
 
-Fallout 2 Community Edition is a fully working re-implementation of Fallout 2, with the same original gameplay, engine bugfixes, and some quality of life improvements, that works (mostly) hassle-free on multiple platforms.
+**Fallout 2 in realtime for Steam Deck and PC.**
 
-Popular Fallout 2 total conversion mods are partially supported. Original versions of Nevada and Sonora (that do not rely on extended features provided by Sfall) likely work, although there is no complete walkthrough confirmation yet. [Fallout 2 Restoration Project](https://github.com/BGforgeNet/Fallout2_Restoration_Project), [Fallout Et Tu](https://github.com/rotators/Fo1in2) and [Olympus 2207](https://olympus2207.com) are not yet supported. Other mods (particularly Resurrection and Yesterday) are not tested.
+<!-- TODO: a screenshot or a short GIF of a fight goes here -->
 
-There is also [Fallout Community Edition](https://github.com/alexbatalov/fallout1-ce).
+Fallout 2 where nobody waits for their turn. You walk with the stick, hold the left trigger to lock onto an enemy and pull the right one to shoot, while the geckos, raiders and mutants come at you at the same time. Action points are still there. They refill as you fight, faster when the enemy is close, so standing back and kiting does not pay.
 
-## Installation
+It is made for a controller, from the first screen on. It builds on [Fallout 1 Realtime](https://github.com/c1v1-m/fallout1-realtime) and is a modified version of Alexander Batalov's [Fallout 2 Community Edition](https://github.com/alexbatalov/fallout2-ce).
 
-You must own the game to play. Purchase your copy on [GOG](https://www.gog.com/game/fallout_2), [Epic Games](https://store.epicgames.com/p/fallout-2) or [Steam](https://store.steampowered.com/app/38410). Download latest [release](https://github.com/alexbatalov/fallout2-ce/releases) or build from source. You can also check latest [debug](https://github.com/alexbatalov/fallout2-ce/actions) build intended for testers.
+You need your own copy of Fallout 2 from [Steam](https://store.steampowered.com/app/38410) or [GOG](https://www.gog.com/game/fallout_2).
 
-### Windows
+> [!CAUTION]
+> **BACK UP YOUR SAVES BEFORE YOU PLAY.** The game uses save slots 1 to 5 for its quick save and autosaves and **overwrites whatever is in them**. If you have your own saves there, save them again into slot 6 or later, or copy the `SAVEGAME` folder somewhere outside the game folder. Steam Cloud syncs that folder, so the overwritten slots also reach your other PCs and your Steam Deck: it is not a backup. See [Saves](#saves).
 
-Download and copy `fallout2-ce.exe` to your `Fallout2` folder. It serves as a drop-in replacement for `fallout2.exe`.
+## What is new
 
-### Linux
+- Realtime combat. Everyone moves and attacks at the same time, and you can shoot and keep moving.
+- Every shot flies. Bullets leave tracers in a burst. Rockets and plasma you can see coming and step out of, lasers hit at once.
+- Enemies fight smarter. They wait for each other and come round a corner together, cover the door you are holding, shoot from where they can see you, reload out of your sight, jump clear of grenades and step out of your line of fire.
+- Your stats decide how fast you swing, aim and reload. Agility brings your action points back faster.
+- A stimpack heals over the next few seconds in a fight, so hits still hurt while it works. Hold the button and you inject one after another.
+- The whole game plays on a gamepad: fighting, looting, barter, dialogue, the Pip-Boy, the character screen and your followers' combat settings.
+- Two quick slots beside the interface bar: LB for a stimpack or any drug or tool, RB for a grenade. Radial menus for skills, weapons, ammo and drugs.
+- Autosaves when you go to another map or a quest moves on, and a quick save on the controller.
+- On the Steam Deck it starts straight from the Steam library, in Game Mode.
+- Widescreen at the original scale, smooth movement and VSync.
+- A MODS page in the options, where most of this can be switched back toward the original.
 
-- Use Windows installation as a base - it contains data assets needed to play. Copy `Fallout2` folder somewhere, for example `/home/john/Desktop/Fallout2`.
+## Install
 
-- Alternatively you can extract the needed files from the GoG installer:
+Download the latest zip from [Releases](../../releases) and unzip it.
 
-```console
-$ sudo apt install innoextract
-$ innoextract ~/Downloads/setup_fallout2_2.1.0.18.exe -I app
-$ mv app Fallout2
+Before it changes anything, the installer copies `fallout2.cfg` and your whole `SAVEGAME` folder into a new dated folder in `Fallout2-Realtime-backup`, inside the game folder. It does this on every install and every update, and if the copy fails, nothing is installed. To get your saves back, copy `SAVEGAME` from the oldest dated folder into the game's `data` folder.
+
+### Steam on a PC
+
+1. Run `Fallout2-Realtime-Setup.exe`, click **Install** (**Update** if it is already installed) and answer **Yes**. It finds your Steam copy of Fallout 2 by itself.
+2. Press **Play** on Fallout 2 in Steam.
+
+### Steam Deck
+
+1. Switch to Desktop Mode and unzip the download.
+2. Open the `steamdeck` folder, right-click inside it, choose **Open Terminal Here** and type `bash install-steamdeck.sh`.
+3. Go back to Game Mode. On Fallout 2's page open the controller settings, pick **Templates** and choose **Gamepad with Mouse Trackpad**. Without it Steam can turn the buttons into keyboard keys, and the game then never sees a controller.
+4. Press **Play** on Fallout 2.
+
+### GOG or a CD copy
+
+Run `Fallout2-Realtime-Setup.exe`, click **Browse...**, choose your Fallout 2 folder, click **Install** and answer **Yes**. Then start `fallout2-realtime.exe` from that folder. It has not been tried on a GOG copy yet.
+
+Steam's Fallout 2 includes the High Resolution Patch, whose files give the wider interface bar and stop the view at the edge of the map. A copy without it still plays, with the original interface bar, and the view can go past the edge of the map.
+
+### Uninstall
+
+Run the installer again and click **Uninstall**. On the Deck it is `bash install-steamdeck.sh uninstall`. Steam's **Verify integrity of game files** brings the original back as well. Your saves, `fallout2.cfg` and the backups stay. If you changed **Screen** or **Internal resolution** on the MODS page, that went into the High Resolution Patch's `f2_res.ini`, which is not backed up, so set them back before you uninstall.
+
+## Controls
+
+| Button | What it does |
+|---|---|
+| Left stick | Walk |
+| Right stick | Look, aim |
+| D-pad | Next action, scroll |
+| Hold Up | Pip-Boy |
+| Hold Down | Character |
+| Hold Left | Automap |
+| Hold Right | End combat |
+| LB / RB | Quick slots |
+| LT | Aim |
+| RT | Shoot |
+| L3 | Skills |
+| R3 | Called shot |
+| A | Confirm, action |
+| B | Cancel |
+| B hold | Drugs, items |
+| X hold | Run |
+| Y | Swap hands |
+| Y hold | Weapons, ammo |
+| LT + X | Reload |
+| LT + Y | Firing mode |
+| BACK | Inventory |
+| START | Pause |
+| START hold | Quick save |
+
+The same list is in the game: Pip-Boy, Archives, CONTROLS. A new character gets the Pip-Boy with the vault suit, after the Temple of Trials. On a Steam Deck that list calls the buttons L1, R1, L2, R2, VIEW and MENU.
+
+## Saves
+
+Saves from the original Fallout 2 and from Fallout 2 Community Edition should load, so you can carry on where you left off. Saves from a game with a big content mod may not load, the same as in Fallout 2 Community Edition.
+
+The first five slots on the save screen are used by the game itself:
+
+| Slot | What goes there |
+|---|---|
+| 1 | Quick save, when you hold START |
+| 2, 3, 4 | Autosave each time you go to another map, taking turns between the three |
+| 5 | Autosave each time a quest moves on |
+
+An autosave waits until the fight is over. Holding START quick-saves whenever you are out in the world, in a fight too, and the fight is still on when you load it.
+
+> [!CAUTION]
+> **Your own saves in slots 1 to 5 WILL BE OVERWRITTEN.** Save them again into slot 6 or later before you start, or back up the `SAVEGAME` folder outside the game folder.
+
+## Status
+
+Version 0.1.0, the first public release, so expect rough edges. So far it has been played from a new character through the Temple of Trials into Klamath. The rest of the game has not been played yet, and the car has not been worked on. If something breaks, please open an [issue](../../issues). It helps a lot if you put `trace_log=1` under `[preferences]` in `fallout2.cfg`, play until it happens again and attach the newest `trace_*.log` from the game folder.
+
+Known:
+
+- On some PCs (seen with an AMD graphics card) the Steam overlay may not show.
+- If the game shows a small 4:3 picture with black bars and no LB slot (seen on a Steam Deck), set **Internal resolution** on the MODS page to **Original** and restart the game.
+- Fallout 2's own calibres all fly at the same speed for now.
+- Nobody has checked yet whether your followers keep to their Distance and Chem use settings in a realtime fight.
+- Some help texts on the MODS page still talk about Fallout 1.
+
+## What's next
+
+- The rest of the game after Klamath, and polish everywhere it still feels rough.
+- New hand-made animations, starting with reloading.
+- The Steam overlay on the PCs where it does not show yet.
+
+## Building
+
+Windows, with Visual Studio 2026 and CMake:
+
+```
+cmake -S . -B build-release -G "Visual Studio 18 2026" -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DFALLOUT_RELEASE=ON
+cmake --build build-release --config Release --target fallout2-realtime-setup
 ```
 
-- Download and copy `fallout2-ce` to this folder.
+That builds `fallout2-realtime.exe` and the installer. Leave out `-DFALLOUT_RELEASE=ON` for the development build (`fallout2-ce.exe`), which keeps every diagnostic on.
 
-- Install [SDL2](https://libsdl.org/download-2.0.php):
+## Credits
 
-```console
-$ sudo apt install libsdl2-2.0-0
-```
+Fallout 2 Realtime is a **modified version** of [Fallout 2 Community Edition](https://github.com/alexbatalov/fallout2-ce) by Alexander Batalov, which re-implements the original engine. Everything changed after upstream commit `e97087b` is the work of c1v1-m, apart from the Fallout Community Edition code it carries (see below).
 
-- Run `./fallout2-ce`.
+It builds on [Fallout 1 Realtime](https://github.com/c1v1-m/fallout1-realtime), and through it carries code from [Fallout Community Edition](https://github.com/alexbatalov/fallout1-ce), also by Alexander Batalov.
 
-### macOS
-
-> **NOTE**: macOS 10.11 (El Capitan) or higher is required. Runs natively on Intel-based Macs and Apple Silicon.
-
-- Use Windows installation as a base - it contains data assets needed to play. Copy `Fallout2` folder somewhere, for example `/Applications/Fallout2`.
-
-- Alternatively you can use Fallout 2 from Macplay/The Omni Group as a base - you need to extract game assets from the original bundle. Mount CD/DMG, right click `Fallout 2` -> `Show Package Contents`, navigate to `Contents/Resources`. Copy `GameData` folder somewhere, for example `/Applications/Fallout2`.
-
-- Or if you're a Terminal user and have Homebrew installed you can extract the needed files from the GoG installer:
-
-```console
-$ brew install innoextract
-$ innoextract ~/Downloads/setup_fallout2_2.1.0.18.exe -I app
-$ mv app /Applications/Fallout2
-```
-
-- Download and copy `fallout2-ce.app` to this folder.
-
-- Run `fallout2-ce.app`.
-
-### Android
-
-> **NOTE**: Fallout 2 was designed with mouse in mind. There are many controls that require precise cursor positioning, which is not possible with fingers. Current control scheme resembles trackpad usage:
-- One finger moves mouse cursor around.
-- Tap one finger for left mouse click.
-- Tap two fingers for right mouse click (switches mouse cursor mode).
-- Move two fingers to scroll current view (map view, worldmap view, inventory scrollers).
-
-> **NOTE**: From Android standpoint release and debug builds are different apps. Both apps require their own copy of game assets and have their own savegames. This is intentional. As a gamer just stick with release version and check for updates.
-
-- Use Windows installation as a base - it contains data assets needed to play. Copy `Fallout2` folder to your device, for example to `Downloads`. You need `master.dat`, `critter.dat`, `patch000.dat`, and `data` folder. Watch for file names - keep (or make) them lowercased (see [Configuration](#configuration)).
-
-- Download `fallout2-ce.apk` and copy it to your device. Open it with file explorer, follow instructions (install from unknown source).
-
-- When you run the game for the first time it will immediately present file picker. Select the folder from the first step. Wait until this data is copied. A loading dialog will appear, just wait for about 30 seconds. If you're installing total conversion mod or localized version with a large number of unpacked resources in `data` folder it can take up to 20 minutes. Once copied, the game will start automatically.
-
-### iOS
-
-> **NOTE**: See Android note on controls.
-
-- Download `fallout2-ce.ipa`. Use sideloading applications ([AltStore](https://altstore.io/) or [Sideloadly](https://sideloadly.io/)) to install it to your device. Alternatively you can always build from source with your own signing certificate.
-
-- Run the game once. You'll see error message saying "Couldn't find/load text fonts". This step is needed for iOS to expose the game via File Sharing feature.
-
-- Use Finder (macOS Catalina and later) or iTunes (Windows and macOS Mojave or earlier) to copy `master.dat`, `critter.dat`, `patch000.dat`, and `data` folder to "Fallout 2" app ([how-to](https://support.apple.com/HT210598)). Watch for file names - keep (or make) them lowercased (see [Configuration](#configuration)).
-
-## Configuration
-
-The main configuration file is `fallout2.cfg`. There are several important settings you might need to adjust for your installation. Depending on your Fallout distribution main game assets `master.dat`, `critter.dat`, `patch000.dat`, and `data` folder might be either all lowercased, or all uppercased. You can either update `master_dat`, `critter_dat`, `master_patches` and `critter_patches` settings to match your file names, or rename files to match entries in your `fallout2.cfg`.
-
-The `sound` folder (with `music` folder inside) might be located either in `data` folder, or be in the Fallout folder. Update `music_path1` setting to match your hierarchy, usually it's `data/sound/music/` or `sound/music/`. Make sure it matches your path exactly (so it might be `SOUND/MUSIC/` if you've installed Fallout from CD). Music files themselves (with `ACM` extension) should be all uppercased, regardless of `sound` and `music` folders.
-
-The second configuration file is `f2_res.ini`. Use it to change game window size and enable/disable fullscreen mode.
-
-```ini
-[MAIN]
-SCR_WIDTH=1280
-SCR_HEIGHT=720
-WINDOWED=1
-```
-
-Recommendations:
-- **Desktops**: Use any size you see fit.
-- **Tablets**: Set these values to logical resolution of your device, for example iPad Pro 11 is 1668x2388 (pixels), but it's logical resolution is 834x1194 (points).
-- **Mobile phones**: Set height to 480, calculate width according to your device screen (aspect) ratio, for example Samsung S21 is 20:9 device, so the width should be 480 * 20 / 9 = 1067.
-
-In time this stuff will receive in-game interface, right now you have to do it manually.
-
-The third configuration file is `ddraw.ini` (part of Sfall). There are dozens of options that adjust or override engine behaviour and gameplay mechanics. This file is intended for modders and advanced users. Currently only a small subset of these settings are actually implemented.
-
-## Contributing
-
-Integrating Sfall goodies is the top priority. Quality of life updates are OK too. Please no large scale refactorings at this time as we need to reconcile changes from Reference Edition, which will make this process slow and error-prone. In any case open up an issue with your suggestion or to notify other people that something is being worked on.
-
-### Intergrating Sfall
-
-There are literally hundreds if not thousands of fixes and features in sfall. I guess not all of them are needed in Community Edition, but for the sake of compatibility with big mods out there, let's integrate them all.
+Fallout is a trademark of Bethesda Softworks. This project contains no game data. The High Resolution Patch by Mash, whose files it reads, comes with Steam's copy of the game.
 
 ## License
 
-The source code is this repository is available under the [Sustainable Use License](LICENSE.md).
+The source code is available under the [Sustainable Use License](LICENSE.md), the same as Fallout 2 Community Edition: free, non-commercial use and distribution only.
