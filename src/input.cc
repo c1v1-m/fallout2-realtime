@@ -15,6 +15,8 @@
 #include "touch.h"
 #include "win32.h"
 
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 typedef struct InputEvent {
@@ -948,6 +950,9 @@ void _GNW95_process_message()
                 audioEngineResume();
                 break;
             case SDL_WINDOWEVENT_FOCUS_LOST:
+                if (gnw_headless || gnw_visible_override) {
+                    break; // the game playing by itself never pauses for focus
+                }
                 gProgramIsActive = false;
                 audioEnginePause();
                 break;

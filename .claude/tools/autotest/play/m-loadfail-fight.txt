@@ -1,0 +1,14 @@
+# F2 regression for his 2026-10-24 crash, his own sequence: a load that FAILS (slot 1 is from another
+# data version: 12 more global vars) leaves the dude's saved cid behind through gameReset; then a fight.
+name m-loadfail-fight
+map DESERT1.MAP
+seed 1
+duration 25
+loadslot 1
+dude tile 20100 rot 2
+dude skill small_guns 100
+dude skill unarmed 100
+
+spawn 16777455 21300 rot 5 wield 4 hostile
+
+at 0 fight

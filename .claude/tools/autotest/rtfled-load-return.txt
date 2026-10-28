@@ -1,0 +1,15 @@
+# (B) load the rtfled-save-away save on DESERT2, go back to ARTEMPLE: the memory came through the save.
+name rtfled-load-return
+map DESERT2.MAP
+loadslot 1
+seed 1
+duration 20
+
+mapgo 3000 ARTEMPLE.MAP 17288 0
+note 18000 end
+
+expect \[FLOW/autotest\] loadslot 1 rc=0
+expect fled-load\] saved=[23] kept=[23] expired=0
+expect map-load-stage\] done name=artemple.sav
+expect-count >=1 fled-reaggro] .*pid=16777454
+expect-count >=2 (fled-reaggro] .*pid=16777454|fled-forget] .*pid=16777454 why=hostile)

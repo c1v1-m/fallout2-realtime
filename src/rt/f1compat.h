@@ -59,6 +59,7 @@
 #include <obj_types.h>
 #include <object.h>
 #include <options.h>
+#include <palette.h>
 #include <party_member.h>
 #include <perk.h>
 #include <pipboy.h>
@@ -81,19 +82,37 @@
 
 #include "rt/rt_hooks.h"
 
+// <windows.h> (pulled in by win32.h) defines near and far as nothing; our modules use them as names.
+#undef near
+#undef far
+
 namespace fallout {
 
 // --- Globals --------------------------------------------------------------------------------------
 #define obj_dude gDude
 #define game_config gGameConfig
 #define map_elevation gElevation
-#define display_win gInterfaceBarWindow
+// F1 map_data = F2 gMapHeader (name, index, ... the same fields under the same names).
+#define map_data gMapHeader
+// ⚠️ F1's display_win is the WORLD window (map.cc: 0,0, screen width, screen height minus the bar) --
+// F2's gIsoWindow. It was mapped to the interface BAR for a day (2026-10-20, "mířím na něco, tak je
+// terč úplně mimo"): the lock-on cursor was placed against the bar, a locked target counted as off
+// screen 0.4 s after every lock, and the target highlight drew into the bar's buffer.
+#define display_win gIsoWindow
 #define colorTable _colorTable
 #define cmap _cmap
-#define off_tile _off_tile
+// F1 keeps the hex step offsets as off_tile[2][6] (x row, y row); F2 splits them into _off_tile and
+// dword_51D984. rt_off_tile (rt_f2_hooks.cc) is the F1-shaped copy -- the same twelve numbers.
+extern const int rt_off_tile[2][6];
+#define off_tile rt_off_tile
 #define game_user_wants_to_quit _game_user_wants_to_quit
 #define in_main_menu _in_main_menu
 #define select_window_id gCharacterSelectorWindow
+#define combat_state gCombatState
+#define gcsd _gcsd
+#define combat_exps _combat_exps
+// F1's start-of-combat data is F2's CombatStartData.
+typedef CombatStartData STRUCT_664980;
 
 // --- Types and constants --------------------------------------------------------------------------
 typedef File DB_FILE;
@@ -136,8 +155,12 @@ static inline Object* ai_search_inven(Object* critter, int check_action_points)
     return _ai_search_inven_weap(critter, check_action_points != 0, nullptr);
 }
 
-// The pad's quick save (BACK+START) is vanilla's quick save in F2 (F6).
-static inline int QuickSaveGame() { return lsgSaveGame(LOAD_SAVE_MODE_QUICK); }
+// F2 takes an extra out-parameter it never writes; F1 had none.
+static inline int determine_to_hit_no_range(Object* a1, Object* a2, int hitLocation, int hitMode)
+{
+    return _determine_to_hit_no_range(a1, a2, hitLocation, hitMode, nullptr);
+}
+
 
 // F1 background processes carry a label for the frame-time meter; F2's tickers do not.
 static inline void add_bk_process(TickerProc* proc, const char* label)
@@ -147,6 +170,9 @@ static inline void add_bk_process(TickerProc* proc, const char* label)
 }
 
 #include "rt/f1compat_gen.h"
+
+// F1 asks "is one of these carried" as an int; F2 only has the object lookup.
+static inline int inven_pid_is_carried(Object* obj, int pid) { return objectGetCarriedObjectByPid(obj, pid) != nullptr ? 1 : 0; }
 
 } // namespace fallout
 

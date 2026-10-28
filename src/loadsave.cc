@@ -60,11 +60,27 @@
 #include "word_wrap.h"
 #include "worldmap.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's loadsave.cc changes, ported).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define LOAD_SAVE_SIGNATURE "FALLOUT SAVE FILE"
 #define LOAD_SAVE_DESCRIPTION_LENGTH 30
-#define LOAD_SAVE_HANDLER_COUNT 27
+// ⚠️ 27 -> 28 (Fallout 2 Realtime 2026-10-26; fallout1-ce did the same 2026-09-09). The realtime chunk
+// (combat_rt_medic_optout_save/load) sits SECOND TO LAST, immediately before the trailing _DummyFunc /
+// _EndLoad, so it appends to the end of the file: the last save handler writes nothing, so every save ever
+// written -- vanilla fallout2.exe, fallout2-ce, this build before the chunk -- ends where interfaceSave
+// (4 fixed fields) left off. Loading an OLD save therefore reaches our loader at EOF, which reports "not in
+// this save" and keeps the defaults; a NEW save read by an OLD build stops after interfaceLoad and ignores
+// the trailing bytes. sfall's globals live in the separate sfallgv.sav (read after this loop), so they do
+// not move the position. Both arrays below MUST have 28 entries (a short initializer = a nullptr handler).
+#define LOAD_SAVE_HANDLER_COUNT 28
 
 #define LSGAME_MSG_NAME "LSGAME.MSG"
 
@@ -235,6 +251,7 @@ static SaveGameHandler* _master_save_list[LOAD_SAVE_HANDLER_COUNT] = {
     partyMembersSave,
     queueSave,
     interfaceSave,
+    combat_rt_medic_optout_save, // realtime chunk, index 26 -- SECOND TO LAST, see LOAD_SAVE_HANDLER_COUNT
     _DummyFunc,
 };
 
@@ -266,11 +283,17 @@ static LoadGameHandler* _master_load_list[LOAD_SAVE_HANDLER_COUNT] = {
     partyMembersLoad,
     queueLoad,
     interfaceLoad,
+    combat_rt_medic_optout_load, // realtime chunk, index 26 -- SECOND TO LAST, see LOAD_SAVE_HANDLER_COUNT
     _EndLoad,
 };
 
 // 0x5194C4
 static bool _loadingGame = false;
+
+// Realtime build (fallout1-ce): set when a game has just been loaded, so the location autosave in the
+// main loop skips the map change the load itself causes (or loading would at once autosave over the
+// state just loaded). Read and cleared by LoadSaveConsumeJustLoaded.
+static bool ls_just_loaded = false;
 
 // lsgame.msg
 //
@@ -356,6 +379,301 @@ void _ResetLoadSave()
     MapDirErase("MAPS\\", "SAV");
     MapDirErase(PROTO_DIR_NAME "\\" CRITTERS_DIR_NAME "\\", PROTO_FILE_EXT);
     MapDirErase(PROTO_DIR_NAME "\\" ITEMS_DIR_NAME "\\", PROTO_FILE_EXT);
+}
+
+// Private copies of the red Done/Cancel button art with the gamepad hint letter (A / B) baked in,
+// so the button refresh draws the letter as part of the button (drawing onto the window buffer does
+// not survive -- the refresh re-blits the button over it). Allocated in lsgWindowInit when a
+// controller is present, freed in lsgWindowFree. nullptr = no hint.
+static unsigned char* ls_done_button_up = nullptr;
+static unsigned char* ls_cancel_button_up = nullptr;
+
+// Gamepad navigation for the load/save slot list. Edge-detected D-pad / left stick step the
+// selection one slot at a time; A confirms, B cancels. Returns a keycode to inject into the modal
+// loop (as if typed) or -1 when the pad produced no edge. gamepad_ui_tick does not run inside these
+// modal loops, so the pad is read directly here.
+static int ls_gamepad_keycode()
+{
+    static bool prevUp = false;
+    static bool prevDown = false;
+    static bool prevA = false;
+    static bool prevB = false;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevUp = prevDown = prevA = prevB = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+
+    bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+    bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+    // ⚠️ A CONFIRMATION BOX JUST RAN ITS OWN INPUT LOOP -- our edges describe the world from before
+    // it, so adopt the live state and emit nothing this poll. Without this, answering the "overwrite
+    // this save?" box with B closed the WHOLE save screen.
+    static unsigned int lastEpoch = 0;
+    unsigned int epoch = gamepad_ui_input_epoch();
+    if (epoch != lastEpoch) {
+        lastEpoch = epoch;
+        prevUp = upNow;
+        prevDown = downNow;
+        prevA = aNow;
+        prevB = bNow;
+        return -1;
+    }
+
+    // A -> Enter, B -> Escape: the slot loops map KEY_RETURN to their confirm and handle KEY_ESCAPE
+    // as cancel, and the description text entry (_get_input_str2) checks them directly -- so one
+    // helper drives confirm/cancel in every load/save sub-loop.
+    int keyCode = -1;
+    if (upNow && !prevUp) {
+        keyCode = KEY_ARROW_UP;
+    } else if (downNow && !prevDown) {
+        keyCode = KEY_ARROW_DOWN;
+    } else if (aNow && !prevA) {
+        keyCode = KEY_RETURN;
+    } else if (bNow && !prevB) {
+        keyCode = KEY_ESCAPE;
+    }
+
+    prevUp = upNow;
+    prevDown = downNow;
+    prevA = aNow;
+    prevB = bNow;
+
+    return keyCode;
+}
+
+// Auto-hide the load/save cursor when a controller is present: it starts hidden and only reappears
+// while the right stick (or the real mouse) is actively moving it. The blank MOUSE_CURSOR_NONE shape
+// rather than hiding the mouse, which would stop the right stick from ever revealing it again.
+#define LS_CURSOR_IDLE_MS 2000
+
+static void ls_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned int* lastMove)
+{
+    int x;
+    int y;
+    mouseGetPosition(&x, &y);
+
+    if (x != *lastX || y != *lastY) {
+        *lastMove = getTicks();
+        if (!*shown) {
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            *shown = true;
+        }
+    } else if (*shown && getTicksSince(*lastMove) >= LS_CURSOR_IDLE_MS) {
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        *shown = false;
+    }
+
+    *lastX = x;
+    *lastY = y;
+}
+
+// One given slot (0-based), with no screen (fallout1-ce's LoadGameSlot): the self-played tests
+// (autotest `loadslot`) start from a copy of the player's own save, so a report is reproduced in HIS
+// state -- map variables, the dude's saved combat bits, the party.
+int LoadGameSlot(int slot)
+{
+    _ls_error_code = 0;
+    _patches = settings.system.master_patches_path.c_str();
+
+    if (slot < 0 || slot >= 10 || _GetSlotList() == -1 || _LSstatus[slot] != SLOT_STATE_OCCUPIED) {
+        return -1;
+    }
+
+    _slot_cursor = slot;
+    int rc = lsgLoadGameInSlot(_slot_cursor);
+    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+    return rc;
+}
+
+// FALLOUT 1 REALTIME'S SAVES, IN FALLOUT 2 (2026-10-24, his "Proč nejsou saves jako ve fallout 1?").
+// Vanilla's quick save asks for a slot the first time, then "overwrite?", then a description -- three
+// boxes on a controller. These save straight into fixed slots (0-based; SLOT01.. on the load screen),
+// the layout fallout1-ce uses and his pick ("Sloty 1-5 jako F1": his old saves there are from another
+// data version and cannot be loaded, and they are backed up):
+//   slot 0     quick save (START held)          SLOT01
+//   slots 1-3  location autosaves, a ring      SLOT02..04, "Autosave 1/2/3"
+//   slot 4     the last quest step             SLOT05
+#define QUICKSAVE_SLOT 0
+#define LOCATION_AUTOSAVE_SLOT_FIRST 1
+#define LOCATION_AUTOSAVE_SLOT_COUNT 3
+#define QUEST_AUTOSAVE_SLOT 4
+
+// A save into one given slot (0-based) with a fixed description and no screen -- vanilla's quick save
+// body (the slot's old header, the snapshot, the save) without its boxes. 1 on success, -1 otherwise.
+int SaveGameSlot(int slot, const char* description)
+{
+    if (slot < 0 || slot > 9) {
+        return -1;
+    }
+
+    // ⚠️ NEVER A DEAD OR UNCONSCIOUS DUDE (fallout1-ce 2026-08-29). The main loop ends the game the moment
+    // combat.results carries DAM_DEAD or DAM_KNOCKED_OUT, and the flag is part of the save: such a save
+    // drops every load straight into the death scene, and CONTINUE would pick it as the newest forever.
+    // Vanilla never got here (it has no headless saves); the autosaves can.
+    if (gDude != nullptr && (gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+        trace_event(TRACE_WARN, "save-refused", "slot=%d why=dude-down", slot + 1);
+        return -1;
+    }
+
+    ScopedGameMode gm(GameMode::kSaveGame);
+
+    _ls_error_code = 0;
+    _patches = settings.system.master_patches_path.c_str();
+    _slot_cursor = slot;
+
+    snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
+    strcat(_gmpath, "SAVE.DAT");
+    _flptr = fileOpen(_gmpath, "rb");
+    if (_flptr != nullptr) {
+        lsgLoadHeaderInSlot(_slot_cursor);
+        fileClose(_flptr);
+    }
+
+    strncpy(_LSData[_slot_cursor].description, description != nullptr ? description : "", LOAD_SAVE_DESCRIPTION_LENGTH - 1);
+    _LSData[_slot_cursor].description[LOAD_SAVE_DESCRIPTION_LENGTH - 1] = '\0';
+
+    if (!messageListInit(&gLoadSaveMessageList)) {
+        return -1;
+    }
+    char path[COMPAT_MAX_PATH];
+    snprintf(path, sizeof(path), "%s%s", asc_5186C8, "LSGAME.MSG");
+    if (!messageListLoad(&gLoadSaveMessageList, path)) {
+        messageListFree(&gLoadSaveMessageList);
+        return -1;
+    }
+
+    _snapshotBuf = nullptr;
+    int rc = _QuickSnapShot();
+    if (rc == 1) {
+        int saved = lsgPerformSaveGame();
+        if (saved != -1) {
+            rc = saved;
+        }
+    }
+
+    if (_snapshotBuf != nullptr) {
+        internal_free(_snapshot);
+    }
+
+    messageListFree(&gLoadSaveMessageList);
+    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+
+    trace_event(TRACE_STATE, "save-slot", "slot=%d desc=%s rc=%d", slot + 1, description != nullptr ? description : "", rc);
+    return rc != -1 ? 1 : -1;
+}
+
+// The newest save, loaded with no screen -- the main menu's CONTINUE. 1 on success, 0 when there is
+// nothing to load, -1 when the load failed.
+//
+// ⚠️ NEWEST BY THE FILE'S OWN mtime, NOT BY THE HEADER (fallout1-ce): the header's time field is hour PLUS
+// minute, with no date -- sorting on it picked an essentially random slot.
+int LoadGameNewest()
+{
+    _ls_error_code = 0;
+    _patches = settings.system.master_patches_path.c_str();
+
+    if (_GetSlotList() == -1) {
+        return -1;
+    }
+
+    int best = -1;
+    long long bestTime = 0;
+    for (int index = 0; index < 10; index++) {
+        if (_LSstatus[index] != SLOT_STATE_OCCUPIED) {
+            continue;
+        }
+
+        char savePath[COMPAT_MAX_PATH];
+        snprintf(savePath, sizeof(savePath), "%s\\%s\\%s%.2d\\%s", _patches, "SAVEGAME", "SLOT", index + 1, "SAVE.DAT");
+        long long mtime = compat_file_mtime(savePath);
+        if (mtime == 0) {
+            continue;
+        }
+        if (best == -1 || mtime > bestTime) {
+            best = index;
+            bestTime = mtime;
+        }
+    }
+
+    trace_event(TRACE_FLOW, "continue-pick", "slot=%d", best + 1);
+    if (best == -1) {
+        return 0;
+    }
+
+    _slot_cursor = best;
+
+    // The black cover the quick load puts up: the map is torn down and rebuilt under it.
+    int windowX = (screenGetWidth() - LS_WINDOW_WIDTH) / 2;
+    int windowY = (screenGetHeight() - LS_WINDOW_HEIGHT) / 2;
+    int window = windowCreate(windowX, windowY, LS_WINDOW_WIDTH, LS_WINDOW_HEIGHT, 256, WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
+    if (window != -1) {
+        unsigned char* windowBuffer = windowGetBuffer(window);
+        bufferFill(windowBuffer, LS_WINDOW_WIDTH, LS_WINDOW_HEIGHT, LS_WINDOW_WIDTH, _colorTable[0]);
+        windowRefresh(window);
+        renderPresent();
+    }
+
+    int rc = lsgLoadGameInSlot(_slot_cursor);
+
+    if (window != -1) {
+        windowDestroy(window);
+    }
+
+    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+
+    return rc != -1 ? 1 : -1;
+}
+
+bool LoadSaveConsumeJustLoaded()
+{
+    bool v = ls_just_loaded;
+    ls_just_loaded = false;
+    return v;
+}
+
+// Entering a new location: the ring of three, so the last three places are kept. The label follows the
+// slot ("Autosave 1/2/3"); the cursor picks which one this call overwrites and starts again each session.
+int AutoSaveLocation()
+{
+    static int locationCursor = 0;
+
+    int slot = LOCATION_AUTOSAVE_SLOT_FIRST + locationCursor;
+    char description[32];
+    snprintf(description, sizeof(description), "Autosave %d", locationCursor + 1);
+
+    locationCursor = (locationCursor + 1) % LOCATION_AUTOSAVE_SLOT_COUNT;
+
+    return SaveGameSlot(slot, description);
+}
+
+// A quest step: its own slot, apart from the locations.
+int AutoSaveQuest()
+{
+    return SaveGameSlot(QUEST_AUTOSAVE_SLOT, "Autosave: Quest");
+}
+
+// The pad's quick save (START held): the quick save slot, no boxes.
+int QuickSaveGame()
+{
+    int rc = SaveGameSlot(QUICKSAVE_SLOT, "Quick Save");
+    if (rc == 1) {
+        MessageListItem messageListItem;
+        // Quick save game successfully saved.
+        char* msg = getmsg(&gMiscMessageList, &messageListItem, 5);
+        displayMonitorAddMessage(msg);
+    } else {
+        soundPlayFile("iisxxxx1");
+    }
+    return rc;
 }
 
 // SaveGame
@@ -500,6 +818,18 @@ int lsgSaveGame(int mode)
 
     _dbleclkcntr = 24;
 
+    // Cursor auto-hide (controller only): start hidden, reveal on movement.
+    bool lsCursorPad = gamepad_ui_get_controller() != nullptr;
+    bool lsCursorShown = true;
+    int lsCursorX = 0;
+    int lsCursorY = 0;
+    unsigned int lsCursorMove = getTicks();
+    if (lsCursorPad) {
+        mouseGetPosition(&lsCursorX, &lsCursorY);
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        lsCursorShown = false;
+    }
+
     int rc = -1;
     int doubleClickSlot = -1;
     while (rc == -1) {
@@ -512,14 +842,28 @@ int lsgSaveGame(int mode)
 
         convertMouseWheelToArrowKey(&keyCode);
 
+        {
+            int padKey = ls_gamepad_keycode();
+            if (keyCode == -1 && padKey != -1) {
+                keyCode = padKey;
+            }
+        }
+
+        if (lsCursorPad) {
+            ls_tick_cursor(&lsCursorShown, &lsCursorX, &lsCursorY, &lsCursorMove);
+        }
+
         if (keyCode == KEY_ESCAPE || keyCode == 501 || _game_user_wants_to_quit != 0) {
             rc = 0;
         } else {
             switch (keyCode) {
+            // The ten slots WRAP: up from the first lands on the tenth, down from the tenth on the
+            // first. Vanilla clamped, which is fine when aiming a mouse but wrong on a stick --
+            // reaching slot 10 from slot 1 was nine presses in the only direction the list moved.
             case KEY_ARROW_UP:
                 _slot_cursor -= 1;
                 if (_slot_cursor < 0) {
-                    _slot_cursor = 0;
+                    _slot_cursor = 9;
                 }
                 selectionChanged = true;
                 doubleClickSlot = -1;
@@ -527,7 +871,7 @@ int lsgSaveGame(int mode)
             case KEY_ARROW_DOWN:
                 _slot_cursor += 1;
                 if (_slot_cursor > 9) {
-                    _slot_cursor = 9;
+                    _slot_cursor = 0;
                 }
                 selectionChanged = true;
                 doubleClickSlot = -1;
@@ -1004,6 +1348,18 @@ int lsgLoadGame(int mode)
     renderPresent();
     _dbleclkcntr = 24;
 
+    // Cursor auto-hide (controller only): start hidden, reveal on movement.
+    bool lsCursorPad = gamepad_ui_get_controller() != nullptr;
+    bool lsCursorShown = true;
+    int lsCursorX = 0;
+    int lsCursorY = 0;
+    unsigned int lsCursorMove = getTicks();
+    if (lsCursorPad) {
+        mouseGetPosition(&lsCursorX, &lsCursorY);
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        lsCursorShown = false;
+    }
+
     int rc = -1;
     int doubleClickSlot = -1;
     while (rc == -1) {
@@ -1016,14 +1372,26 @@ int lsgLoadGame(int mode)
 
         convertMouseWheelToArrowKey(&keyCode);
 
+        {
+            int padKey = ls_gamepad_keycode();
+            if (keyCode == -1 && padKey != -1) {
+                keyCode = padKey;
+            }
+        }
+
+        if (lsCursorPad) {
+            ls_tick_cursor(&lsCursorShown, &lsCursorX, &lsCursorY, &lsCursorMove);
+        }
+
         if (keyCode == KEY_ESCAPE || keyCode == 501 || _game_user_wants_to_quit != 0) {
             rc = 0;
         } else {
             switch (keyCode) {
+            // Wraps, same as the save screen -- see the note there.
             case KEY_ARROW_UP:
                 _slot_cursor--;
                 if (_slot_cursor < 0) {
-                    _slot_cursor = 0;
+                    _slot_cursor = 9;
                 }
                 selectionChanged = true;
                 doubleClickSlot = -1;
@@ -1031,7 +1399,7 @@ int lsgLoadGame(int mode)
             case KEY_ARROW_DOWN:
                 _slot_cursor++;
                 if (_slot_cursor > 9) {
-                    _slot_cursor = 9;
+                    _slot_cursor = 0;
                 }
                 selectionChanged = true;
                 doubleClickSlot = -1;
@@ -1428,6 +1796,36 @@ static int lsgWindowInit(int windowType)
 
     int btn;
 
+    // CE: with a controller present, bake an "A" / "B" hint into a private copy of the red button
+    // art so the player sees which pad button is Done / Cancel. The letter must be part of the button
+    // image (the refresh re-blits it every frame) -- so a copy, never the shared art.
+    unsigned char* doneButtonUp = _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getData();
+    unsigned char* cancelButtonUp = _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getData();
+    if (gamepad_ui_get_controller() != nullptr) {
+        int redW = _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getWidth();
+        int redH = _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getHeight();
+        int redSize = redW * redH;
+
+        ls_done_button_up = (unsigned char*)internal_malloc(redSize);
+        ls_cancel_button_up = (unsigned char*)internal_malloc(redSize);
+        if (ls_done_button_up != nullptr && ls_cancel_button_up != nullptr) {
+            memcpy(ls_done_button_up, _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getData(), redSize);
+            memcpy(ls_cancel_button_up, _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getData(), redSize);
+
+            int oldHintFont = fontGetCurrent();
+            fontSetCurrent(100);
+            int hintY = (redH - fontGetLineHeight()) / 2;
+            fontDrawText(ls_done_button_up + redW * hintY + (redW - fontGetStringWidth("A")) / 2,
+                "A", redW, redW, _colorTable[32767]);
+            fontDrawText(ls_cancel_button_up + redW * hintY + (redW - fontGetStringWidth("B")) / 2,
+                "B", redW, redW, _colorTable[32767]);
+            fontSetCurrent(oldHintFont);
+
+            doneButtonUp = ls_done_button_up;
+            cancelButtonUp = ls_cancel_button_up;
+        }
+    }
+
     btn = buttonCreate(gLoadSaveWindow,
         391,
         349,
@@ -1437,7 +1835,7 @@ static int lsgWindowInit(int windowType)
         -1,
         -1,
         500,
-        _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getData(),
+        doneButtonUp,
         _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_PRESSED].getData(),
         nullptr,
         BUTTON_FLAG_TRANSPARENT);
@@ -1454,7 +1852,7 @@ static int lsgWindowInit(int windowType)
         -1,
         -1,
         501,
-        _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_NORMAL].getData(),
+        cancelButtonUp,
         _loadsaveFrmImages[LOAD_SAVE_FRM_RED_BUTTON_PRESSED].getData(),
         nullptr,
         BUTTON_FLAG_TRANSPARENT);
@@ -1499,13 +1897,34 @@ static int lsgWindowInit(int windowType)
     buttonCreate(gLoadSaveWindow, 55, 87, 230, 353, -1, -1, -1, 502, nullptr, nullptr, nullptr, BUTTON_FLAG_TRANSPARENT);
     fontSetCurrent(101);
 
+    // The modal loop reads the pad directly to step slots one at a time; tell the shared gamepad hook
+    // to stop left-stick-snapping the cursor to buttons.
+    gamepad_ui_set_self_nav(true);
+
+    // ⚠️ AND THROW AWAY THE PRESS THAT OPENED THIS SCREEN. ls_gamepad_keycode keeps its edges in
+    // statics that outlive the screen, so the A still held from picking SAVE GAME rose-edged on the
+    // FIRST poll and confirmed the highlighted slot. The bump makes that poll adopt the live state.
+    gamepad_ui_bump_input_epoch();
+
     return 0;
 }
 
 // 0x47D824
 static int lsgWindowFree(int windowType)
 {
+    gamepad_ui_set_self_nav(false);
+
     windowDestroy(gLoadSaveWindow);
+
+    // Free the A/B hint button-art copies (the window took the buttons that used them with it).
+    if (ls_done_button_up != nullptr) {
+        internal_free(ls_done_button_up);
+        ls_done_button_up = nullptr;
+    }
+    if (ls_cancel_button_up != nullptr) {
+        internal_free(ls_cancel_button_up);
+        ls_cancel_button_up = nullptr;
+    }
     fontSetCurrent(gLoadSaveWindowOldFont);
     messageListFree(&gLoadSaveMessageList);
 
@@ -1528,7 +1947,19 @@ static int lsgWindowFree(int windowType)
 }
 
 // 0x47D88C
+static int lsgPerformSaveGameBody();
+
+// The save itself, with a heal still coming in written as finished (combat_rt_heal_lend_for_save,
+// fallout1-ce's SaveSlot).
 static int lsgPerformSaveGame()
+{
+    combat_rt_heal_lend_for_save();
+    int rc = lsgPerformSaveGameBody();
+    combat_rt_heal_return_after_save();
+    return rc;
+}
+
+static int lsgPerformSaveGameBody()
 {
     _ls_error_code = 0;
     _map_backup_count = -1;
@@ -1735,6 +2166,8 @@ static int lsgLoadGameInSlot(int slot)
         LoadGameHandler* handler = _master_load_list[index];
         if (handler(_flptr) == -1) {
             debugPrint("\nLOADSAVE: ** Error reading load function #%d data! **\n", index);
+            // Into the TRACE too: the debug log is not kept (see _master_load_list for the indices).
+            trace_event(TRACE_ERR, "load-handler-failed", "index=%d pos=%ld", index, (long)pos);
             int v12 = fileTell(_flptr);
             debugPrint("LOADSAVE: Load function #%d data size read: %d bytes.\n", index, fileTell(_flptr) - pos);
             fileClose(_flptr);
@@ -1780,6 +2213,7 @@ static int lsgLoadGameInSlot(int slot)
     }
 
     _loadingGame = false;
+    ls_just_loaded = true;
 
     // SFALL: Start global scripts.
     sfall_gl_scr_exec_start_proc();
@@ -2339,6 +2773,13 @@ static int _get_input_str2(int win, int doneKeyCode, int cancelKeyCode, char* de
             v1++;
         }
 
+        {
+            int padKey = ls_gamepad_keycode();
+            if (keyCode == -1 && padKey != -1) {
+                keyCode = padKey;
+            }
+        }
+
         if (keyCode == doneKeyCode || keyCode == KEY_RETURN) {
             rc = 0;
         } else if (keyCode == cancelKeyCode || keyCode == KEY_ESCAPE) {
@@ -2411,6 +2852,23 @@ static int _DummyFunc(File* stream)
 static int _PrepLoad(File* stream)
 {
     gameReset();
+
+    // ⚠️ Abandon an animation transaction that was still OPEN when the load started. Only one can be
+    // open at a time and a new one is refused while it is, so a dangling one disables EVERY attack in
+    // the game, silently and for good ("first time I could attack, after the load I couldn't").
+    // Vanilla closed them within one turn; realtime plus a mid-session load can leave one, and
+    // gameReset() does not clear it. Safe: an unclosed transaction has nothing running yet.
+    if (anim_discard_open_transaction()) {
+        debugPrint("LOAD: discarded a stale open animation transaction\n");
+    }
+
+    // ⚠️ Abandon a QUEUED MAP TRANSITION as well -- same shape, same survival (map.cc's state is not
+    // cleared by gameReset()), and a destination queued while combat was warm fired on the restored
+    // game: load a save and the world map opens over the city. Pure intent, nothing torn down yet.
+    if (map_has_pending_transition()) {
+        map_clear_pending_transition();
+        debugPrint("LOAD: discarded a stale pending map transition\n");
+    }
     gameMouseSetCursor(MOUSE_CURSOR_WAIT_PLANET);
     gMapHeader.name[0] = '\0';
     gameTimeSetTime(_LSData[_slot_cursor].gameTime);
@@ -2552,11 +3010,13 @@ static int _SlotMap2Game(File* stream)
     int fileNameListLength;
     if (fileReadInt32(stream, &fileNameListLength) == -1) {
         debugPrint("LOADSAVE: returning 1\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 1 slot=%d", _slot_cursor + 1);
         return -1;
     }
 
     if (fileNameListLength == 0) {
         debugPrint("LOADSAVE: returning 2\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 2 slot=%d", _slot_cursor + 1);
         return -1;
     }
 
@@ -2564,18 +3024,21 @@ static int _SlotMap2Game(File* stream)
 
     if (MapDirErase(_str0, PROTO_FILE_EXT) == -1) {
         debugPrint("LOADSAVE: returning 3\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 3 slot=%d", _slot_cursor + 1);
         return -1;
     }
 
     snprintf(_str0, sizeof(_str0), "%s\\", PROTO_DIR_NAME "\\" ITEMS_DIR_NAME);
     if (MapDirErase(_str0, PROTO_FILE_EXT) == -1) {
         debugPrint("LOADSAVE: returning 4\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 4 slot=%d", _slot_cursor + 1);
         return -1;
     }
 
     snprintf(_str0, sizeof(_str0), "%s\\", "MAPS");
     if (MapDirErase(_str0, "SAV") == -1) {
         debugPrint("LOADSAVE: returning 5\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 5 slot=%d", _slot_cursor + 1);
         return -1;
     }
 
@@ -2595,6 +3058,8 @@ static int _SlotMap2Game(File* stream)
 
                 if (_gzdecompress_file(_str1, _str0) == -1) {
                     debugPrint("LOADSAVE: returning 6\n");
+                    trace_event(TRACE_ERR, "slotmap2game-file", "from=%s to=%s", _str1, _str0);
+                    trace_event(TRACE_ERR, "slotmap2game", "returning 6 slot=%d", _slot_cursor + 1);
                     return -1;
                 }
             }
@@ -2612,6 +3077,8 @@ static int _SlotMap2Game(File* stream)
 
         if (_gzdecompress_file(_str0, _str1) == -1) {
             debugPrint("LOADSAVE: returning 7\n");
+            trace_event(TRACE_ERR, "slotmap2game-file", "from=%s to=%s", _str0, _str1);
+            trace_event(TRACE_ERR, "slotmap2game", "returning 7 slot=%d", _slot_cursor + 1);
             return -1;
         }
     }
@@ -2621,6 +3088,7 @@ static int _SlotMap2Game(File* stream)
     snprintf(_str1, sizeof(_str1), "%s\\%s\\%s", _patches, "MAPS", "AUTOMAP.DB");
     if (fileCopyDecompressed(_str0, _str1) == -1) {
         debugPrint("LOADSAVE: returning 8\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 8 slot=%d", _slot_cursor + 1);
         return -1;
     }
 
@@ -2629,11 +3097,13 @@ static int _SlotMap2Game(File* stream)
     int v12;
     if (fileReadInt32(stream, &v12) == -1) {
         debugPrint("LOADSAVE: returning 9\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 9 slot=%d", _slot_cursor + 1);
         return -1;
     }
 
     if (mapLoadSaved(_LSData[_slot_cursor].fileName) == -1) {
         debugPrint("LOADSAVE: returning 13\n");
+        trace_event(TRACE_ERR, "slotmap2game", "returning 13 slot=%d", _slot_cursor + 1);
         return -1;
     }
 

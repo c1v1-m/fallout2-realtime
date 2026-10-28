@@ -1,0 +1,18 @@
+# F2: the whole quick save on the pad -- START held (slot picker), A (DONE), A (overwrite: YES),
+# A (description: DONE). Then START held again: now a straight quick save into that slot.
+name m-quicksave3
+map DESERT1.MAP
+seed 1
+duration 24
+dude tile 20100 rot 2
+
+pad 2000 start 1
+pad 3000 start 0
+tap 4000 A
+tap 5500 A
+tap 7000 A
+shot 9000
+pad 11000 start 1
+pad 12000 start 0
+shot 14000
+note 20000 what happened

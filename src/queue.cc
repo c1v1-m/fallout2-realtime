@@ -468,11 +468,15 @@ static int _queue_do_explosion_(Object* explosive, bool animate)
         elevation = explosive->elevation;
     }
 
-    int maxDamage;
-    int minDamage;
+    // Realtime: never uninitialized -- an unknown pid gets the plastic explosive's damage (vanilla's
+    // else branch) instead of whatever the stack held.
+    int maxDamage = 0;
+    int minDamage = 0;
 
     // SFALL
-    explosiveGetDamage(explosive->pid, &minDamage, &maxDamage);
+    if (!explosiveGetDamage(explosive->pid, &minDamage, &maxDamage)) {
+        explosiveGetDamage(PROTO_ID_PLASTIC_EXPLOSIVES_I, &minDamage, &maxDamage);
+    }
 
     // FIXME: I guess this is a little bit wrong, dude can never be null, I
     // guess it needs to check if owner is dude.

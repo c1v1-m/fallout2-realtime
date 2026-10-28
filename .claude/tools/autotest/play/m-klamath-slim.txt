@@ -1,0 +1,21 @@
+# F2 play-through: Trapper Town (KLAMALL) with its scripts -- talk to Slim (a merchant: barter is one
+# of the replies) on the pad: pick the first reply, then leave.
+name m-klamath-slim
+map KLAMALL.MAP
+mapscript on
+seed 1
+duration 40
+
+talk 2000 16777274
+shot 6000
+tap 7000 A
+shot 9000
+tap 11000 DOWN
+shot 12000
+tap 13000 B
+shot 15000
+tap 16000 B
+note 25000 the dialogue should be over
+
+expect \[FLOW/autotest\] talk .*rc=0
+expect \[FLOW/autotest\] end why=time .* modal=-1

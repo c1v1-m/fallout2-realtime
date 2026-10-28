@@ -23,6 +23,13 @@
 #include "svga.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's elevator.cc changes, ported).
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/game/interact_prompt.h"
+
 namespace fallout {
 
 // The maximum number of elevator levels.
@@ -335,14 +342,94 @@ static FrmImage _elevatorPanelFrmImage;
 // Presents elevator dialog for player to pick a desired level.
 //
 // 0x43EF5C
+// THE SELECTED FLOOR is marked on the panel itself with the panel's OWN pressed-button art
+// (ELEVATOR_FRM_BUTTON_DOWN) -- no yellow frame ("highlighted žlutě floors u výtahu, I fucking hate
+// that"). A parked cursor alone was not enough: on this screen it is not even reliably visible.
+//
+// ⚠️ SAVE-UNDER, because this window is painted ONCE and keeps no clean copy to erase against: keep
+// the pixels the mark covers and put them back before anything else draws. That only stays
+// consistent if nothing draws while the mark is up, so the loop is strictly ERASE -> input -> DRAW.
+#define ELEV_HL_MAX 64
+
+static unsigned char elev_hl_save[ELEV_HL_MAX * ELEV_HL_MAX];
+static int elev_hl_x = -1;
+static int elev_hl_y;
+static int elev_hl_w;
+static int elev_hl_h;
+
+static void elevator_hl_erase()
+{
+    if (elev_hl_x < 0 || gElevatorWindowBuffer == nullptr) {
+        return;
+    }
+
+    int pitch = _elevatorBackgroundFrmImage.getWidth();
+    for (int i = 0; i < elev_hl_h; i++) {
+        memcpy(gElevatorWindowBuffer + pitch * (elev_hl_y + i) + elev_hl_x, elev_hl_save + elev_hl_w * i, elev_hl_w);
+    }
+
+    elev_hl_x = -1;
+}
+
+static void elevator_hl_draw(int level)
+{
+    if (gElevatorWindowBuffer == nullptr || _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getData() == nullptr) {
+        return;
+    }
+
+    // Exactly where elevatorWindowInit registers the button: x 13, y 40 + 60 per level.
+    int x = 13;
+    int y = 40 + 60 * level;
+    int w = _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getWidth();
+    int h = _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getHeight();
+
+    int pitch = _elevatorBackgroundFrmImage.getWidth();
+    if (x < 0 || y < 0 || x + w > pitch || y + h > _elevatorBackgroundFrmImage.getHeight()) {
+        return;
+    }
+    if (w < 1 || h < 1 || w > ELEV_HL_MAX || h > ELEV_HL_MAX) {
+        return;
+    }
+
+    for (int i = 0; i < h; i++) {
+        memcpy(elev_hl_save + w * i, gElevatorWindowBuffer + pitch * (y + i) + x, w);
+    }
+
+    blitBufferToBufferTrans(_elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getData(), w, h, w, gElevatorWindowBuffer + pitch * y + x, pitch);
+
+    elev_hl_x = x;
+    elev_hl_y = y;
+    elev_hl_w = w;
+    elev_hl_h = h;
+}
+
+// Park the cursor on floor button `level` (x 13, y 40 + 60 per level, plus half the button art).
+static void elevator_pad_point(int level)
+{
+    Rect winRect;
+    if (windowGetRect(gElevatorWindow, &winRect) != 0) {
+        return;
+    }
+
+    _mouse_set_position(winRect.left + 13 + _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getWidth() / 2,
+        winRect.top + 40 + 60 * level + _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getHeight() / 2);
+}
+
 int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tilePtr)
 {
     if (elevator < 0 || elevator >= ELEVATORS_MAX) {
+        trace_event(TRACE_WARN, "elev-refused", "why=type type=%d count=%d", elevator, ELEVATORS_MAX);
         return -1;
     }
 
+    // ⚠️ Take the world prompt down BEFORE the panel paints: the floating hand lives in its own
+    // always-on-top window and only gamepad_ui_tick hides it -- which does not run inside this loop,
+    // so the hand that pointed at the elevator stayed over the floor buttons ("ta ruka mě sere").
+    interact_prompt_reset();
+
     // SFALL
     if (elevatorWindowInit(elevator) == -1) {
+        trace_event(TRACE_WARN, "elev-refused", "why=start type=%d", elevator);
         return -1;
     }
 
@@ -392,10 +479,101 @@ int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tileP
         _elevatorBackgroundFrmImage.getWidth());
     windowRefresh(gElevatorWindow);
 
+    // ⚠️ THE PANEL HAD NO GAMEPAD AT ALL: its only inputs were ESC and the floor BUTTONS, which a pad
+    // reaches solely by happening to leave the cursor on one. Same shape as every other modal this pad
+    // drives: self_nav so the gameplay layer stops synthesising world clicks behind the panel, D-pad /
+    // stick picks, A confirms, B cancels.
+    int sel = *elevationPtr;
+    if (sel < 0 || sel >= gElevatorLevels[elevator]) {
+        sel = 0;
+    }
+
+    SDL_GameController* elevPad = gamepad_ui_get_controller();
+    if (elevPad != nullptr) {
+        gamepad_ui_set_self_nav(true);
+        elevator_pad_point(sel);
+        elevator_hl_draw(sel);
+        windowRefresh(gElevatorWindow);
+    }
+
+    bool prevUp = false;
+    bool prevDown = false;
+    bool prevA = false;
+    bool prevB = false;
+    bool aArmed = false; // both buttons must be seen RELEASED before they count -- see below
+    bool bArmed = false;
+    unsigned int lastStep = 0;
+
     bool done = false;
     int keyCode;
     while (!done) {
         sharedFpsLimiter.mark();
+
+        // ⚠️ The mark comes down BEFORE anything can draw, and goes back up at the bottom.
+        elevator_hl_erase();
+
+        if (elevPad != nullptr) {
+            gamepad_ui_set_self_nav(true); // re-assert: nothing else may take the pad while we are up
+
+            SDL_GameControllerUpdate();
+            bool upNow = SDL_GameControllerGetButton(elevPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+            bool downNow = SDL_GameControllerGetButton(elevPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+            bool aNow = SDL_GameControllerGetButton(elevPad, SDL_CONTROLLER_BUTTON_A) != 0;
+            bool bNow = SDL_GameControllerGetButton(elevPad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+            // Held D-pad repeats after a beat, like every other list on this pad.
+            bool repeat = (upNow || downNow) && getTicksSince(lastStep) >= 220;
+
+            int step = 0;
+            if ((upNow && !prevUp) || (upNow && repeat)) {
+                step = -1;
+            } else if ((downNow && !prevDown) || (downNow && repeat)) {
+                step = 1;
+            } else {
+                // The left stick does it too -- it is the thing your thumb is already on.
+                step = gamepad_ui_menu_stick_step();
+            }
+
+            if (step != 0) {
+                lastStep = getTicks();
+                int next = sel + step;
+                if (next >= 0 && next < gElevatorLevels[elevator]) {
+                    sel = next;
+                    soundPlayFile("ib1p1xx1");
+                    elevator_pad_point(sel);
+                }
+            }
+
+            // ⚠️⚠️ THE PRESS THAT OPENED THIS SCREEN IS STILL DOWN, AND IT USED TO CONFIRM: A is held
+            // from the world action that ran the elevator script, so the first iteration read a fresh
+            // edge, confirmed the floor you were on and closed the panel -- all you saw was the doors.
+            // So each button must be RELEASED ONCE before it means anything here.
+            if (!aNow) {
+                aArmed = true;
+            }
+            if (!bNow) {
+                bArmed = true;
+            }
+
+            if (aArmed && aNow && !prevA) {
+                keyCode = 500 + sel;
+                done = true;
+            } else if (bArmed && bNow && !prevB) {
+                keyCode = KEY_ESCAPE;
+                done = true;
+            }
+
+            prevUp = upNow;
+            prevDown = downNow;
+            prevA = aNow;
+            prevB = bNow;
+
+            if (done) {
+                renderPresent();
+                sharedFpsLimiter.throttle();
+                break;
+            }
+        }
 
         keyCode = inputGetInput();
         if (keyCode == KEY_ESCAPE) {
@@ -414,9 +592,25 @@ int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tileP
             }
         }
 
+        if (!done && elevPad != nullptr) {
+            elevator_hl_draw(sel);
+            windowRefresh(gElevatorWindow);
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    // Down for good: the travel animation below repaints the gauge and must not find a mark it knows
+    // nothing about sitting in the buffer.
+    elevator_hl_erase();
+    windowRefresh(gElevatorWindow);
+
+    // How the panel was left. A picked= that equals the floor you were already on, one frame after it
+    // opened, is the held-A signature.
+    trace_event(TRACE_FLOW, "elev-closed", "picked=%d from=%d escaped=%d pad=%d",
+        keyCode == KEY_ESCAPE ? -1 : keyCode - 500, *elevationPtr, keyCode == KEY_ESCAPE ? 1 : 0,
+        elevPad != nullptr ? 1 : 0);
 
     if (keyCode != KEY_ESCAPE) {
         keyCode -= 500;
@@ -465,6 +659,12 @@ int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tileP
     }
 
     elevatorWindowFree();
+
+    // Hand the pad back. ⚠️ A leaked self_nav means the controller is dead in the game world.
+    if (elevPad != nullptr) {
+        gamepad_ui_set_self_nav(false);
+        gamepad_ui_bump_input_epoch();
+    }
 
     if (keyCode != KEY_ESCAPE) {
         const ElevatorDescription* description = &(elevatorDescription[keyCode]);

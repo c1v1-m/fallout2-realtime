@@ -1,0 +1,21 @@
+# Fallout 2: three raiders charge with knives from 15 tiles; the dude stands and shoots a 10mm pistol.
+# Exercises the melee path (swing, dodge at the commit) and a shot leaving its target walking.
+name charge-melee-f2
+map DESERT1.MAP
+seed 1
+duration 25
+
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude hp 500
+dude skill small_guns 120
+dude armor 17
+dude wield 8
+dude item 29 6
+
+spawn 16777455 23100 rot 5 wield 4 hostile
+spawn 16777455 23096 rot 5 wield 4 hostile
+spawn 16777455 23104 rot 5 wield 4 hostile
+
+at 0 fight

@@ -1,0 +1,22 @@
+# The LT lock in Fallout 2: one raider with a pistol, 8 tiles off, the dude holds LT and shoots back.
+# Checks the display_win mapping (2026-10-20, "mířím na něco, tak je terč úplně mimo"): the lock must
+# hold while the raider is on screen (no lock-offscreen in the trace), and the screenshots taken
+# while his bullets fly must show the to-hit cursor ON him.
+name lock-cursor-f2
+map DESERT1.MAP
+seed 1
+duration 14
+
+dude tile 20100 rot 2
+dude stat PE 8
+dude hp 300
+dude skill small_guns 40
+# without armour the test dude's art cannot hold the pistol (wield-failed) and he never fires
+dude armor 2
+dude wield 8
+dude item 29 6
+
+spawn 16777454 21700 rot 5 wield 8 item 29 4 hostile
+
+shots 4
+at 0 fight

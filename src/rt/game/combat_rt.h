@@ -87,6 +87,8 @@ bool combat_rt_is_hostile(Object* obj);
 // on an out-of-range target still consumes A (it just doesn't fire) instead of
 // falling through to a world click.
 bool combat_rt_has_lock();
+void combat_rt_set_quick_throw_cost(int cost);
+Object* combat_rt_lock_target();
 // True while the player is walking under left-stick control (not standing, not walking out a
 // click-to-move path).
 bool combat_rt_stick_walking();
@@ -115,6 +117,10 @@ void combat_rt_set_crowd_make_room(bool enabled);
 bool combat_rt_get_crowd_make_room();
 void combat_rt_set_tactical_ai(bool enabled);
 bool combat_rt_get_tactical_ai();
+void combat_rt_set_projectiles(bool enabled);
+bool combat_rt_get_projectiles();
+int combat_rt_tracers_in_air();
+void combat_rt_set_tracer_look(float lengthHexes, int r, int g, int b, bool underline);
 bool combat_rt_weapon_amnesty();
 bool combat_rt_critter_fighting(Object* critter);
 bool combat_rt_fm_foreign_touch();
@@ -193,6 +199,10 @@ void combat_rt_request_step_back(Object* npc);
 bool combat_rt_medic_beat_enabled();
 bool combat_rt_medic_treats_player(Object* npc);
 void combat_rt_medic_set_treats_player(Object* npc, bool treats);
+// The realtime SAVE CHUNK (load/save handler #26, second to last): the medic opt-outs, the AP pool (RTAP), the
+// quick slots (RTQS), then tagged sections -- RTFH (who was fighting the dude, restored on the same map) and
+// RTFM (the fled-enemy memory, Fallout 2). combat_rt_medic_optout_load treats any missing part as "not in this
+// save" and keeps the defaults; it never fails the load. Every read is EOF-safe (rt_save_read_int).
 void combat_rt_medic_optout_clear();
 int combat_rt_medic_optout_save(DB_FILE* stream);
 int combat_rt_medic_optout_load(DB_FILE* stream);
@@ -339,6 +349,13 @@ bool combat_rt_is_reloading(Object* critter);
 void combat_rt_inject_begin(Object* critter);
 void combat_rt_inject_end(Object* critter);
 bool combat_rt_is_injecting(Object* critter);
+
+// A drug's healing in a fight comes in over time, the dude's and every fighter's (see rt_heal_left in
+// combat_rt.cc). False = not pooled (not in the fight's table); the caller leaves the heal as it was.
+bool combat_rt_heal_over_time(Object* critter, int hp, int pid);
+int combat_rt_heal_left();
+void combat_rt_heal_lend_for_save();
+void combat_rt_heal_return_after_save();
 // A body in a knockdown or a death -- falling, lying, getting up, dying (the reaction layer's view).
 // An enemy's trigger pull must not cut it (action_attack); only the commit decides what a new hit does.
 bool combat_rt_in_heavy_reaction(Object* critter);
@@ -385,8 +402,12 @@ float combat_rt_flinch_seconds();
 // combat_rt_player_attack_pending says whether that attack has not happened yet.
 Object* combat_rt_quick_throw_target();
 bool combat_rt_request_throw(Object* target);
+// The THROW mode a held quick throw will use (a spear's secondary), for the to-hit % over its target
+// (_combat_to_hit); false when no quick throw is held or the hand does not throw.
+bool combat_rt_quick_throw_hit_mode(int* hitMode);
 bool combat_rt_player_attack_pending();
 bool combat_rt_dude_targeted();
+bool combat_rt_dude_attacking();
 
 } // namespace fallout
 

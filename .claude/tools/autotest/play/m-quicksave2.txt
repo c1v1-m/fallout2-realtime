@@ -1,0 +1,16 @@
+# F2: START held = the quick save slot picker; then A (DONE) on slot 1, A again on whatever asks.
+name m-quicksave2
+map DESERT1.MAP
+seed 1
+duration 20
+dude tile 20100 rot 2
+
+pad 2000 start 1
+pad 3000 start 0
+shot 3500
+tap 4500 A
+shot 5500
+tap 7000 A
+shot 8000
+shot 11000
+note 16000 what happened

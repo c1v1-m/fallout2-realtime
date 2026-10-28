@@ -1,0 +1,14 @@
+# F2 (2026-10-26, "dostal jsem XP za ten quest?"): his newest save (Deck SLOT05 via Steam Cloud, the
+# pasture with all seven bugmen dead, GVAR_RUSTLE_OVER = 1, GVAR_TORR_GUARD_STATUS still 1). BACK held runs
+# him to the nearest exit; leaving KLAGRAZ is when Klagraz.int map_exit_p_proc judges the quest and pays.
+name m-pasture-leave
+map KLAGRAZ.MAP
+loadslot 5
+seed 1
+duration 45
+
+pad 3000 BACK 1
+pad 3800 BACK 0
+note 43000 end
+
+expect successfully protected the brahmin

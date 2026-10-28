@@ -1,0 +1,16 @@
+# Fallout 2: a super mutant (pid 16777335) with a rocket launcher; the dude dodges sideways.
+name rocket-dodge-f2
+map DESERT1.MAP
+seed 1
+duration 30
+reaction 1.0
+
+dude tile 20100 rot 2
+dude stat AG 8
+dude stat EN 8
+dude hp 3000
+dude armor 17
+
+spawn 16777335 22500 rot 5 wield 13 item 14 30 hostile
+
+at 0 dodge

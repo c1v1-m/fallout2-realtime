@@ -1,0 +1,25 @@
+# (A) must not record an NPC-vs-NPC fight: two raider teams fight each other (teamfight), the dude is out of it;
+# a quick save in the middle of it writes nobody.
+name rtchunk-npcfight-save
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 15100 rot 2
+dude hp 300
+
+spawn 16777455 21110 rot 2 wield 4 team 50 hp 60
+spawn 16777455 21112 rot 2 wield 4 team 50 hp 60
+spawn 16777455 21310 rot 2 wield 4 team 50 hp 60
+spawn 16777455 21118 rot 5 wield 4 team 51 hp 60
+spawn 16777455 21120 rot 5 wield 4 team 51 hp 60
+spawn 16777455 21318 rot 5 wield 4 team 51 hp 60
+teamfight 50 51
+
+pad 8000 start 1
+pad 9000 start 0
+note 12000 end
+
+expect team-combat\] atkTeam=51 defTeam=50
+expect fight-save\] map=0 elev=0 n=0
+expect save-slot\] slot=1 desc=Quick Save rc=
+expect-not COMBAT/attack\] NPC .*->pid=16777216

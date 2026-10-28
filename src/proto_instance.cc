@@ -32,6 +32,10 @@
 #include "tile.h"
 #include "worldmap.h"
 
+// Realtime (fallout1-ce protinst.cc).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+
 namespace fallout {
 
 static int _obj_remove_from_inven(Object* critter, Object* item);
@@ -1404,6 +1408,32 @@ int _check_scenery_ap_cost(Object* obj, Object* a2)
 {
     if (!isInCombat()) {
         return 0;
+    }
+
+    // ⚠️ IN REALTIME IT TAKES THE 3 AP FROM THE REAL POOL (fallout1-ce 2026-10-19, his "změnil bych").
+    // Vanilla's price for picking something up, opening a door or using scenery, looting, a ladder --
+    // taken from the engine's combat.ap, which realtime holds full all the time, so in a fight every one
+    // of them had silently become free. The dude pays combat_rt's pool now, and with less than 3 the
+    // action stops where vanilla stops it. Critters do not do these in a fight.
+    if (combat_rt_enabled()) {
+        if (obj != gDude) {
+            return 0;
+        }
+        if (combat_rt_spend_ap(3)) {
+            trace_event(TRACE_ACTION, "scenery-ap", "pid=%d cost=3 ap=%d", a2 != nullptr ? a2->pid : -1,
+                combat_rt_player_ap());
+            return 0;
+        }
+        trace_event(TRACE_ACTION, "scenery-ap-refused", "pid=%d ap=%d", a2 != nullptr ? a2->pid : -1,
+            combat_rt_player_ap());
+        MessageListItem refused;
+        // You don't have enough action points.
+        refused.num = 700;
+        if (messageListGetItem(&gProtoMessageList, &refused)) {
+            displayMonitorAddMessage(refused.text);
+        }
+        soundPlayFile("iisxxxx1");
+        return -1;
     }
 
     int actionPoints = obj->data.critter.combat.ap;

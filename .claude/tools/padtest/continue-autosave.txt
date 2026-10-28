@@ -1,0 +1,14 @@
+# Fallout 1 Realtime's saves in Fallout 2 (2026-10-24): CONTINUE from the main menu (the newest save --
+# make one in ARTEMPLE first: autotest play/m-quicksave-temple.txt), run north into the temple
+# (ARTEMPLE -> ARCAVES: a location autosave into SLOT02), then START held (a quick save into SLOT01).
+# main menu: the highlight starts on NEW GAME, CONTINUE is the row above
+7.0 tap UP
+8.0 tap A
+# the temple's outside: run north to the entrance
+14.0 btn X 1
+14.0 axis LY -32767
+17.0 axis LY 0
+17.0 btn X 0
+# quick save
+22.0 btn START 1
+22.8 btn START 0

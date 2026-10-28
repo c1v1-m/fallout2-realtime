@@ -1,0 +1,15 @@
+# F2 play-through: the Temple of Trials (ARCAVES -- ARTEMPLE is only the outside with Klint) with its own
+# scripts, a new character's spear: walk at whatever is there and fight it.
+name m-temple
+map ARCAVES.MAP
+mapscript on
+seed 1
+census
+duration 150
+dude hp 90
+dude skill melee 80
+dude wield 7
+dude item 40 4
+provoke
+
+at 0 advance

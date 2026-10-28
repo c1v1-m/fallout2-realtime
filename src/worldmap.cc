@@ -50,6 +50,12 @@
 #include "tile.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's worldmap.cc changes, rebuilt for this world map).
+#include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define CITY_NAME_SIZE (40)
@@ -2971,10 +2977,391 @@ void wmWorldMap()
     wmWorldMapFunc(0);
 }
 
+
+// --- REALTIME / CONTROLLER (fallout1-ce's worldmap.cc changes, rebuilt for Fallout 2's world map) ----
+//
+// The same rules as fallout1-ce's pad world map, on Fallout 2's own screen: the LEFT STICK steers the
+// party, the D-pad walks the list of known places on the right, A travels to the picked place -- or
+// enters it when the party is standing on it -- and a pointer the player has MOVED onto something
+// (the right stick, a trackpad, a mouse) wins over the list. The town map: the D-pad / left stick pick
+// an entrance (its name lit), A enters, B goes back to the world.
+
+// How far ahead of the party a left-stick steer projects its travel target.
+#define WM_STICK_TRAVEL_LOOKAHEAD 50
+
+// The world map reads the pad itself, so the gameplay shortcut layer stands down while it is up --
+// SCOPED, because wmWorldMapFunc returns from several places and a leaked self_nav kills the pad.
+struct WmSelfNav {
+    WmSelfNav()
+    {
+        gamepad_ui_set_self_nav(true);
+        gamepad_ui_set_self_nav_cursor(true);
+    }
+    ~WmSelfNav()
+    {
+        gamepad_ui_set_self_nav_cursor(false);
+        gamepad_ui_set_self_nav(false);
+    }
+};
+
+// The list entry the D-pad picked (an index into wmLabelList), -1 = none yet. Cleared per visit.
+static int wm_pad_label = -1;
+
+// Where the pointer was when WE last put it somewhere (window coords), -1 = not known yet. A acts on
+// what the pointer is over only once the player has MOVED it away from there.
+static int wm_park_x = -1;
+static int wm_park_y = -1;
+
+// The town map's picked entrance, -1 = none.
+static int tm_pad_sel = -1;
+
+// Park the pointer on the red button of list entry `label` (if it is in the visible part of the list).
+static void wmPadParkLabel(int label)
+{
+    int first = wmGenData.tabsOffsetY / 27;
+    int row = label - first;
+    if (row < 0 || row > 6) {
+        return;
+    }
+
+    Rect winRect;
+    if (windowGetRect(wmBkWin, &winRect) != 0) {
+        return;
+    }
+
+    int x = 508 + wmGenData.redButtonNormalFrmImage.getWidth() / 2;
+    int y = 138 + 27 * row + wmGenData.redButtonNormalFrmImage.getHeight() / 2;
+    _mouse_set_position(winRect.left + x, winRect.top + y);
+    wm_park_x = x;
+    wm_park_y = y;
+}
+
+// Start walking to known place `areaIdx` -- exactly what its quick-destination button does.
+static void wmPadTravelToArea(int areaIdx)
+{
+    CityInfo* city = &(wmAreaInfoList[areaIdx]);
+    CitySizeDescription* citySizeDescription = &(wmSphereData[city->size]);
+    int destX = city->x + citySizeDescription->frmImage.getWidth() / 2 - WM_VIEW_X;
+    int destY = city->y + citySizeDescription->frmImage.getHeight() / 2 - WM_VIEW_Y;
+    wmPartyInitWalking(destX, destY);
+    wmGenData.mousePressed = false;
+}
+
+// What the pad asks the world map loop to do this frame.
+enum WmPadAction {
+    WM_PAD_NONE,
+    WM_PAD_ENTER_HERE, // enter the place the party stands on (as clicking the party marker does)
+    WM_PAD_WALK_TO_POINTER, // walk to the world point under the pointer (as a click on the map does)
+};
+
+static int wmPadUpdate(int* keyCode, int mouseX, int mouseY)
+{
+    static bool prevA = false;
+    static bool prevUp = false;
+    static bool prevDown = false;
+    static bool wasWalking = false;
+    static unsigned int lastStep = 0;
+
+    // Re-assert every frame: a modal opened from here may have cleared it on its own way out.
+    gamepad_ui_set_self_nav(true);
+    gamepad_ui_set_self_nav_cursor(true);
+
+    // The pointer's starting spot counts as a park: nobody has pointed at anything yet.
+    if (wm_park_x == -1) {
+        wm_park_x = mouseX;
+        wm_park_y = mouseY;
+    }
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevA = prevUp = prevDown = false;
+        return WM_PAD_NONE;
+    }
+
+    SDL_GameControllerUpdate();
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+    bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+
+    // Start on the place you are standing in, so the first A still means "enter here".
+    if (wm_pad_label == -1 && wmGenData.currentAreaId != -1) {
+        for (int i = 0; i < wmLabelCount; i++) {
+            if (wmLabelList[i] == wmGenData.currentAreaId) {
+                wm_pad_label = i;
+                break;
+            }
+        }
+    }
+
+    // ⚠️ ARRIVED -- re-point the selection at where the party now stands (on the moving -> stopped
+    // EDGE only), or A at the destination would walk you back to where you set off from.
+    if (wasWalking && !wmGenData.isWalking) {
+        wm_pad_label = -1;
+        for (int i = 0; i < wmLabelCount; i++) {
+            if (wmLabelList[i] == wmGenData.currentAreaId) {
+                wm_pad_label = i;
+                wmPadParkLabel(i);
+                break;
+            }
+        }
+    }
+    wasWalking = wmGenData.isWalking;
+
+    int dir = 0;
+    bool repeat = getTicksSince(lastStep) >= 180;
+    if ((upNow && !prevUp) || (upNow && repeat)) {
+        dir = -1;
+    } else if ((downNow && !prevDown) || (downNow && repeat)) {
+        dir = 1;
+    }
+
+    if (dir != 0 && wmLabelCount > 0) {
+        lastStep = getTicks();
+        int next = wm_pad_label == -1 ? 0 : wm_pad_label + dir;
+        if (next < 0) {
+            next = 0;
+        } else if (next >= wmLabelCount) {
+            next = wmLabelCount - 1;
+        }
+
+        if (next != wm_pad_label) {
+            wm_pad_label = next;
+            soundPlayFile("ib1p1xx1");
+        }
+
+        // Keep it in the visible part of the list (six rows), then park on it.
+        int first = wmGenData.tabsOffsetY / 27;
+        if (wm_pad_label < first) {
+            wmGenData.tabsOffsetY = wm_pad_label * 27;
+            wmGenData.oldTabsOffsetY = wmGenData.tabsOffsetY;
+            wmGenData.tabsScrollingDelta = 0;
+            wmRefreshInterfaceOverlay(false);
+        } else if (wm_pad_label > first + 5) {
+            wmGenData.tabsOffsetY = (wm_pad_label - 5) * 27;
+            wmGenData.oldTabsOffsetY = wmGenData.tabsOffsetY;
+            wmGenData.tabsScrollingDelta = 0;
+            wmRefreshInterfaceOverlay(false);
+        }
+        wmPadParkLabel(wm_pad_label);
+    }
+
+    int action = WM_PAD_NONE;
+
+    if (aNow && !prevA) {
+        // ⚠️ A ACTS ON WHAT THE POINTER IS OVER, ONCE THE PLAYER HAS PUT IT THERE (fallout1-ce
+        // 2026-10-04). A pointer the D-pad parked, or one untouched since the screen opened, is not a
+        // choice, and leaves A on the list selection.
+        bool pointed = abs(mouseX - wm_park_x) + abs(mouseY - wm_park_y) > 3;
+        bool handled = false;
+
+        if (pointed) {
+            for (int row = 0; row < 7; row++) {
+                int bx = 508;
+                int by = 138 + 27 * row;
+                if (mouseX >= bx && mouseX < bx + wmGenData.redButtonNormalFrmImage.getWidth()
+                    && mouseY >= by && mouseY < by + wmGenData.redButtonNormalFrmImage.getHeight()) {
+                    *keyCode = KEY_CTRL_F1 + row;
+                    handled = true;
+                    break;
+                }
+            }
+
+            if (!handled && mouseX >= WM_VIEW_X && mouseX < 472 && mouseY >= WM_VIEW_Y && mouseY < 465) {
+                int worldX = wmWorldOffsetX + mouseX - WM_VIEW_X;
+                int worldY = wmWorldOffsetY + mouseY - WM_VIEW_Y;
+                if (!wmGenData.isWalking && abs(wmGenData.worldPosX - worldX) < 5 && abs(wmGenData.worldPosY - worldY) < 5) {
+                    action = WM_PAD_ENTER_HERE;
+                } else {
+                    action = WM_PAD_WALK_TO_POINTER;
+                }
+                handled = true;
+            }
+        }
+
+        if (!handled) {
+            if (wm_pad_label >= 0 && wm_pad_label < wmLabelCount) {
+                int areaIdx = wmLabelList[wm_pad_label];
+                if (areaIdx == wmGenData.currentAreaId && !wmGenData.isWalking) {
+                    action = WM_PAD_ENTER_HERE;
+                } else if (wmAreaIsKnown(wmAreaInfoList[areaIdx].areaId)) {
+                    wmPadTravelToArea(areaIdx);
+                }
+            } else if (!wmGenData.isWalking) {
+                // Nothing picked: enter whatever is under the party.
+                action = WM_PAD_ENTER_HERE;
+            }
+        }
+    }
+
+    prevA = aNow;
+    prevUp = upNow;
+    prevDown = downNow;
+    return action;
+}
+
+// Left stick steers travel like character movement: a destination a short way ahead of the party in
+// the stick's direction, re-aimed every frame it is held. `armed`: the stick must read neutral once
+// before it steers, so a stick held from the map just left does not walk the party off at once.
+static void wmPadSteer(bool* armed)
+{
+    float stickX;
+    float stickY;
+    if (!gamepad_ui_get_left_stick(&stickX, &stickY)) {
+        *armed = true;
+        return;
+    }
+    if (!*armed) {
+        return;
+    }
+
+    float mag = sqrtf(stickX * stickX + stickY * stickY);
+    if (mag <= 0.0f) {
+        return;
+    }
+
+    int worldW = WM_TILE_WIDTH * wmNumHorizontalTiles;
+    int worldH = wmNumHorizontalTiles > 0 ? WM_TILE_HEIGHT * (wmMaxTileNum / wmNumHorizontalTiles) : 0;
+
+    int steerX = wmGenData.worldPosX + (int)(stickX / mag * WM_STICK_TRAVEL_LOOKAHEAD);
+    int steerY = wmGenData.worldPosY + (int)(stickY / mag * WM_STICK_TRAVEL_LOOKAHEAD);
+    steerX = std::max(0, std::min(steerX, worldW - 1));
+    steerY = std::max(0, std::min(steerY, worldH - 1));
+
+    wmPartyInitWalking(steerX, steerY);
+    wmGenData.mousePressed = false;
+}
+
+// The town map's picked entrance: its name re-drawn in the highlight colour over a fresh refresh, and
+// the pointer parked on its hotspot. There is no hover art on these buttons to do it for us.
+static void wmTownMapPadShow(CityInfo* city, bool park = true)
+{
+    if (tm_pad_sel < 0 || tm_pad_sel >= city->entrancesLength) {
+        return;
+    }
+
+    wmTownMapRefresh();
+
+    EntranceInfo* entrance = &(city->entrances[tm_pad_sel]);
+    MessageListItem messageListItem;
+    messageListItem.num = 200 + 10 * wmTownMapCurArea + tm_pad_sel;
+    if (messageListGetItem(&wmMsgFile, &messageListItem) && messageListItem.text != nullptr) {
+        int width = fontGetStringWidth(messageListItem.text);
+        windowDrawText(wmBkWin,
+            messageListItem.text,
+            width,
+            wmGenData.hotspotNormalFrmImage.getWidth() / 2 + entrance->x - width / 2,
+            wmGenData.hotspotNormalFrmImage.getHeight() + entrance->y + 4,
+            _colorTable[32747] | 0x2000000 | FONT_SHADOW);
+        windowRefresh(wmBkWin);
+    }
+
+    Rect winRect;
+    if (park && windowGetRect(wmBkWin, &winRect) == 0) {
+        _mouse_set_position(winRect.left + entrance->x + wmGenData.hotspotNormalFrmImage.getWidth() / 2,
+            winRect.top + entrance->y + wmGenData.hotspotNormalFrmImage.getHeight() / 2);
+    }
+}
+
+static bool wmTownMapEntranceUsable(CityInfo* city, int index)
+{
+    EntranceInfo* entrance = &(city->entrances[index]);
+    return entrance->state != 0 && entrance->x != -1 && entrance->y != -1;
+}
+
+// Step the entrance selection one 4-way direction, spatially: the nearest entrance AHEAD in the pushed
+// direction, scored by travel along that axis plus a perpendicular penalty. No wrap.
+static void wmTownMapPadStep(CityInfo* city, int dirX, int dirY)
+{
+    if (tm_pad_sel < 0) {
+        return;
+    }
+
+    EntranceInfo* from = &(city->entrances[tm_pad_sel]);
+    int best = -1;
+    long bestScore = 0;
+    for (int index = 0; index < city->entrancesLength; index++) {
+        if (index == tm_pad_sel || !wmTownMapEntranceUsable(city, index)) {
+            continue;
+        }
+
+        int rx = city->entrances[index].x - from->x;
+        int ry = city->entrances[index].y - from->y;
+        int along = dirX != 0 ? dirX * rx : dirY * ry;
+        int perp = dirX != 0 ? ry : rx;
+        if (along <= 2) {
+            continue;
+        }
+
+        long score = (long)along + 3L * labs(perp);
+        if (best < 0 || score < bestScore) {
+            best = index;
+            bestScore = score;
+        }
+    }
+
+    if (best >= 0) {
+        tm_pad_sel = best;
+        soundPlayFile("ib1p1xx1");
+        wmTownMapPadShow(city);
+    }
+}
+
+// The pad on the town map: returns a keyCode for the loop (KEY_1 + entrance, KEY_ESCAPE) or -1.
+// `prev*` are the caller's locals, seeded as "held" so the A that opened this screen does not enter.
+static int wmTownMapPadInput(CityInfo* city, bool* prevUp, bool* prevDown, bool* prevLeft, bool* prevRight, bool* prevA, bool* prevB)
+{
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+    bool down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+    bool left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
+    bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
+    bool a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+    if (up && !*prevUp) {
+        wmTownMapPadStep(city, 0, -1);
+    }
+    if (down && !*prevDown) {
+        wmTownMapPadStep(city, 0, 1);
+    }
+    if (left && !*prevLeft) {
+        wmTownMapPadStep(city, -1, 0);
+    }
+    if (right && !*prevRight) {
+        wmTownMapPadStep(city, 1, 0);
+    }
+
+    int keyCode = -1;
+    if (a && !*prevA && tm_pad_sel >= 0) {
+        soundPlayFile("ib1p1xx1");
+        keyCode = KEY_1 + tm_pad_sel;
+    } else if (b && !*prevB) {
+        keyCode = KEY_ESCAPE;
+    }
+
+    *prevUp = up;
+    *prevDown = down;
+    *prevLeft = left;
+    *prevRight = right;
+    *prevA = a;
+    *prevB = b;
+    return keyCode;
+}
+
 // 0x4BFE10
 static int wmWorldMapFunc(int a1)
 {
     ScopedGameMode gm(GameMode::kWorldmap);
+    WmSelfNav wmSelfNav;
 
     wmFadeOut();
 
@@ -2992,6 +3379,13 @@ static int wmWorldMapFunc(int a1)
     int map = -1;
     int rc = 0;
 
+    // A fresh pick per visit; the pointer counts as untouched until it moves; the stick steers only
+    // after it has been seen neutral.
+    wm_pad_label = -1;
+    wm_park_x = -1;
+    wm_park_y = -1;
+    bool wmStickArmed = false;
+
     while (true) {
         sharedFpsLimiter.mark();
 
@@ -3008,6 +3402,14 @@ static int wmWorldMapFunc(int a1)
 
         int worldX = wmWorldOffsetX + mouseX - WM_VIEW_X;
         int worldY = wmWorldOffsetY + mouseY - WM_VIEW_Y;
+
+        // The pad: the list, A, and the left stick's steering (see WmPadAction).
+        int padAction = wmPadUpdate(&keyCode, mouseX, mouseY);
+        wmPadSteer(&wmStickArmed);
+        if (padAction == WM_PAD_WALK_TO_POINTER) {
+            wmPartyInitWalking(worldX, worldY);
+            wmGenData.mousePressed = false;
+        }
 
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
             showQuitConfirmationDialog();
@@ -3179,6 +3581,43 @@ static int wmWorldMapFunc(int a1)
                 }
 
                 wmGenData.mousePressed = false;
+            }
+        }
+
+        // The pad's "enter where the party stands" -- the very path a click on the party marker takes.
+        if (padAction == WM_PAD_ENTER_HERE && !wmGenData.isWalking) {
+            if (wmGenData.currentAreaId != -1) {
+                CityInfo* city = &(wmAreaInfoList[wmGenData.currentAreaId]);
+                if (city->visitedState == 2 && city->mapFid != -1) {
+                    if (wmTownMapFunc(&map) == -1) {
+                        rc = -1;
+                        break;
+                    }
+                } else {
+                    if (wmAreaFindFirstValidMap(&map) == -1) {
+                        rc = -1;
+                        break;
+                    }
+
+                    city->visitedState = 2;
+                }
+            } else {
+                map = 0;
+            }
+
+            if (map != -1) {
+                if (wmGenData.isInCar) {
+                    wmGenData.isInCar = false;
+                    if (wmGenData.currentAreaId == -1) {
+                        wmMatchAreaContainingMapIdx(map, &(wmGenData.currentCarAreaId));
+                    } else {
+                        wmGenData.currentCarAreaId = wmGenData.currentAreaId;
+                    }
+                }
+
+                wmFadeOut();
+                mapLoadById(map);
+                break;
             }
         }
 
@@ -5769,10 +6208,42 @@ static int wmTownMapFunc(int* mapIdxPtr)
 
     CityInfo* city = &(wmAreaInfoList[wmGenData.currentAreaId]);
 
+    // CE: the pad picks entrances here; the world map's free pointer does not carry in (it would only
+    // hover hotspots behind the selection's back). Put back on the way out.
+    bool tmPrevSelfNavCursor = gamepad_ui_set_self_nav_cursor(false);
+
+    // Start on the first usable entrance, so A works at once.
+    tm_pad_sel = -1;
+    for (int index = 0; index < city->entrancesLength; index++) {
+        if (wmTownMapEntranceUsable(city, index)) {
+            tm_pad_sel = index;
+            break;
+        }
+    }
+    if (gamepad_ui_get_controller() != nullptr) {
+        wmTownMapPadShow(city);
+    }
+
+    // Seeded as HELD: the A that opened this screen is very likely still down on the first frame.
+    bool tmPrevUp = true;
+    bool tmPrevDown = true;
+    bool tmPrevLeft = true;
+    bool tmPrevRight = true;
+    bool tmPrevA = true;
+    bool tmPrevB = true;
+
     for (;;) {
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        if (keyCode == -1) {
+            int padKey = wmTownMapPadInput(city, &tmPrevUp, &tmPrevDown, &tmPrevLeft, &tmPrevRight, &tmPrevA, &tmPrevB);
+            if (padKey != -1) {
+                keyCode = padKey;
+            }
+        }
+
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
             showQuitConfirmationDialog();
         }
@@ -5833,7 +6304,12 @@ static int wmTownMapFunc(int* mapIdxPtr)
                     wmInterfaceScrollTabsStart(27);
                 } else if (keyCode == 2069) {
                     if (wmTownMapRefresh() == -1) {
+                        gamepad_ui_set_self_nav_cursor(tmPrevSelfNavCursor);
                         return -1;
+                    }
+                    // The refresh painted every name plain: light the pad's pick again.
+                    if (gamepad_ui_get_controller() != nullptr) {
+                        wmTownMapPadShow(city, false);
                     }
                 }
 
@@ -5850,6 +6326,9 @@ static int wmTownMapFunc(int* mapIdxPtr)
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    gamepad_ui_set_self_nav_cursor(tmPrevSelfNavCursor);
+    tm_pad_sel = -1;
 
     if (wmTownMapExit() == -1) {
         return -1;

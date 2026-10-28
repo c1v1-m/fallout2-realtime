@@ -1,0 +1,22 @@
+# F2 play-through: the dude's rocket against three raiders.
+name w-rocket
+map DESERT1.MAP
+seed 1
+duration 40
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude stat EN 8
+dude hp 250
+dude skill big_guns 130
+dude armor 2
+dude stat ST 8
+dude wield 13
+dude item 14 8
+dude item 40 4
+
+spawn 16777454 23300 rot 5 wield 8 item 29 2 hostile
+spawn 16777454 23296 rot 5 wield 8 item 29 2 hostile
+spawn 16777454 23304 rot 5 wield 8 item 29 2 hostile
+
+at 0 fight

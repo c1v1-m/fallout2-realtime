@@ -1,0 +1,8 @@
+# New game -> temple; hold LT to lock onto the nearest critter (Klint at the entrance) for 4 s.
+# The lock cursor must sit on him, and the trace must show no lock-offscreen while he is on screen.
+8.0 tap A
+11.0 tap A
+15.0 tap A
+17.0 tap A
+24.0 axis LT 32000
+28.0 axis LT 0

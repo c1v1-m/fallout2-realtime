@@ -1,0 +1,19 @@
+# F2 play-through: the dude's fists against three raiders.
+name w-fists
+map DESERT1.MAP
+seed 1
+duration 40
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude stat EN 8
+dude hp 250
+dude skill unarmed 130
+dude armor 2
+dude item 40 4
+
+spawn 16777454 22500 rot 5 wield 8 item 29 2 hostile
+spawn 16777454 22496 rot 5 wield 8 item 29 2 hostile
+spawn 16777454 22504 rot 5 wield 8 item 29 2 hostile
+
+at 0 advance

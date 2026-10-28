@@ -1,0 +1,21 @@
+# F2: the quick throw (RB) with a spear and with a grenade (2026-10-24, "Bez vytahování" + a wind-up with
+# punch): no draw before the throw; the throw art's frames before the release hold longer, after it snap.
+name m-throw-spear
+map DESERT1.MAP
+seed 1
+duration 24
+dude tile 20100 rot 2
+dude stat AG 9
+dude hp 200
+dude skill throwing 120
+dude wield 8
+dude item 29 2
+dude item 7 3
+dude quickslot rb 7
+
+spawn 16777455 20900 rot 5 wield 4 hostile hp 200
+
+at 0 idle
+at 2 throw
+at 8 throw
+at 14 idle

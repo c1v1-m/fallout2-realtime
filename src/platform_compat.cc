@@ -273,6 +273,22 @@ char* compat_gzgets(gzFile stream, char* buffer, int maxCount)
     return buffer;
 }
 
+// Realtime build (fallout1-ce): the file's modification time, 0 if it cannot be stat-ed -- CONTINUE
+// picks the newest save by it (LoadGameNewest).
+long long compat_file_mtime(const char* path)
+{
+    char nativePath[COMPAT_MAX_PATH];
+    strcpy(nativePath, path);
+    compat_windows_path_to_native(nativePath);
+    compat_resolve_path(nativePath);
+
+    struct stat st;
+    if (stat(nativePath, &st) != 0) {
+        return 0;
+    }
+    return (long long)st.st_mtime;
+}
+
 int compat_remove(const char* path)
 {
     char nativePath[COMPAT_MAX_PATH];

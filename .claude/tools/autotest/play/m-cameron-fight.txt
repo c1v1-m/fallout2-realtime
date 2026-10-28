@@ -1,0 +1,138 @@
+# F2 repro (2026-10-24, the Deck: "zase hra spadla po unarmed combatu s typkem"): the end of the Temple
+# of Trials -- Cameron starts the talk himself (critter_p_proc); talk him (Warrior, ARCAVES floor 2) into the unarmed fight ("Okay, we fight." ->
+# "Me ready."), beat him with LT held and RT pulled again and again. Beaten to half HP his
+# combat_p_proc calls terminate_combat, which in realtime used to be a QUIT request: the game left the
+# map and closed. The note at 45 s must be reached, and the fight must end by the script.
+name m-cameron-fight
+map ARCAVES.MAP
+mapscript on
+seed 1
+duration 50
+dude elevation 2
+dude tile 14525 rot 1
+dude stat ST 10
+dude stat AG 8
+dude hp 300
+dude skill unarmed 150
+
+shot 3500
+tap 4000 DOWN
+tap 4600 A
+tap 6600 A
+tap 8600 A
+shot 9500
+axis 10000 LT 32767
+axis 10500 RT 32767
+axis 10650 RT -32768
+axis 11000 RT 32767
+axis 11150 RT -32768
+axis 11500 RT 32767
+axis 11650 RT -32768
+axis 12000 RT 32767
+axis 12150 RT -32768
+axis 12500 RT 32767
+axis 12650 RT -32768
+axis 13000 RT 32767
+axis 13150 RT -32768
+axis 13500 RT 32767
+axis 13650 RT -32768
+axis 14000 RT 32767
+axis 14150 RT -32768
+axis 14500 RT 32767
+axis 14650 RT -32768
+axis 15000 RT 32767
+axis 15150 RT -32768
+axis 15500 RT 32767
+axis 15650 RT -32768
+axis 16000 RT 32767
+axis 16150 RT -32768
+axis 16500 RT 32767
+axis 16650 RT -32768
+axis 17000 RT 32767
+axis 17150 RT -32768
+axis 17500 RT 32767
+axis 17650 RT -32768
+axis 18000 RT 32767
+axis 18150 RT -32768
+axis 18500 RT 32767
+axis 18650 RT -32768
+axis 19000 RT 32767
+axis 19150 RT -32768
+axis 19500 RT 32767
+axis 19650 RT -32768
+axis 20000 RT 32767
+axis 20150 RT -32768
+axis 20500 RT 32767
+axis 20650 RT -32768
+axis 21000 RT 32767
+axis 21150 RT -32768
+axis 21500 RT 32767
+axis 21650 RT -32768
+axis 22000 RT 32767
+axis 22150 RT -32768
+axis 22500 RT 32767
+axis 22650 RT -32768
+axis 23000 RT 32767
+axis 23150 RT -32768
+axis 23500 RT 32767
+axis 23650 RT -32768
+axis 24000 RT 32767
+axis 24150 RT -32768
+axis 24500 RT 32767
+axis 24650 RT -32768
+axis 25000 RT 32767
+axis 25150 RT -32768
+axis 25500 RT 32767
+axis 25650 RT -32768
+axis 26000 RT 32767
+axis 26150 RT -32768
+axis 26500 RT 32767
+axis 26650 RT -32768
+axis 27000 RT 32767
+axis 27150 RT -32768
+axis 27500 RT 32767
+axis 27650 RT -32768
+axis 28000 RT 32767
+axis 28150 RT -32768
+axis 28500 RT 32767
+axis 28650 RT -32768
+axis 29000 RT 32767
+axis 29150 RT -32768
+axis 29500 RT 32767
+axis 29650 RT -32768
+axis 30000 RT 32767
+axis 30150 RT -32768
+axis 30500 RT 32767
+axis 30650 RT -32768
+axis 31000 RT 32767
+axis 31150 RT -32768
+axis 31500 RT 32767
+axis 31650 RT -32768
+axis 32000 RT 32767
+axis 32150 RT -32768
+axis 32500 RT 32767
+axis 32650 RT -32768
+axis 33000 RT 32767
+axis 33150 RT -32768
+axis 33500 RT 32767
+axis 33650 RT -32768
+axis 34000 RT 32767
+axis 34150 RT -32768
+axis 34500 RT 32767
+axis 34650 RT -32768
+axis 35000 RT 32767
+axis 35150 RT -32768
+axis 35500 RT 32767
+axis 35650 RT -32768
+axis 36000 RT 32767
+axis 36150 RT -32768
+axis 37000 LT -32768
+shot 38000
+note 45000 after
+shot 46000
+
+expect You have defeated me
+expect \[FLOW/end-combat\] script
+expect \[FLOW/autotest\] note .*after
+expect op=unlock prog=scripts.AITemDor.int .*tile=13528
+expect-not react-start\] pid=16777490 .*kind=dying

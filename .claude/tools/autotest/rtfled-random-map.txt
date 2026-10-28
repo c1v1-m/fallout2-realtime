@@ -1,0 +1,18 @@
+# (B) never on a random encounter map (maps.txt saved=No): its critters are erased on exit and ids reused.
+name rtfled-random-map
+map DESERT2.MAP
+seed 1
+duration 24
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+spawn 16777454 20700 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 20706 rot 5 wield 8 item 29 4 hostile
+
+mapgo 6000 DESERT3.MAP -1 0
+mapgo 11000 DESERT2.MAP -1 0
+note 22000 end
+
+expect fled-remember\] map=1 n=0 .*skip=not-saved
+expect-not fled-add\]
+expect-not fled-reaggro

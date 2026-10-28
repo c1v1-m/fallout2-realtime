@@ -48,6 +48,7 @@ int aiGetDisposition(Object* obj);
 int aiSetDisposition(Object* obj, int a2);
 int _caiSetupTeamCombat(Object* attackerTeam, Object* defenderTeam);
 int _caiTeamCombatInit(Object** crittersList, int crittersListLength);
+int aiTeamCombatInitAtElevation(int elevation);
 void _caiTeamCombatExit();
 Object* _ai_search_inven_weap(Object* critter, bool checkRequiredActionPoints, Object* defender);
 Object* _ai_search_inven_armor(Object* critter);

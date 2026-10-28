@@ -1,0 +1,16 @@
+# F2: START held in the world = quick save (gamepad_ui). His Steam run 2026-10-24 00:28: a START hold
+# ran a LOAD that failed (load-handler-failed index=3, gameReset) and the game crashed 90 s later.
+# Run with copies of his save slots in build/Release/data/SAVEGAME.
+name m-quicksave
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+
+pad 2000 start 1
+shot 2700
+shot 3500
+pad 4800 start 0
+shot 5500
+shot 8000
+note 12000 what happened

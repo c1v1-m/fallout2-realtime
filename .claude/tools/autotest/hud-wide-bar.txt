@@ -1,0 +1,13 @@
+# The HUD with Steam's f2_res.ini bar (2026-10-23, "lb chybělo"): Steam asks for the HRP's 800-wide bar
+# (IFACE_BAR_WIDTH=800, IFACE_BAR_SIDE_ART=1), which on the 853-wide internal screen left 26 px a side
+# and no room for the LB / RB quick slots. Run with those two lines under [IFACE] in
+# build/Release/f2_res.ini (take them out again); the photo must show both slots beside a 640 bar.
+name hud-wide-bar-f2
+map DESERT1.MAP
+seed 1
+duration 4
+dude tile 20100 rot 2
+dude item 40 3
+
+shot 2000
+expect \[FLOW/autotest\] shot t=

@@ -1,0 +1,32 @@
+# F2 play-through: a big brawl -- ten raiders against the dude and four allies, a minute long.
+name p-brawl
+map DESERT1.MAP
+seed 1
+duration 70
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude hp 400
+dude skill small_guns 150
+dude armor 17
+dude wield 23
+dude item 35 6
+dude item 40 6
+
+spawn 16777313 20302 rot 2 wield 5 team 0
+spawn 16777278 19902 rot 2 wield 23 item 35 3 team 0
+spawn 16777262 20304 rot 2 wield 9 item 29 3 team 0
+spawn 16777262 19904 rot 2 wield 94 item 95 3 team 0
+
+spawn 16777454 22500 rot 5 wield 8 item 29 3 hostile
+spawn 16777454 22496 rot 5 wield 9 item 29 3 hostile
+spawn 16777455 22504 rot 5 wield 4 hostile
+spawn 16777454 22900 rot 5 wield 9 item 29 3 hostile
+spawn 16777454 22894 rot 5 wield 8 item 29 3 hostile
+spawn 16777455 22906 rot 5 wield 4 hostile
+spawn 16777454 23300 rot 5 wield 8 item 29 3 hostile
+spawn 16777454 23296 rot 5 wield 9 item 29 3 hostile
+spawn 16777455 23304 rot 5 wield 4 hostile
+spawn 16777454 23700 rot 5 wield 9 item 29 3 hostile
+
+at 0 fight

@@ -31,6 +31,11 @@
 #include "trait.h"
 #include "worldmap.h"
 
+#include "game_config.h"
+#include "rt/game/game_trace.h"
+#include "rt/rt_gconfig_keys.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 // Maximum length of dude's name length.
@@ -374,6 +379,20 @@ int critterAdjustPoison(Object* critter, int amount)
     return 0;
 }
 
+// ⚠️ POISON CANNOT KILL WHILE A SCRIPT SKIPS TIME (fallout1-ce 2026-10-14: a doctor's treatment is
+// game_time_advance FIRST -- hours of it -- and the heal AFTER; the skip runs every queued event of those
+// hours, and at 1 HP the first poison dose killed the dude inside the conversation, the heal then filling
+// the corpse). Vanilla's own answer to "poison while time passes" is the return value below: at 5 HP or
+// less it stops a REST. A scripted skip cannot be stopped, so while one runs a dose leaves the dude at
+// 1 HP at the least -- it still costs every other point and still counts down. Set by
+// opGameTimeAdvance.
+static bool critter_poison_spares_life = false;
+
+void critter_set_poison_spares_life(bool spares)
+{
+    critter_poison_spares_life = spares;
+}
+
 // 0x42D318
 int poisonEventProcess(Object* obj, void* data)
 {
@@ -382,7 +401,11 @@ int poisonEventProcess(Object* obj, void* data)
     }
 
     critterAdjustPoison(obj, -2);
-    critterAdjustHitPoints(obj, -1);
+    if (critter_poison_spares_life && critterGetHitPoints(obj) <= 1) {
+        trace_event(TRACE_FLOW, "poison-spared", "hp=%d poison=%d", critterGetHitPoints(obj), critterGetPoison(obj));
+    } else {
+        critterAdjustHitPoints(obj, -1);
+    }
 
     interfaceRenderHitPoints(false);
 
@@ -408,6 +431,26 @@ int critterGetRadiation(Object* obj)
     return PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER ? obj->data.critter.radiation : 0;
 }
 
+// cfg radaway_cancels / MODS row "RadAway clears dose" (fallout1-ce). Lazily read, like every other cfg
+// lever with no init hook of its own; 0 = vanilla.
+static int critter_radaway_cancels = -1;
+
+bool critter_get_radaway_cancels()
+{
+    if (critter_radaway_cancels < 0) {
+        int v = 0;
+        configGetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_RADAWAY_CANCELS_KEY, &v);
+        critter_radaway_cancels = v != 0 ? 1 : 0;
+    }
+
+    return critter_radaway_cancels != 0;
+}
+
+void critter_set_radaway_cancels(bool enabled)
+{
+    critter_radaway_cancels = enabled ? 1 : 0;
+}
+
 // 0x42D3A4
 int critterAdjustRadiation(Object* obj, int amount)
 {
@@ -424,7 +467,11 @@ int critterAdjustRadiation(Object* obj, int amount)
         amount -= critterGetStat(obj, STAT_RADIATION_RESISTANCE) * amount / 100;
     }
 
-    if (amount > 0) {
+    // CRITTER_RADIATED is vanilla's "rads changed, re-grade me at the next hourly tick" flag, set ONLY
+    // when rads go UP -- the reason RadAway never saves you from a dose already queued with the level
+    // you had then. With the lever on, any change re-grades: RadAway drops the counter, the next tick
+    // recomputes the level and _queue_clear_type throws the pending dose away (or queues a milder one).
+    if (amount > 0 || (amount < 0 && critter_get_radaway_cancels())) {
         proto->critter.data.flags |= CRITTER_RADIATED;
     }
 
@@ -476,6 +523,13 @@ int critterAdjustRadiation(Object* obj, int amount)
         obj->data.critter.radiation = 0;
     }
 
+    // The radiation chain is traced end to end (fallout1-ce): rads = the counter moving, rad-check = the
+    // hourly re-grade.
+    trace_event(TRACE_FLOW, "rads", "amount=%d now=%d recheck=%d lever=%d",
+        amount, obj->data.critter.radiation,
+        (proto->critter.data.flags & CRITTER_RADIATED) != 0 ? 1 : 0,
+        critter_get_radaway_cancels() ? 1 : 0);
+
     if (obj == gDude) {
         indicatorBarRefresh();
     }
@@ -493,6 +547,7 @@ int _critter_check_rads(Object* obj)
     Proto* proto;
     protoGetProto(obj->pid, &proto);
     if ((proto->critter.data.flags & CRITTER_RADIATED) == 0) {
+        trace_event(TRACE_FLOW, "rad-check", "skipped=no-flag rads=%d", critterGetRadiation(obj));
         return 0;
     }
 
@@ -519,6 +574,13 @@ int _critter_check_rads(Object* obj)
 
     if (statRoll(obj, STAT_ENDURANCE, gRadiationEnduranceModifiers[radiationLevel], nullptr) <= ROLL_FAILURE) {
         radiationLevel++;
+
+        // ⚠️ A REAL OUT-OF-BOUNDS READ (fallout1-ce, "[FLOW/rad-check] rads=2206 level=6" in his log): a
+        // failed Endurance roll at FATAL (5) lands on 6, one past the end of the radiation effect table
+        // the dose then indexes for every stat. Vanilla in both games.
+        if (radiationLevel >= RADIATION_LEVEL_COUNT) {
+            radiationLevel = RADIATION_LEVEL_COUNT - 1;
+        }
     }
 
     if (radiationLevel > _old_rad_level) {
@@ -531,6 +593,11 @@ int _critter_check_rads(Object* obj)
         radiationEvent->radiationLevel = radiationLevel;
         radiationEvent->isHealing = 0;
         queueAddEvent(GAME_TIME_TICKS_PER_HOUR * randomBetween(4, 18), obj, radiationEvent, EVENT_TYPE_RADIATION);
+        trace_event(TRACE_FLOW, "rad-check", "rads=%d level=%d queued=1", radiation, radiationLevel);
+    } else {
+        // Nothing queued: the level did not rise, or -- the lever on -- RadAway took the counter down far
+        // enough that the dose cleared above stays gone.
+        trace_event(TRACE_FLOW, "rad-check", "rads=%d level=%d queued=0", radiation, radiationLevel);
     }
 
     proto->critter.data.flags &= ~CRITTER_RADIATED;
@@ -814,6 +881,57 @@ static int _critterClearObjDrugs(Object* obj, void* data)
     return obj == _critterClearObj;
 }
 
+// A death frame for `critter` that actually HAS art, preferring `anim` (fallout1-ce). Vanilla picks one
+// single-frame death fid and, when it is missing, falls back to ANIM_FALL_BACK_BLOOD_SF WITHOUT checking
+// it; when that is missing too the corpse points at art that does not exist and renders as nothing -- the
+// invisible body. Death art often exists only for weapon code 0, and a few protos have only the
+// explode-to-nothing frames. Order: the requested anim, then the SF death frames from most to least
+// ordinary, each with the critter's own weapon code before code 0. -1 when the proto has none at all.
+static int critterDeathFid(Object* critter, int anim)
+{
+    static const int fallbackAnims[] = {
+        ANIM_FALL_BACK_BLOOD_SF,
+        ANIM_FALL_FRONT_BLOOD_SF,
+        ANIM_FALL_BACK_SF,
+        ANIM_FALL_FRONT_SF,
+        ANIM_BIG_HOLE_SF,
+        ANIM_CHARRED_BODY_SF,
+        ANIM_CHUNKS_OF_FLESH_SF,
+        ANIM_EXPLODED_TO_NOTHING_SF,
+        ANIM_MELTED_TO_NOTHING_SF,
+        ANIM_ELECTRIFIED_TO_NOTHING_SF,
+        ANIM_BURNED_TO_NOTHING_SF,
+    };
+
+    int frmId = critter->fid & 0xFFF;
+    int weaponCode = (critter->fid & 0xF000) >> 12;
+    int rotation = critter->rotation + 1;
+
+    int candidates[1 + sizeof(fallbackAnims) / sizeof(fallbackAnims[0])];
+    int candidateCount = 0;
+    candidates[candidateCount++] = anim;
+    for (size_t index = 0; index < sizeof(fallbackAnims) / sizeof(fallbackAnims[0]); index++) {
+        candidates[candidateCount++] = fallbackAnims[index];
+    }
+
+    for (int index = 0; index < candidateCount; index++) {
+        for (int pass = 0; pass < 2; pass++) {
+            int code = pass == 0 ? weaponCode : 0;
+            if (pass == 1 && weaponCode == 0) {
+                break;
+            }
+
+            int fid = buildFid(OBJ_TYPE_CRITTER, frmId, candidates[index], code, rotation);
+            _obj_fix_violence_settings(&fid);
+            if (artExists(fid)) {
+                return fid;
+            }
+        }
+    }
+
+    return -1;
+}
+
 // 0x42DA64
 void critterKill(Object* critter, int anim, bool a3)
 {
@@ -842,7 +960,12 @@ void critterKill(Object* critter, int anim, bool a3)
             }
 
             if (back) {
-                fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_BACK_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
+                // The same unchecked fallback as below: resolved through the art-checking search, so a
+                // proto without that exact frame settles into a real corpse, not an invisible one.
+                fid = critterDeathFid(critter, ANIM_FALL_BACK_SF);
+                if (fid == -1) {
+                    fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_BACK_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
+                }
             }
 
             shouldChangeFid = true;
@@ -857,9 +980,9 @@ void critterKill(Object* critter, int anim, bool a3)
             anim = LAST_SF_DEATH_ANIM;
         }
 
-        fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, anim, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
-        _obj_fix_violence_settings(&fid);
-        if (!artExists(fid)) {
+        fid = critterDeathFid(critter, anim);
+        if (fid == -1) {
+            // No death art at all: vanilla's complaint and its guess, there is nothing valid left.
             debugPrint("\nError: Critter Kill: Can't match fid!");
 
             fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_BACK_BLOOD_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);

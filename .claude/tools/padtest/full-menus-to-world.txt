@@ -16,7 +16,10 @@
 10.35 axis LY 0
 10.6 axis LY 24000
 10.8 axis LY 0
-11.0 tap A
+# one more down since the main menu got CONTINUE (2026-10-24): OPTIONS is the fifth row
+11.05 axis LY 24000
+11.25 axis LY 0
+11.6 tap A
 # preferences (main menu OPTIONS): X = MODS, D-pad down, B, B
 14.0 tap X
 15.5 tap DOWN

@@ -1,0 +1,16 @@
+# F2 regression for his 2026-10-24 crash: a LOADED save brings critters (and the dude) back with their
+# saved cid, and the first realtime attack wrote through the unallocated AI info list. Slot 2 of his
+# saves (a copy in build/Release/data/SAVEGAME) is the Temple of Trials with ants: fight them.
+name rtchunk-oldsave-2015
+map DESERT1.MAP
+seed 1
+duration 25
+loadslot 2
+
+at 0 fight
+
+# rtchunk: a save from before the chunk -- the loader must stop at EOF, keep the defaults, read no garbage.
+expect rt-chunk\] end=optout
+expect-not load-handler-failed
+expect-not fight-load
+expect-not fled-load

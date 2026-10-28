@@ -1,4 +1,4 @@
-﻿// Generates fallout2-ce/src/rt/f1compat_gen.h: one inline wrapper per F1 engine function our
+// Generates fallout2-ce/src/rt/f1compat_gen.h: one inline wrapper per F1 engine function our
 // modules call, with the F1 signature, forwarding to the F2 function. A wrong pairing or a changed
 // signature fails to compile, which is the point.
 const fs = require('fs');
@@ -214,6 +214,22 @@ obj_offset _obj_offset
 obj_blocking_at _obj_blocking_at
 dude_stand _dude_stand
 db_freadInt fileReadInt32
+flush_input_buffer inputEventQueueReset
+obj_erase_object objectDestroy
+set_game_time gameTimeSetTime
+game_time gameTimeGetTime
+game_set_global_var gameSetGlobalVar
+map_set_global_var mapSetGlobalVar
+map_get_global_var mapGetGlobalVar
+map_load mapLoadByName
+pc_flag_on dudeEnableState
+is_pc_flag dudeHasState
+is_pc_sneak_working dudeIsSneaking
+item_w_skill weaponGetSkillForHitMode
+isLoadingGame _isLoadingGame
+getSystemPalette _getSystemPalette
+palette_set_entries paletteSetEntriesInRange
+critter_name critterGetName
 combat_is_shot_blocked _combat_is_shot_blocked
 combatai_msg _combatai_msg
 combat_check_bad_shot _combat_check_bad_shot
@@ -230,6 +246,11 @@ win_move _win_move
 action_use_an_object _action_use_an_object
 obj_examine _obj_examine
 obj_look_at _obj_look_at
+item_w_caliber ammoGetCaliber
+map_set_elevation mapSetElevation
+dump_screen takeScreenshot
+make_straight_path_func _make_straight_path_func
+tile_num tileFromScreenXY
 `.trim().split('\n').map(l => l.trim().split(/\s+/));
 
 function walk(d, out = []) {

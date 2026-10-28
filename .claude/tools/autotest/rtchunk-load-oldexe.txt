@@ -1,0 +1,12 @@
+# (A) the BEFORE picture and old-build compatibility: the prechunk exe loads the new mid-fight save (it stops
+# after interfaceLoad and ignores the tail). Count [COMBAT/attack] NPC in its trace: the raiders came back neutral.
+name rtchunk-load-oldexe
+map DESERT1.MAP
+loadslot 1
+seed 1
+duration 12
+
+note 11000 end
+
+expect \[FLOW/autotest\] loadslot 1 rc=0
+expect-not load-handler-failed

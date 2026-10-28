@@ -1,0 +1,20 @@
+# F2 play-through: an Enclave patrol with plasma rifles.
+name c-enclave
+map DESERT1.MAP
+seed 1
+duration 45
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude stat EN 8
+dude hp 400
+dude skill small_guns 150
+dude armor 17
+dude wield 23
+dude item 35 4
+dude item 40 4
+
+spawn 16777466 23100 rot 5 wield 15 item 39 2 hostile
+spawn 16777466 23104 rot 5 wield 15 item 39 2 hostile
+
+at 0 fight

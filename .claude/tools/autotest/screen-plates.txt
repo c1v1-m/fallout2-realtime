@@ -1,0 +1,20 @@
+# F2 (2026-10-24, the Deck: "na začátku jsou pressure plates a je u nich ruka... ať se to neukazuje"): the
+# Temple of Trials' trap plates (pid 33555383, flat generic scenery with the can-use bit) are revealed by
+# walking past them ("You see a raised plate.") and must not get the A prompt. The old exe shows
+# ip-show pid=33555383 here.
+name screen-plates-f2
+map ARCAVES.MAP
+mapscript on
+seed 1
+duration 14
+dude elevation 1
+dude tile 14722 rot 2
+dude stat PE 10
+
+walkto 1500 14520
+walkto 5000 14521
+walkto 8000 14722
+walkto 10500 14521
+
+expect raised plate
+expect-not ip-show\] pid=33555383

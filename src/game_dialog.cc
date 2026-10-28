@@ -42,6 +42,15 @@
 #include "tile.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's gdialog.cc changes, ported).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/game/interact_prompt.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define DIALOG_REVIEW_ENTRIES_CAPACITY 80
@@ -628,6 +637,445 @@ static void gameDialogRedButtonsExit();
 static bool gGameDialogFix;
 static bool gNumberOptions;
 
+// --- REALTIME / CONTROLLER (fallout1-ce's gdialog.cc changes, ported) -------------------------------
+
+// MODS "Script lines as floating text" (cfg script_float_lines) -- see _gdialogSayMessage. Default ON,
+// his call ("rovnou zapnuté a 1").
+static bool gdialog_script_float = true;
+
+bool gdialog_get_script_float()
+{
+    return gdialog_script_float;
+}
+
+void gdialog_set_script_float(bool on)
+{
+    gdialog_script_float = on;
+}
+
+// True while the dialogue is in BARTER (trade) mode. The controller hides the pointer during reply
+// selection but must keep it here, since bartering means pointing at items.
+bool dialog_is_bartering()
+{
+    return _dialogue_state == 4;
+}
+
+// The decorative ANIMATE_FOREVER loops a conversation's animationStop ended, put back when it closes
+// (anim_forever_snapshot / anim_forever_restore).
+#define GDIALOG_FOREVER_MAX 32
+static Object* gdialog_forever_owners[GDIALOG_FOREVER_MAX];
+static int gdialog_forever_anims[GDIALOG_FOREVER_MAX];
+static int gdialog_forever_count = 0;
+
+static void gdialog_restore_forever()
+{
+    anim_forever_restore(gdialog_forever_owners, gdialog_forever_anims, gdialog_forever_count);
+    gdialog_forever_count = 0;
+}
+
+// CE: bumped every time the reply list is rebuilt (_gdProcessUpdate). The pad's reply nav re-seeds its
+// highlight whenever it changes, so a NEW set of options always comes up with option 0 lit.
+static unsigned int gdOptionGen = 0;
+
+// CE: re-arm the conversation's own pad edges. A dialogue can open while a face button is already
+// HELD -- X is RUN, and scripts stop you mid-stride -- so the live state is stamped at entry and only a
+// genuine press made INSIDE the conversation counts.
+static bool gdialog_pad_rearm = false;
+static bool gdialog_pad_rearm_cancel = false;
+
+// CE: the pad's reply selection is ENGAGED -- self_nav on, pointer blanked -- by SOME level of the
+// conversation. File scope because the levels nest and engage lazily; only the outermost exit may hand
+// the pad back.
+static bool gdPadNavEngaged = false;
+
+// CE: a copy of the small red button art with a "Y" / "X" baked in (the letter must live in the button
+// image -- the button redraws it every frame). Freed in _gdialog_window_destroy.
+static unsigned char* gd_barter_hint_up = nullptr;
+static unsigned char* gd_control_hint_up = nullptr;
+
+// Y = barter (the 'b' key the loop already has); X = a party member's COMBAT CONTROL (Fallout 2's own
+// button on that panel -- fallout1-ce put "ask about" there, which Fallout 2 does not have).
+#define GD_KEY_COMBAT_CONTROL 0x7001
+
+static int gdialog_gamepad_keycode()
+{
+    static bool prevY = false;
+    static bool prevX = false;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevY = false;
+        prevX = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    bool xNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
+
+    // First frame of a new conversation: adopt whatever is held instead of reading it as a press.
+    if (gdialog_pad_rearm) {
+        gdialog_pad_rearm = false;
+        prevY = yNow;
+        prevX = xNow;
+        return -1;
+    }
+
+    int keyCode = -1;
+    if (yNow && !prevY) {
+        keyCode = KEY_LOWERCASE_B; // barter / trade
+    } else if (xNow && !prevX && gGameDialogSpeakerIsPartyMember) {
+        keyCode = GD_KEY_COMBAT_CONTROL;
+    }
+
+    prevY = yNow;
+    prevX = xNow;
+    return keyCode;
+}
+
+// CE: B / BACK -> ESCAPE for the dialogue's sub-screens (the review window). Separate edge state so the
+// press that opened a sub-screen cannot also cancel it.
+static int gdialog_gamepad_cancel_key()
+{
+    static bool prevB = false;
+    static bool prevBack = false;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevB = false;
+        prevBack = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool backNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) != 0;
+
+    if (gdialog_pad_rearm_cancel) {
+        gdialog_pad_rearm_cancel = false;
+        prevB = bNow;
+        prevBack = backNow;
+        return -1;
+    }
+
+    int keyCode = -1;
+    if ((bNow && !prevB) || (backNow && !prevBack)) {
+        keyCode = KEY_ESCAPE;
+    }
+
+    prevB = bNow;
+    prevBack = backNow;
+    return keyCode;
+}
+
+// CE: console-style reply selection -- the pointer is blanked (MOUSE_CURSOR_NONE, not hidden, so the
+// right stick can still reveal it) and comes back only while it is actually being moved.
+#define GD_CURSOR_IDLE_MS 2000
+
+static void gdialog_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned int* lastMove)
+{
+    int x;
+    int y;
+    mouseGetPosition(&x, &y);
+
+    if (x != *lastX || y != *lastY) {
+        *lastMove = getTicks();
+        if (!*shown) {
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            *shown = true;
+        }
+    } else if (*shown && getTicksSince(*lastMove) >= GD_CURSOR_IDLE_MS) {
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        *shown = false;
+    }
+
+    *lastX = x;
+    *lastY = y;
+}
+
+// Minimum gap between two accepted reply selections: one press must never answer two reply sets.
+#define GDIALOG_REPLY_LOCKOUT_MS 250
+
+// CE: index-based reply navigation -- D-pad / left stick up/down move the highlighted option, A
+// confirms it by returning its select keycode (49 + index, exactly what clicking the option yields).
+static int gdialog_gamepad_reply_nav(int* sel)
+{
+    static bool prevUp = false;
+    static bool prevDown = false;
+    static bool prevA = false;
+    static bool aArmed = false;
+    static bool navArmed = false;
+    static unsigned int lastStep = 0;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr || gGameDialogOptionEntriesLength <= 0) {
+        prevUp = false;
+        prevDown = false;
+        prevA = false;
+        aArmed = false;
+        navArmed = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    Sint16 ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+    bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0 || ly < -16000;
+    bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0 || ly > 16000;
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+
+    // A nested modal loop (the trade window, a dialog box) ran in between: take the pad as it is NOW.
+    static unsigned int seenEpoch = 0;
+    if (seenEpoch != gamepad_ui_input_epoch()) {
+        seenEpoch = gamepad_ui_input_epoch();
+        prevUp = upNow;
+        prevDown = downNow;
+        prevA = aNow;
+        aArmed = !aNow;
+        navArmed = !upNow && !downNow;
+    }
+
+    // Neutral-first latch: each control must be seen released once before it may act.
+    if (!aNow) {
+        aArmed = true;
+    }
+
+    if (!upNow && !downNow) {
+        navArmed = true;
+    }
+
+    unsigned int now = getTicks();
+
+    int dir = 0;
+    bool repeat = getTicksSince(lastStep) >= 130;
+    if (!navArmed) {
+        dir = 0;
+    } else if ((upNow && !prevUp) || (upNow && repeat)) {
+        dir = -1;
+    } else if ((downNow && !prevDown) || (downNow && repeat)) {
+        dir = 1;
+    }
+
+    if (dir != 0) {
+        int newSel = *sel + dir;
+        if (newSel < 0) {
+            newSel = gGameDialogOptionEntriesLength - 1; // wrap
+        } else if (newSel >= gGameDialogOptionEntriesLength) {
+            newSel = 0;
+        }
+        if (newSel != *sel) {
+            gameDialogOptionOnMouseExit(*sel);
+            gameDialogOptionOnMouseEnter(newSel);
+            *sel = newSel;
+        }
+        lastStep = now;
+    }
+
+    // ⚠️ HARD LOCKOUT AFTER A SELECTION ("zmáčknul jsem áčko a vybrala se i další odpověď").
+    static unsigned int lastSelect = 0;
+
+    int keyCode = -1;
+    if (aArmed && aNow && !prevA && *sel >= 0 && *sel < gGameDialogOptionEntriesLength
+        && getTicksSince(lastSelect) >= GDIALOG_REPLY_LOCKOUT_MS) {
+        keyCode = 49 + *sel; // select this option (_gdProcess: option = keyCode - 49)
+        lastSelect = getTicks();
+        aArmed = false;
+    }
+
+    prevUp = upNow;
+    prevDown = downNow;
+    prevA = aNow;
+    return keyCode;
+}
+
+// CE: the RIGHT stick pages the NPC's reply when it does not fit (_gdReplyTooBig) -- the engine
+// already pages it with the arrow keys. Not the left stick: that one chooses your answer.
+static int gdialog_gamepad_reply_scroll()
+{
+    static bool prevUp = false;
+    static bool prevDown = false;
+    static bool armed = false;
+    static unsigned int lastStep = 0;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevUp = false;
+        prevDown = false;
+        armed = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    Sint16 ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
+    bool upNow = ry < -16000;
+    bool downNow = ry > 16000;
+
+    if (!upNow && !downNow) {
+        armed = true;
+    }
+
+    int keyCode = -1;
+    if (armed) {
+        bool repeat = getTicksSince(lastStep) >= 200;
+        if ((upNow && !prevUp) || (upNow && repeat)) {
+            keyCode = KEY_ARROW_UP;
+            lastStep = getTicks();
+        } else if ((downNow && !prevDown) || (downNow && repeat)) {
+            keyCode = KEY_ARROW_DOWN;
+            lastStep = getTicks();
+        }
+    }
+
+    prevUp = upNow;
+    prevDown = downNow;
+    return keyCode;
+}
+
+// --- FOLLOWER ORDERS BOLTED ONTO A VANILLA CONVERSATION (fallout1-ce) --------------------------------
+//
+// Extra reply lines on a party member's dialogue: "back off a few paces" and "stop patching me up" /
+// "you can patch me up again" (combat_rt's per-companion medic opt-out). No script is touched: the
+// script has finished adding its own options by the time _gdialogGo runs, and the option is marked in
+// its own (otherwise dead) messageId, so nested reply levels cannot confuse it.
+#define GD_OPTION_MEDIC_TOGGLE (-1001)
+#define GD_OPTION_STEP_BACK (-1002)
+
+static bool gd_is_extra_option(const GameDialogOptionEntry* entry, int marker)
+{
+    return entry != nullptr && entry->messageListId == -4 && entry->messageId == marker;
+}
+
+static void gd_add_extra_option(const char* text, int marker)
+{
+    if (gameDialogAddTextOption(-4, text, GAME_DIALOG_REACTION_NEUTRAL) == -1) {
+        return;
+    }
+
+    GameDialogOptionEntry* entry = &(gDialogOptionEntries[gGameDialogOptionEntriesLength - 1]);
+    entry->messageId = marker;
+    entry->proc = 0; // ours to handle; there is no script procedure to run
+}
+
+static void gd_add_follower_options()
+{
+    if (gGameDialogSpeaker == nullptr || !objectIsPartyMember(gGameDialogSpeaker) || gGameDialogSpeaker == gDude) {
+        return;
+    }
+
+    gd_add_extra_option("(Back off a few paces. You're in my way.)", GD_OPTION_STEP_BACK);
+
+    if (!combat_rt_medic_beat_enabled()) {
+        return;
+    }
+
+    gd_add_extra_option(combat_rt_medic_treats_player(gGameDialogSpeaker)
+            ? "(Stop patching me up. Save your supplies.)"
+            : "(You can patch me up again.)",
+        GD_OPTION_MEDIC_TOGGLE);
+}
+
+static void gd_run_follower_medic_option()
+{
+    bool treats = combat_rt_medic_treats_player(gGameDialogSpeaker);
+    combat_rt_medic_set_treats_player(gGameDialogSpeaker, !treats);
+
+    char reply[256];
+    snprintf(reply, sizeof(reply), treats
+            ? "%s shrugs, and puts the kit away."
+            : "%s nods, and checks what is left in the kit.",
+        objectGetName(gGameDialogSpeaker));
+
+    gameDialogSetTextReply(gDialogReplyProgram, -4, reply);
+    gameDialogAddTextOption(-4, "(Good.)", GAME_DIALOG_REACTION_NEUTRAL);
+    gDialogOptionEntries[gGameDialogOptionEntriesLength - 1].proc = 0;
+}
+
+// The walk cannot happen inside the modal dialogue loop: queued, combat_rt starts it after the talk.
+static void gd_run_follower_step_back_option()
+{
+    combat_rt_request_step_back(gGameDialogSpeaker);
+
+    char reply[256];
+    snprintf(reply, sizeof(reply), "%s steps back to give you room.", objectGetName(gGameDialogSpeaker));
+
+    gameDialogSetTextReply(gDialogReplyProgram, -4, reply);
+    gameDialogAddTextOption(-4, "(Thanks.)", GAME_DIALOG_REACTION_NEUTRAL);
+    gDialogOptionEntries[gGameDialogOptionEntriesLength - 1].proc = 0;
+}
+
+// ⚠️ A MESSAGE WITH NO CONVERSATION OPEN IS FLOATED OVER THE SPEAKER (fallout1-ce 2026-10-10). Some
+// vanilla scripts say one line through gsay_message straight from talk_p_proc, without start_gdialog;
+// with no dialogue frame the engine showed bare grey boxes over the map and stopped the game until
+// [Done]. A SHORT such line floats over the speaker like a combat taunt (MODS "Script lines as floating
+// text"); a longer one keeps the vanilla box so it cannot scroll away unread.
+#define GDIALOG_FLOAT_MAX_CHARS 80
+
+static bool gdialog_float_say_message()
+{
+    if (!gdialog_script_float || _gdialog_state == 1 || gGameDialogSpeaker == nullptr) {
+        return false;
+    }
+    if (FID_TYPE(gGameDialogSpeaker->fid) != OBJ_TYPE_CRITTER) {
+        return false;
+    }
+
+    const char* text = nullptr;
+    if (gDialogReplyMessageListId == -4) {
+        text = gDialogReplyText;
+    } else if (gDialogReplyMessageListId >= 0) {
+        text = _scr_get_msg_str(gDialogReplyMessageListId, gDialogReplyMessageId);
+    }
+    if (text == nullptr || text[0] == '\0' || strlen(text) > GDIALOG_FLOAT_MAX_CHARS) {
+        return false;
+    }
+
+    if (combatai_float_line(gGameDialogSpeaker, text) != 0) {
+        return false;
+    }
+    trace_event(TRACE_FLOW, "script-float", "pid=%d id=%d name=%s text=%s",
+        gGameDialogSpeaker->pid, gGameDialogSpeaker->id, objectGetName(gGameDialogSpeaker), text);
+    return true;
+}
+
+// A copy of the red button art with `letter` drawn in its middle (malloc'd; nullptr on failure).
+static unsigned char* gdialog_hint_button(const char* letter)
+{
+    FrmImage redFrm;
+    if (!redFrm.lock(buildFid(OBJ_TYPE_INTERFACE, 96, 0, 0, 0))) {
+        return nullptr;
+    }
+
+    int redW = redFrm.getWidth();
+    int redH = redFrm.getHeight();
+    int redSize = redW * redH;
+    unsigned char* copy = (unsigned char*)internal_malloc(redSize);
+    if (copy == nullptr) {
+        return nullptr;
+    }
+    memcpy(copy, redFrm.getData(), redSize);
+
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+    int hintY = (redH - fontGetLineHeight()) / 2;
+    if (hintY < 0) {
+        hintY = 0;
+    }
+    fontDrawText(copy + redW * hintY + (redW - fontGetStringWidth(letter)) / 2, letter, redW, redW, _colorTable[32767]);
+    fontSetCurrent(oldFont);
+    return copy;
+}
+
+static void gdialog_free_hint_buttons()
+{
+    if (gd_barter_hint_up != nullptr) {
+        internal_free(gd_barter_hint_up);
+        gd_barter_hint_up = nullptr;
+    }
+    if (gd_control_hint_up != nullptr) {
+        internal_free(gd_control_hint_up);
+        gd_control_hint_up = nullptr;
+    }
+}
+
 // gdialog_init
 // 0x444D1C
 int gameDialogInit()
@@ -639,6 +1087,11 @@ int gameDialogInit()
     // SFALL: Use numbers for replies (instead of default knobs).
     gNumberOptions = false;
     configGetBool(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_NUMBERS_IS_DIALOG_KEY, &gNumberOptions);
+
+    // MODS "Script lines as floating text".
+    int scriptFloat = 1;
+    configGetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_SCRIPT_FLOAT_KEY, &scriptFloat);
+    gdialog_script_float = scriptFloat != 0;
 
     return 0;
 }
@@ -678,8 +1131,17 @@ void gameDialogEnter(Object* speaker, int a2)
     }
 
     _gdDialogWentOff = false;
+    gdialog_pad_rearm = true;
+    gdialog_pad_rearm_cancel = true;
+    // And invalidate the GAMEPLAY shortcut edges too, so a button held from the world cannot fire one.
+    gamepad_ui_bump_input_epoch();
 
-    if (isInCombat()) {
+    // Vanilla refused a conversation during a turn-based encounter. Realtime's combat bit stays warm
+    // while ANY critter anywhere is chasing, so that guard had become "you may never talk while a
+    // fight is on somewhere on the map". Ask the narrow question instead: is somebody coming for me?
+    if (combat_rt_under_threat()) {
+        trace_event(TRACE_FLOW, "dialog-refused", "pid=%d id=%d name=%s why=under-threat",
+            speaker->pid, speaker->id, objectGetName(speaker));
         return;
     }
 
@@ -691,6 +1153,10 @@ void gameDialogEnter(Object* speaker, int a2)
         MessageListItem messageListItem;
 
         int rc = _action_can_talk_to(gDude, speaker);
+        if (rc != 0) {
+            trace_event(TRACE_FLOW, "dialog-refused", "pid=%d id=%d name=%s why=%s",
+                speaker->pid, speaker->id, objectGetName(speaker), rc == -1 ? "no-sight-path" : "too-far");
+        }
         if (rc == -1) {
             // You can't see there.
             messageListItem.num = 660;
@@ -722,6 +1188,10 @@ void gameDialogEnter(Object* speaker, int a2)
         }
     }
 
+    // The gamepad interact prompt is driven from gamepad_ui_tick, which stops once this conversation
+    // takes over its own loop -- its last frame would linger over the talking head.
+    interact_prompt_reset();
+
     gGameDialogOldCenterTile = gCenterTile;
     gGameDialogBarterModifier = 0;
     gGameDialogOldDudeTile = gDude->tile;
@@ -748,6 +1218,7 @@ void gameDialogEnter(Object* speaker, int a2)
         gameMouseObjectsShow();
         isoEnable();
         scriptsExecMapUpdateProc();
+        gdialog_restore_forever();
         _dialog_state_fix = 0;
         return;
     }
@@ -756,6 +1227,7 @@ void gameDialogEnter(Object* speaker, int a2)
         _dialogue_just_started = 0;
         isoEnable();
         scriptsExecMapUpdateProc();
+        gdialog_restore_forever();
         _dialog_state_fix = 0;
         return;
     }
@@ -796,6 +1268,10 @@ void gameDialogEnter(Object* speaker, int a2)
 
     isoEnable();
     scriptsExecMapUpdateProc();
+
+    // The decorative loops the conversation stopped -- after map_update, so a prop its own script
+    // already restarted is busy and skipped.
+    gdialog_restore_forever();
 
     _dialog_state_fix = 0;
 }
@@ -885,7 +1361,14 @@ int _gdialogInitFromScript(int headFid, int reaction)
         return 0;
     }
 
+    // Decorative loops stopped below come back when the conversation ends.
+    gdialog_forever_count = anim_forever_snapshot(gdialog_forever_owners, gdialog_forever_anims, GDIALOG_FOREVER_MAX);
     animationStop();
+
+    // Every conversation, named: who, which head, and whether a fight was on.
+    trace_event(TRACE_FLOW, "dialog-start", "pid=%d id=%d name=%s head=%d reaction=%d inCombat=%d",
+        gGameDialogSpeaker != nullptr ? gGameDialogSpeaker->pid : -1, gGameDialogSpeaker != nullptr ? gGameDialogSpeaker->id : -1,
+        gGameDialogSpeaker != nullptr ? objectGetName(gGameDialogSpeaker) : "-", headFid, reaction, isInCombat() ? 1 : 0);
 
     _boxesWereDisabled = indicatorBarHide();
     gGameDialogSpeakerIsPartyMember = objectIsPartyMember(gGameDialogSpeaker);
@@ -1077,6 +1560,12 @@ int _gdialogStart()
 // 0x445510
 int _gdialogSayMessage()
 {
+    if (gdialog_float_say_message()) {
+        gGameDialogOptionEntriesLength = 0;
+        gDialogReplyMessageListId = -1;
+        return 0;
+    }
+
     mouseShowCursor();
     _gdialogGo();
 
@@ -1135,6 +1624,12 @@ int gameDialogSetMessageReply(Program* program, int messageListId, int messageId
 {
     gameDialogAddReviewMessage(messageListId, messageId);
 
+    // What was said to the player, paired with dialog-choice for what he answered.
+    {
+        const char* said = _scr_get_msg_str(messageListId, messageId);
+        trace_event(TRACE_FLOW, "dialog-reply", "msg=%d text=%.80s", messageId, said != nullptr ? said : "-");
+    }
+
     gDialogReplyProgram = program;
     gDialogReplyMessageListId = messageListId;
     gDialogReplyMessageId = messageId;
@@ -1170,6 +1665,10 @@ int _gdialogGo()
     }
 
     int rc = 0;
+
+    // Appended AFTER the script's own options and BEFORE the empty-list fallback, so ours never become
+    // the reason a node counts as having options.
+    gd_add_follower_options();
 
     if (gGameDialogOptionEntriesLength < 1) {
         gDialogOptionEntries[gGameDialogOptionEntriesLength].proc = 0;
@@ -1264,6 +1763,13 @@ int gameDialogAddMessageOption(int messageListId, int messageId, int reaction)
     optionEntry->reaction = reaction;
     optionEntry->btn = -1;
     optionEntry->text[0] = '\0';
+
+    // What he is offered, in order (the pad's D-pad walks this list); dialog-choice says which he took.
+    {
+        const char* text = _scr_get_msg_str(messageListId, messageId);
+        trace_event(TRACE_FLOW, "dialog-option", "idx=%d msg=%d text=%.80s", gGameDialogOptionEntriesLength, messageId,
+            text != nullptr ? text : "-");
+    }
 
     gGameDialogOptionEntriesLength++;
 
@@ -1472,6 +1978,12 @@ int gameDialogShowReview()
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        // CE: B / BACK cancels the review window.
+        if (keyCode == -1) {
+            keyCode = gdialog_gamepad_cancel_key();
+        }
+
         if (keyCode == 17 || keyCode == 24 || keyCode == 324) {
             showQuitConfirmationDialog();
         }
@@ -1876,10 +2388,72 @@ int _gdProcess()
     int pageIndex = 0;
     int pageOffsets[10];
     pageOffsets[0] = 0;
+
+    // Controller reply selection, like the main menu: the pointer blanked, a highlighted option moved by
+    // the D-pad/stick, self_nav telling the mouse hook not to snap or click. Barter keeps its pointer.
+    // ⚠️ ENGAGED AT THE FIRST FRAME THAT IS NOT A TRADE, NOT ONCE AT ENTRY (a merchant's node can enter
+    // already bartering).
+    bool gdCursorController = false;
+    bool gdCursorShown = true;
+    int gdCursorX = -1;
+    int gdCursorY = -1;
+    unsigned int gdCursorMove = getTicks();
+    int gdReplySel = 0;
+    unsigned int gdSeenOptionGen = gdOptionGen - 1;
+
     for (;;) {
         sharedFpsLimiter.mark();
 
+        // Before inputGetInput, so the hook already runs under self_nav on the frame this engages.
+        if (!gdCursorController && gamepad_ui_get_controller() != nullptr && !dialog_is_bartering()) {
+            gdCursorController = true;
+            gdCursorShown = false;
+            mouseGetPosition(&gdCursorX, &gdCursorY);
+            gdCursorMove = getTicks();
+            gdSeenOptionGen = gdOptionGen - 1; // light this level's list the moment it is ours
+            gameMouseSetCursor(MOUSE_CURSOR_NONE);
+            gamepad_ui_set_self_nav(true);
+            gdPadNavEngaged = true;
+        }
+
         int keyCode = inputGetInput();
+
+        if (gdCursorController) {
+            // A rebuilt reply list arrives with nothing highlighted: re-seed on option 0.
+            if (gdSeenOptionGen != gdOptionGen) {
+                gdSeenOptionGen = gdOptionGen;
+                gdReplySel = 0;
+                if (gGameDialogOptionEntriesLength > 0) {
+                    gameDialogOptionOnMouseEnter(0);
+                }
+            }
+
+            gdialog_tick_cursor(&gdCursorShown, &gdCursorX, &gdCursorY, &gdCursorMove);
+            int navKey = gdialog_gamepad_reply_nav(&gdReplySel);
+            if (keyCode == -1 && navKey != -1) {
+                keyCode = navKey;
+            }
+
+            // Right stick -> page the reply text.
+            if (keyCode == -1) {
+                keyCode = gdialog_gamepad_reply_scroll();
+            }
+        }
+
+        // CE: the pad's barter / combat control shortcuts (Y/X) when no real key fired.
+        if (keyCode == -1) {
+            int padKey = gdialog_gamepad_keycode();
+            if (padKey != -1) {
+                keyCode = padKey;
+            }
+        }
+
+        if (keyCode == GD_KEY_COMBAT_CONTROL) {
+            keyCode = -1;
+            if (gGameDialogSpeakerIsPartyMember && _dialogue_state == 1) {
+                gameDialogCombatControlButtonOnMouseUp(-1, -1);
+            }
+        }
 
         convertMouseWheelToArrowKey(&keyCode);
 
@@ -1903,6 +2477,10 @@ int _gdProcess()
 
                 inventoryOpenTrade(gGameDialogWindow, gGameDialogSpeaker, _peon_table_obj, _barterer_table_obj, gGameDialogBarterModifier);
                 _gdialog_barter_cleanup_tables();
+
+                // The trade ran its own input loop: light the list again when we are back (the window
+                // is rebuilt around the trade, which repaints the options plain).
+                gdSeenOptionGen = gdOptionGen - 1;
 
                 int v5 = _dialogue_state;
                 _gdialog_barter_destroy_win();
@@ -1972,10 +2550,25 @@ int _gdProcess()
         }
 
         if (keyCode != -1) {
+            // ⚠️ WITH THE PAD DRIVING THERE IS ONE HIGHLIGHT, AND IT IS THE SELECTION. The option
+            // buttons still raise hover events under the blanked pointer; a hover counts only while the
+            // pointer is really in use, and then it TAKES the selection instead of adding a second one.
             if (keyCode >= 1200 && keyCode <= 1250) {
-                gameDialogOptionOnMouseEnter(keyCode - 1200);
+                int hovered = keyCode - 1200;
+                if (!gdCursorController) {
+                    gameDialogOptionOnMouseEnter(hovered);
+                } else if (gdCursorShown && hovered < gGameDialogOptionEntriesLength && hovered != gdReplySel) {
+                    if (gdReplySel >= 0 && gdReplySel < gGameDialogOptionEntriesLength) {
+                        gameDialogOptionOnMouseExit(gdReplySel);
+                    }
+                    gameDialogOptionOnMouseEnter(hovered);
+                    gdReplySel = hovered;
+                }
             } else if (keyCode >= 1300 && keyCode <= 1330) {
-                gameDialogOptionOnMouseExit(keyCode - 1300);
+                int left = keyCode - 1300;
+                if (!gdCursorController || (left != gdReplySel && left < gGameDialogOptionEntriesLength)) {
+                    gameDialogOptionOnMouseExit(left);
+                }
             } else if (keyCode >= 48 && keyCode <= 57) {
                 // SFALL: Prevents from using 0 to escape from dialogue at any time.
                 if (keyCode == KEY_0 && gGameDialogFix) {
@@ -2007,6 +2600,14 @@ int _gdProcess()
 
         renderPresent();
         sharedFpsLimiter.throttle();
+    }
+
+    // Release the controller reply-nav state, but only at the OUTERMOST level -- keyed on the file-scope
+    // flag, since engaging is lazy and a leaked self_nav is a dead pad in the whole world.
+    if (gdPadNavEngaged && _gdReenterLevel == 1) {
+        gamepad_ui_set_self_nav(false);
+        gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+        gdPadNavEngaged = false;
     }
 
     _gdReenterLevel -= 1;
@@ -2043,6 +2644,17 @@ int _gdProcessChoice(int a1)
         gameDialogSetReviewOptionMessage(dialogOptionEntry->messageListId, dialogOptionEntry->messageId);
     }
 
+    // WHICH ANSWER WAS GIVEN, as the player read it.
+    {
+        const char* chosen = dialogOptionEntry->messageListId == -4
+            ? dialogOptionEntry->text
+            : (dialogOptionEntry->messageListId >= 0
+                    ? _scr_get_msg_str(dialogOptionEntry->messageListId, dialogOptionEntry->messageId)
+                    : nullptr);
+        trace_event(TRACE_INPUT, "dialog-choice", "idx=%d msg=%d text=%.80s", a1,
+            dialogOptionEntry->messageId, chosen != nullptr ? chosen : "-");
+    }
+
     _can_start_new_fidget = false;
 
     gameDialogEndLips();
@@ -2074,9 +2686,17 @@ int _gdProcessChoice(int a1)
     gameDialogOptionOnMouseEnter(a1);
     _talk_to_critter_reacts(v1);
 
+    bool extraMedic = gd_is_extra_option(dialogOptionEntry, GD_OPTION_MEDIC_TOGGLE);
+    bool extraStepBack = gd_is_extra_option(dialogOptionEntry, GD_OPTION_STEP_BACK);
+
     gGameDialogOptionEntriesLength = 0;
 
-    if (_gdReenterLevel < 2) {
+    // Our own lines have no script procedure: each builds a fresh reply and option of its own.
+    if (extraMedic) {
+        gd_run_follower_medic_option();
+    } else if (extraStepBack) {
+        gd_run_follower_step_back_option();
+    } else if (_gdReenterLevel < 2) {
         if (dialogOptionEntry->proc != 0) {
             _executeProcedure(gDialogReplyProgram, dialogOptionEntry->proc);
         }
@@ -2222,6 +2842,9 @@ void gameDialogRenderReply()
 // 0x446D30
 void _gdProcessUpdate()
 {
+    // CE: a fresh reply list starts here (bumped at the TOP: a half-built list still needs re-seeding).
+    gdOptionGen++;
+
     _replyRect.left = 5;
     _replyRect.top = 10;
     _replyRect.right = 374;
@@ -3693,14 +4316,342 @@ int _gdCanBarter()
     return 0;
 }
 
+// --- CONTROLLER: the party member COMBAT CONTROL and CUSTOMIZATION panels (Fallout 2 only) ---------
+//
+// Fallout 1 has no such panels, so there is nothing to port -- they get the same treatment as every
+// other screen this pad drives: a 1px frame in the selection yellow around the focused control, the
+// D-pad / left stick steps the focus SPATIALLY, A presses it, B backs out. The frame is drawn through
+// a SAVE-UNDER on the dialog window and the loops are strictly erase -> input -> draw, because these
+// panels repaint parts of themselves (the stats box, the radio buttons) at any time.
+struct GdPadItem {
+    int x;
+    int y;
+    int w;
+    int h;
+    int btn; // the panel's own button, pressed for A
+    int code; // a code to post instead of pressing (-1 = press the button)
+};
+
+#define GD_PAD_ITEM_MAX 12
+#define GD_PAD_HL_MAX_W 140
+#define GD_PAD_HL_MAX_H 40
+#define GD_PAD_REPEAT_DELAY_MS 320
+#define GD_PAD_REPEAT_RATE_MS 110
+
+static unsigned char gd_pad_hl_top[GD_PAD_HL_MAX_W];
+static unsigned char gd_pad_hl_bottom[GD_PAD_HL_MAX_W];
+static unsigned char gd_pad_hl_left[GD_PAD_HL_MAX_H];
+static unsigned char gd_pad_hl_right[GD_PAD_HL_MAX_H];
+static int gd_pad_hl_win = -1;
+static int gd_pad_hl_x = -1;
+static int gd_pad_hl_y;
+static int gd_pad_hl_w;
+static int gd_pad_hl_h;
+
+static void gd_pad_hl_erase()
+{
+    if (gd_pad_hl_x < 0 || gd_pad_hl_win == -1) {
+        gd_pad_hl_x = -1;
+        return;
+    }
+
+    unsigned char* buf = windowGetBuffer(gd_pad_hl_win);
+    int pitch = windowGetWidth(gd_pad_hl_win);
+    if (buf != nullptr) {
+        memcpy(buf + pitch * gd_pad_hl_y + gd_pad_hl_x, gd_pad_hl_top, gd_pad_hl_w);
+        memcpy(buf + pitch * (gd_pad_hl_y + gd_pad_hl_h - 1) + gd_pad_hl_x, gd_pad_hl_bottom, gd_pad_hl_w);
+        for (int i = 0; i < gd_pad_hl_h; i++) {
+            unsigned char* row = buf + pitch * (gd_pad_hl_y + i);
+            row[gd_pad_hl_x] = gd_pad_hl_left[i];
+            row[gd_pad_hl_x + gd_pad_hl_w - 1] = gd_pad_hl_right[i];
+        }
+    }
+
+    gd_pad_hl_x = -1;
+}
+
+static void gd_pad_hl_draw(int win, const GdPadItem* item)
+{
+    unsigned char* buf = windowGetBuffer(win);
+    if (buf == nullptr) {
+        return;
+    }
+
+    int pitch = windowGetWidth(win);
+    int height = windowGetHeight(win);
+
+    // Two pixels of air around the control.
+    int x = item->x - 2;
+    int y = item->y - 2;
+    int w = item->w + 4;
+    int h = item->h + 4;
+    if (x < 0 || y < 0 || w < 3 || h < 3 || w > GD_PAD_HL_MAX_W || h > GD_PAD_HL_MAX_H
+        || x + w > pitch || y + h > height) {
+        return;
+    }
+
+    // Whole footprint saved BEFORE any of it is drawn, or the corners come back yellow.
+    memcpy(gd_pad_hl_top, buf + pitch * y + x, w);
+    memcpy(gd_pad_hl_bottom, buf + pitch * (y + h - 1) + x, w);
+    for (int i = 0; i < h; i++) {
+        const unsigned char* row = buf + pitch * (y + i);
+        gd_pad_hl_left[i] = row[x];
+        gd_pad_hl_right[i] = row[x + w - 1];
+    }
+
+    unsigned char color = _colorTable[32747];
+    memset(buf + pitch * y + x, color, w);
+    memset(buf + pitch * (y + h - 1) + x, color, w);
+    for (int i = 0; i < h; i++) {
+        unsigned char* row = buf + pitch * (y + i);
+        row[x] = color;
+        row[x + w - 1] = color;
+    }
+
+    gd_pad_hl_win = win;
+    gd_pad_hl_x = x;
+    gd_pad_hl_y = y;
+    gd_pad_hl_w = w;
+    gd_pad_hl_h = h;
+}
+
+// Nearest item that genuinely lies in the pushed direction; a row/column neighbour (overlapping on
+// the other axis) beats one merely in line with it. Same rules as the character screen.
+static int gd_pad_step(const GdPadItem* items, int count, int focus, int dx, int dy)
+{
+    const GdPadItem* cur = &(items[focus]);
+    int cx = cur->x + cur->w / 2;
+    int cy = cur->y + cur->h / 2;
+
+    int best = -1;
+    int bestScore = 0;
+    bool bestOverlaps = false;
+    for (int i = 0; i < count; i++) {
+        if (i == focus) {
+            continue;
+        }
+
+        const GdPadItem* it = &(items[i]);
+        int ix = it->x + it->w / 2;
+        int iy = it->y + it->h / 2;
+
+        int along = dx != 0 ? (ix - cx) * dx : (iy - cy) * dy;
+        if (along < 6) {
+            continue;
+        }
+
+        int across = dx != 0 ? (iy - cy) : (ix - cx);
+        if (across < 0) {
+            across = -across;
+        }
+
+        bool overlaps = dx != 0
+            ? (it->y < cur->y + cur->h && it->y + it->h > cur->y)
+            : (it->x < cur->x + cur->w && it->x + it->w > cur->x);
+
+        int score = along + 2 * across;
+        if (best == -1 || (overlaps && !bestOverlaps) || (overlaps == bestOverlaps && score < bestScore)) {
+            best = i;
+            bestScore = score;
+            bestOverlaps = overlaps;
+        }
+    }
+
+    return best != -1 ? best : focus;
+}
+
+// One frame of pad input for a panel: returns -1 nothing, 0..count-1 "A on this item", -2 "B".
+// \`state\` keeps the edges and the held-direction repeat across frames; seeded as HELD so the A that
+// opened the panel does not press its first control.
+struct GdPadState {
+    bool prevA;
+    bool prevB;
+    int heldDir;
+    unsigned int nextStepAt;
+    unsigned int epoch;
+};
+
+static void gd_pad_prime(GdPadState* state)
+{
+    state->prevA = true;
+    state->prevB = true;
+    state->heldDir = -1;
+    state->nextStepAt = 0;
+    state->epoch = gamepad_ui_input_epoch();
+}
+
+static int gd_pad_poll(GdPadState* state, const GdPadItem* items, int count, int* focus)
+{
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr || count <= 0) {
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+    bool down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+    bool left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
+    bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
+    bool a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    int dir = up ? 1 : (down ? 2 : (left ? 3 : (right ? 4 : 0)));
+
+    // A nested window (the picker, a box) ran its own loop: adopt the live state, act on nothing.
+    unsigned int epoch = gamepad_ui_input_epoch();
+    if (epoch != state->epoch) {
+        state->epoch = epoch;
+        state->prevA = a;
+        state->prevB = b;
+        state->heldDir = dir;
+        state->nextStepAt = getTicks() + GD_PAD_REPEAT_DELAY_MS;
+        return -1;
+    }
+
+    if (state->heldDir == -1) {
+        // First frame: a direction held in from the screen before is not a step either.
+        state->heldDir = dir;
+        state->nextStepAt = getTicks() + GD_PAD_REPEAT_DELAY_MS;
+    } else {
+        bool fire = false;
+        if (dir != state->heldDir) {
+            state->heldDir = dir;
+            fire = dir != 0;
+            state->nextStepAt = getTicks() + GD_PAD_REPEAT_DELAY_MS;
+        } else if (dir != 0 && getTicks() >= state->nextStepAt) {
+            fire = true;
+            state->nextStepAt = getTicks() + GD_PAD_REPEAT_RATE_MS;
+        }
+
+        if (fire) {
+            int dx = dir == 3 ? -1 : (dir == 4 ? 1 : 0);
+            int dy = dir == 1 ? -1 : (dir == 2 ? 1 : 0);
+            int next = gd_pad_step(items, count, *focus, dx, dy);
+            if (next != *focus) {
+                *focus = next;
+                soundPlayFile("ib1p1xx1");
+            }
+        }
+    }
+
+    int rc = -1;
+    if (a && !state->prevA) {
+        rc = *focus;
+    } else if (b && !state->prevB) {
+        rc = -2;
+    }
+
+    state->prevA = a;
+    state->prevB = b;
+    return rc;
+}
+
+// The size of an interface FRM, for the controls whose button art is only known by fid here.
+static void gd_pad_frm_size(int frmId, int* w, int* h)
+{
+    FrmImage image;
+    if (image.lock(buildFid(OBJ_TYPE_INTERFACE, frmId, 0, 0, 0))) {
+        *w = image.getWidth();
+        *h = image.getHeight();
+    } else {
+        *w = 14;
+        *h = 14;
+    }
+}
+
+// Can option \`type\` of the customization panel take value row \`index\` for this party member? The
+// very test the picker's mouse path makes.
+static bool gd_custom_value_enabled(int type, int index)
+{
+    if (index < 0 || index >= 6) {
+        return false;
+    }
+
+    STRUCT_5189E4* ptr = &(_custom_settings[type][index]);
+    if (ptr->messageId == -1) {
+        return false;
+    }
+
+    switch (type) {
+    case PARTY_MEMBER_CUSTOMIZATION_OPTION_AREA_ATTACK_MODE:
+        return partyMemberSupportsAreaAttackMode(gGameDialogSpeaker, ptr->value);
+    case PARTY_MEMBER_CUSTOMIZATION_OPTION_RUN_AWAY_MODE:
+        return partyMemberSupportsRunAwayMode(gGameDialogSpeaker, ptr->value);
+    case PARTY_MEMBER_CUSTOMIZATION_OPTION_BEST_WEAPON:
+        return partyMemberSupportsBestWeapon(gGameDialogSpeaker, ptr->value);
+    case PARTY_MEMBER_CUSTOMIZATION_OPTION_DISTANCE:
+        return partyMemberSupportsDistance(gGameDialogSpeaker, ptr->value);
+    case PARTY_MEMBER_CUSTOMIZATION_OPTION_ATTACK_WHO:
+        return partyMemberSupportsAttackWho(gGameDialogSpeaker, ptr->value);
+    case PARTY_MEMBER_CUSTOMIZATION_OPTION_CHEM_USE:
+        return partyMemberSupportsChemUse(gGameDialogSpeaker, ptr->value);
+    }
+
+    return false;
+}
+
 // 0x4493B8
 void partyMemberControlWindowHandleEvents()
 {
     MessageListItem messageListItem;
 
+    // The pad: TALK, TRADE, the two "use best" buttons and every disposition this member supports.
+    GdPadItem padItems[GD_PAD_ITEM_MAX];
+    int padCount = 0;
+    padItems[padCount++] = { 593, 41, 14, 14, _gdialog_buttons[0], -1 };
+    padItems[padCount++] = { 593, 97, 14, 14, _gdialog_buttons[1], -1 };
+    padItems[padCount++] = { 236, 15, 14, 14, _gdialog_buttons[2], -1 };
+    padItems[padCount++] = { 235, 46, 14, 14, _gdialog_buttons[3], -1 };
+    int padFocus = 0;
+    int disposition = aiGetDisposition(gGameDialogSpeaker);
+    for (int index = 0; index < 5; index++) {
+        GameDialogButtonData* buttonData = &(gGameDialogDispositionButtonsData[index]);
+        if (!partyMemberSupportsDisposition(gGameDialogSpeaker, buttonData->value)) {
+            continue;
+        }
+
+        int w;
+        int h;
+        gd_pad_frm_size(buttonData->upFrmId, &w, &h);
+        if (buttonData->value == disposition) {
+            padFocus = padCount; // start on the disposition this member has now
+        }
+        padItems[padCount++] = { buttonData->x, buttonData->y, w, h, _gdialog_buttons[_control_buttons_start + index], buttonData->keyCode };
+    }
+
+    GdPadState padState;
+    gd_pad_prime(&padState);
+    bool padOn = gamepad_ui_get_controller() != nullptr;
+
     bool done = false;
     while (!done) {
         sharedFpsLimiter.mark();
+
+        // The frame comes down before anything can draw; it goes back up at the bottom.
+        gd_pad_hl_erase();
+
+        if (padOn) {
+            int padRc = gd_pad_poll(&padState, padItems, padCount, &padFocus);
+            if (padRc == -2) {
+                enqueueInputEvent(KEY_ESCAPE); // back to the conversation
+            } else if (padRc >= 0) {
+                const GdPadItem* item = &(padItems[padRc]);
+                if (item->code != -1) {
+                    // A disposition: a radio button, so light it and only it, then post its code.
+                    for (int index = 0; index < 5; index++) {
+                        _win_set_button_rest_state(_gdialog_buttons[_control_buttons_start + index],
+                            gGameDialogDispositionButtonsData[index].keyCode == item->code ? 1 : 0, 0);
+                    }
+                    soundPlayFile("ib1p1xx1");
+                    enqueueInputEvent(item->code);
+                } else {
+                    _win_button_press_and_release(item->btn);
+                }
+            }
+        }
 
         int keyCode = inputGetInput();
         if (keyCode != -1) {
@@ -3775,9 +4726,16 @@ void partyMemberControlWindowHandleEvents()
             }
         }
 
+        if (padOn && !done) {
+            gd_pad_hl_draw(gGameDialogWindow, &(padItems[padFocus]));
+            windowRefresh(gGameDialogWindow);
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    gd_pad_hl_erase();
 }
 
 // 0x4496A0
@@ -3948,9 +4906,37 @@ void partyMemberCustomizationWindowFree()
 // 0x449B3C
 void partyMemberCustomizationWindowHandleEvents()
 {
+    // The pad: the six option buttons and DONE.
+    GdPadItem padItems[GD_PAD_ITEM_MAX];
+    int padCount = 0;
+    for (int index = 0; index < PARTY_MEMBER_CUSTOMIZATION_OPTION_COUNT; index++) {
+        GameDialogButtonData* buttonData = &(_custom_button_info[index]);
+        int w;
+        int h;
+        gd_pad_frm_size(buttonData->upFrmId, &w, &h);
+        padItems[padCount++] = { buttonData->x, buttonData->y, w, h, _gdialog_buttons[_custom_buttons_start + index], -1 };
+    }
+    padItems[padCount++] = { 593, 101, 14, 14, _gdialog_buttons[0], -1 };
+    int padFocus = 0;
+
+    GdPadState padState;
+    gd_pad_prime(&padState);
+    bool padOn = gamepad_ui_get_controller() != nullptr;
+
     bool done = false;
     while (!done) {
         sharedFpsLimiter.mark();
+
+        gd_pad_hl_erase();
+
+        if (padOn) {
+            int padRc = gd_pad_poll(&padState, padItems, padCount, &padFocus);
+            if (padRc == -2) {
+                enqueueInputEvent(KEY_ESCAPE);
+            } else if (padRc >= 0) {
+                _win_button_press_and_release(padItems[padRc].btn);
+            }
+        }
 
         unsigned int keyCode = inputGetInput();
         if (keyCode != -1) {
@@ -3972,9 +4958,16 @@ void partyMemberCustomizationWindowHandleEvents()
             }
         }
 
+        if (padOn && !done) {
+            gd_pad_hl_draw(gGameDialogWindow, &(padItems[padFocus]));
+            windowRefresh(gGameDialogWindow);
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    gd_pad_hl_erase();
 }
 
 // 0x449BB4
@@ -4154,10 +5147,66 @@ int _gdCustomSelect(int a1)
     int maxX = selectWindowX + backgroundFrmWidth - 42;
     int maxY = selectWindowY + backgroundFrmHeight - 42;
 
+    // The pad: up/down walk the values this member can take (the same test the mouse makes), A takes
+    // the highlighted one, B leaves it as it was. Seeded as HELD: the A that opened this is down.
+    bool pickPrevA = true;
+    bool pickPrevB = true;
+    int pickHeldDir = 0;
+    bool pickSeeded = false;
+    unsigned int pickNextStepAt = 0;
+
     bool done = false;
     unsigned int v53 = 0;
     while (!done) {
         sharedFpsLimiter.mark();
+
+        SDL_GameController* pickPad = gamepad_ui_get_controller();
+        if (pickPad != nullptr) {
+            SDL_GameControllerUpdate();
+            bool upNow = SDL_GameControllerGetButton(pickPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+                || SDL_GameControllerGetAxis(pickPad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+            bool downNow = SDL_GameControllerGetButton(pickPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+                || SDL_GameControllerGetAxis(pickPad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+            bool aNow = SDL_GameControllerGetButton(pickPad, SDL_CONTROLLER_BUTTON_A) != 0;
+            bool bNow = SDL_GameControllerGetButton(pickPad, SDL_CONTROLLER_BUTTON_B) != 0;
+            int dir = upNow ? -1 : (downNow ? 1 : 0);
+
+            bool fire = false;
+            if (!pickSeeded) {
+                pickSeeded = true;
+                // First frame: whatever is held came in from the panel underneath.
+                pickHeldDir = dir;
+                pickNextStepAt = getTicks() + GD_PAD_REPEAT_DELAY_MS;
+            } else if (dir != pickHeldDir) {
+                pickHeldDir = dir;
+                fire = dir != 0;
+                pickNextStepAt = getTicks() + GD_PAD_REPEAT_DELAY_MS;
+            } else if (dir != 0 && getTicks() >= pickNextStepAt) {
+                fire = true;
+                pickNextStepAt = getTicks() + GD_PAD_REPEAT_RATE_MS;
+            }
+
+            if (fire) {
+                for (int next = value + dir; next >= 0 && next < 6; next += dir) {
+                    if (gd_custom_value_enabled(a1, next)) {
+                        value = next;
+                        soundPlayFile("ib1p1xx1");
+                        _gdCustomSelectRedraw(windowBuffer, backgroundFrmWidth, a1, value);
+                        windowRefresh(win);
+                        break;
+                    }
+                }
+            }
+
+            if (aNow && !pickPrevA) {
+                enqueueInputEvent(KEY_RETURN);
+            } else if (bNow && !pickPrevB) {
+                enqueueInputEvent(KEY_ESCAPE);
+            }
+
+            pickPrevA = aNow;
+            pickPrevB = bNow;
+        }
 
         int keyCode = inputGetInput();
         if (keyCode != -1) {
@@ -4240,6 +5289,9 @@ int _gdCustomSelect(int a1)
 
     windowDestroy(win);
     fontSetCurrent(oldFont);
+
+    // The A / B that closed the picker is still down as the panel's poll resumes.
+    gamepad_ui_bump_input_epoch();
     return 0;
 }
 
@@ -4354,8 +5406,24 @@ int _gdialog_window_create()
                 _gdialog_scroll_subwin(gGameDialogWindow, true, backgroundFrmData, windowBuf, nullptr, _dialogue_subwin_len, false);
             }
 
+            // CE: with a controller, "Y" on the barter button and "X" on combat control, baked into
+            // private copies of the art (matches the pad shortcuts in _gdProcess).
+            unsigned char* barterUp = _redButtonNormalFrmImage.getData();
+            unsigned char* controlUp = _redButtonNormalFrmImage.getData();
+            if (gamepad_ui_get_controller() != nullptr) {
+                gdialog_free_hint_buttons();
+                gd_barter_hint_up = gdialog_hint_button("Y");
+                gd_control_hint_up = gdialog_hint_button("X");
+                if (gd_barter_hint_up != nullptr) {
+                    barterUp = gd_barter_hint_up;
+                }
+                if (gd_control_hint_up != nullptr) {
+                    controlUp = gd_control_hint_up;
+                }
+            }
+
             // BARTER/TRADE
-            _gdialog_buttons[0] = buttonCreate(gGameDialogWindow, 593, 41, 14, 14, -1, -1, -1, -1, _redButtonNormalFrmImage.getData(), _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
+            _gdialog_buttons[0] = buttonCreate(gGameDialogWindow, 593, 41, 14, 14, -1, -1, -1, -1, barterUp, _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
             if (_gdialog_buttons[0] != -1) {
                 buttonSetMouseCallbacks(_gdialog_buttons[0], nullptr, nullptr, nullptr, gameDialogBarterButtonUpMouseUp);
                 buttonSetCallbacks(_gdialog_buttons[0], _gsound_med_butt_press, _gsound_med_butt_release);
@@ -4378,7 +5446,7 @@ int _gdialog_window_create()
                             }
 
                             // COMBAT CONTROL
-                            _gdialog_buttons[2] = buttonCreate(gGameDialogWindow, 593, 116, 14, 14, -1, -1, -1, -1, _redButtonNormalFrmImage.getData(), _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
+                            _gdialog_buttons[2] = buttonCreate(gGameDialogWindow, 593, 116, 14, 14, -1, -1, -1, -1, controlUp, _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
                             if (_gdialog_buttons[2] != -1) {
                                 buttonSetMouseCallbacks(_gdialog_buttons[2], nullptr, nullptr, nullptr, gameDialogCombatControlButtonOnMouseUp);
                                 buttonSetCallbacks(_gdialog_buttons[2], _gsound_med_butt_press, _gsound_med_butt_release);
@@ -4420,6 +5488,9 @@ void _gdialog_window_destroy()
         buttonDestroy(_gdialog_buttons[index]);
         _gdialog_buttons[index] = -1;
     }
+
+    // CE: the pad hint copies, now the buttons using them are gone.
+    gdialog_free_hint_buttons();
 
     _reviewButtonNormalFrmImage.unlock();
     _reviewButtonPressedFrmImage.unlock();

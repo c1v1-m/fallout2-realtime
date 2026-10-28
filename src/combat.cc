@@ -46,6 +46,14 @@
 #include "trait.h"
 #include "window_manager.h"
 
+// Realtime (fallout1-ce's combat.cc changes, ported). The modules speak F1 names; their headers
+// bring the translation layer with them.
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/game/interact_prompt.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define CALLED_SHOT_WINDOW_Y (20)
@@ -125,11 +133,11 @@ static void combatCopyDamageAmountDescription(char* dest, size_t size, Object* c
 static void combatAddDamageFlagsDescription(char* a1, int flags, Object* a3);
 static void _combat_standup(Object* a1);
 static void _print_tohit(unsigned char* dest, int dest_pitch, int a3);
-static char* hitLocationGetName(Object* critter, int hitLocation);
+char* hitLocationGetName(Object* critter, int hitLocation);
 static void _draw_loc_off(int a1, int a2);
 static void _draw_loc_on_(int a1, int a2);
 static void _draw_loc_(int eventCode, int color);
-static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hitMode);
+static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hitMode, int initialLocation);
 
 static void criticalsInit();
 static void criticalsReset();
@@ -161,7 +169,8 @@ unsigned int gCombatState = COMBAT_STATE_0x02;
 static CombatAiInfo* _aiInfoList = nullptr;
 
 // 0x51094C
-static CombatStartData* _gcsd = nullptr;
+// Realtime build: not static -- combat_rt clears it when it takes a fight over (f1compat: gcsd).
+CombatStartData* _gcsd = nullptr;
 
 // 0x510950
 static bool _combat_call_display = false;
@@ -1951,7 +1960,8 @@ static int _list_com;
 // Experience received for killing critters during current combat.
 //
 // 0x56D398
-static int _combat_exps;
+// Realtime build: not static -- combat_rt pays out kills made in realtime (f1compat: combat_exps).
+int _combat_exps;
 
 // bonus action points from BONUS_MOVE perk.
 //
@@ -2094,6 +2104,36 @@ int combatLoad(File* stream)
 {
     if (fileReadUInt32(stream, &gCombatState) == -1) return -1;
 
+    // RESCUE FOR A SAVE TAKEN MID-FIGHT (fallout1-ce combat_load). Realtime saves no turn-based block
+    // (see combatSave), so one is only met in a save from the original game: it is READ PAST to keep
+    // the stream aligned, never matched against the map; the warm bit is dropped, and the load carries
+    // on as an ordinary out-of-combat one. The fight resumes the realtime way once the game runs.
+    // Fallout 2: the block also holds four ints of AI info per critter. A sanity bound on list_total,
+    // because a nonsense count would misalign every later chunk.
+    if (isInCombat() && combat_rt_enabled()) {
+        int skip;
+        int total;
+        if (fileReadInt32(stream, &skip) == -1) return -1; // _combat_turn_running
+        if (fileReadInt32(stream, &skip) == -1) return -1; // _combat_free_move
+        if (fileReadInt32(stream, &skip) == -1) return -1; // _combat_exps
+        if (fileReadInt32(stream, &skip) == -1) return -1; // _list_com
+        if (fileReadInt32(stream, &skip) == -1) return -1; // _list_noncom
+        if (fileReadInt32(stream, &total) == -1) return -1; // _list_total
+        if (fileReadInt32(stream, &skip) == -1) return -1; // the dude's cid
+        if (total < 0 || total > 4096) {
+            return -1;
+        }
+        for (int k = 0; k < total; k++) {
+            if (fileReadInt32(stream, &skip) == -1) return -1;
+        }
+        for (int k = 0; k < total * 4; k++) {
+            if (fileReadInt32(stream, &skip) == -1) return -1; // friendlyDead, lastTarget, lastItem, lastMove
+        }
+
+        trace_event(TRACE_WARN, "combat-load-rt", "skipped a turn-based block from a mid-fight save (list_total=%d)", total);
+        gCombatState &= ~COMBAT_STATE_0x01;
+    }
+
     if (!isInCombat()) {
         Object* obj = objectFindFirst();
         while (obj != nullptr) {
@@ -2213,9 +2253,20 @@ int combatLoad(File* stream)
 // 0x421244
 int combatSave(File* stream)
 {
-    if (fileWriteInt32(stream, gCombatState) == -1) return -1;
+    // ⚠️ A REALTIME FIGHT IS NOT SAVED AS A TURN-BASED ONE (fallout1-ce, 2026-10-04: every save taken
+    // mid-fight was unloadable). combat_rt raises the warm bit for as long as anyone is fighting, so
+    // the TURN-BASED block below would be written -- turn flags, the combat list's cids, AI info --
+    // none of which realtime ever builds (_combat_begin never runs; _list_total is 0), and combatLoad
+    // then fails matching it against the map. Nothing of a realtime fight lives in those fields
+    // anyway -- it is rebuilt from the world after a load -- so realtime saves "no turn-based combat".
+    unsigned int savedState = gCombatState;
+    if (combat_rt_enabled()) {
+        savedState &= ~COMBAT_STATE_0x01;
+    }
 
-    if (!isInCombat()) return 0;
+    if (fileWriteInt32(stream, savedState) == -1) return -1;
+
+    if ((savedState & COMBAT_STATE_0x01) == 0) return 0;
 
     if (fileWriteInt32(stream, _combat_turn_running) == -1) return -1;
     if (fileWriteInt32(stream, _combat_free_move) == -1) return -1;
@@ -2405,6 +2456,18 @@ static int aiInfoCopy(int srcIndex, int destIndex)
     return 0;
 }
 
+// Realtime build: does this critter have an entry in the AI info list? Realtime sets the combat bit
+// itself and never runs _combat_begin, so in a realtime fight the list is not allocated -- harmless
+// while every critter's cid is -1, as on a fresh map. A LOADED game is not like that: _LoadObjDudeCid
+// puts the dude's cid back from the save (and a load that fails later leaves it there through
+// gameReset), and the map's critters come back with theirs -- and the first realtime attack wrote its
+// target through a null list (2026-10-24, his crash after a failed load: write 0xa8, cid 5's
+// lastTarget; a slot that loads fine crashed the same way at its first attack).
+static bool aiInfoHas(Object* obj)
+{
+    return obj != nullptr && obj->cid >= 0 && _aiInfoList != nullptr && obj->cid < _list_total;
+}
+
 // 0x421880
 Object* aiInfoGetFriendlyDead(Object* obj)
 {
@@ -2416,7 +2479,7 @@ Object* aiInfoGetFriendlyDead(Object* obj)
         return nullptr;
     }
 
-    if (obj->cid == -1) {
+    if (!aiInfoHas(obj)) {
         return nullptr;
     }
 
@@ -2434,7 +2497,7 @@ int aiInfoSetFriendlyDead(Object* a1, Object* a2)
         return -1;
     }
 
-    if (a1->cid == -1) {
+    if (!aiInfoHas(a1)) {
         return -1;
     }
 
@@ -2458,7 +2521,7 @@ Object* aiInfoGetLastTarget(Object* obj)
         return nullptr;
     }
 
-    if (obj->cid == -1) {
+    if (!aiInfoHas(obj)) {
         return nullptr;
     }
 
@@ -2476,7 +2539,7 @@ int aiInfoSetLastTarget(Object* a1, Object* a2)
         return -1;
     }
 
-    if (a1->cid == -1) {
+    if (!aiInfoHas(a1)) {
         return -1;
     }
 
@@ -2507,7 +2570,7 @@ Object* aiInfoGetLastItem(Object* obj)
     }
 
     v1 = obj->cid;
-    if (v1 == -1) {
+    if (!aiInfoHas(obj)) {
         return nullptr;
     }
 
@@ -2528,7 +2591,7 @@ int aiInfoSetLastItem(Object* obj, Object* a2)
     }
 
     v2 = obj->cid;
-    if (v2 == -1) {
+    if (!aiInfoHas(obj)) {
         return -1;
     }
 
@@ -2550,7 +2613,7 @@ static int _combatAIInfoSetLastMove(Object* object, int move)
         return -1;
     }
 
-    if (object->cid == -1) {
+    if (!aiInfoHas(object)) {
         return -1;
     }
 
@@ -3117,6 +3180,18 @@ static void combatAttemptEnd()
     _caiTeamCombatExit();
 }
 
+// Prints combat.msg #103 -- the "you can't break off yet" line vanilla's END COMBAT button shows
+// (twice above) when some critter still refuses to stop fighting. Exported so the realtime END
+// COMBAT action in combat_rt gives the player the SAME feedback, in the game's own wording.
+void combat_display_cant_end_message()
+{
+    MessageListItem messageListItem;
+    messageListItem.num = 103;
+    if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
+        displayMonitorAddMessage(messageListItem.text);
+    }
+}
+
 // 0x4227DC
 void _combat_turn_run()
 {
@@ -3377,6 +3452,22 @@ static bool _combat_should_end()
 // 0x422D2C
 void _combat(CombatStartData* csd)
 {
+    // Realtime combat (combat_rt) owns combat now. The turn-based scheduler must never activate,
+    // whichever legacy path requested it (script attack opcodes via scriptsHandleRequests,
+    // _combat_attack_this, the interface ...) -- this is the single chokepoint that guarantees the
+    // combat window / COMBAT_STATE_0x02 / blocking turn loop can't take over and freeze input.
+    // Before refusing, the attacker/defender go to combat_rt: a script requesting an attack on the
+    // dude is the authoritative hostility signal it uses to aggro genuine enemies.
+    if (combat_rt_enabled()) {
+        // A two-group encounter's team fight (aiTeamCombatInitAtElevation): every critter of both teams
+        // gets its foe, as _combat_begin would have given it.
+        aiTeamCombatInitAtElevation(csd != nullptr && csd->attacker != nullptr ? csd->attacker->elevation : gElevation);
+        if (csd != nullptr) {
+            combat_rt_notify_attack(csd->attacker, csd->defender);
+        }
+        return;
+    }
+
     ScopedGameMode gm(GameMode::kCombat);
 
     if (csd == nullptr
@@ -3815,13 +3906,21 @@ static int attackComputeEnhancedKnockout(Attack* attack)
     return 0;
 }
 
+// THROWN AS FAR AS IT GOES (realtime only, combat_rt sets it around one attack): when >= 0, the next
+// THROW attack ignores its range, misses on purpose and lands on this tile (or the first thing in the way).
+int combat_forced_throw_tile = -1;
+
 // 0x42378C
 static int attackCompute(Attack* attack)
 {
     int range = weaponGetRange(attack->attacker, attack->hitMode);
     int distance = objectGetDistanceBetween(attack->attacker, attack->defender);
 
-    if (range < distance) {
+    // A throw as far as it goes (combat_forced_throw_tile): out of range is the point of it.
+    bool forcedThrow = combat_forced_throw_tile >= 0
+        && weaponGetAttackTypeForHitMode(attack->weapon, attack->hitMode) == ATTACK_TYPE_THROW;
+
+    if (range < distance && !forcedThrow) {
         return -1;
     }
 
@@ -3906,6 +4005,27 @@ static int attackCompute(Attack* attack)
         return -1;
     }
 
+    // Realtime-only passive Luck dodge (fallout1-ce): when an attack WOULD land a normal hit, the
+    // defender gets a separate save = Luck x 1% to negate it, downgrading it to an ordinary miss --
+    // the ROLL_FAILURE path then plays the defender's dodge. Runs BEFORE the switch, so no damage
+    // has been applied; the to-hit math is untouched. Symmetric (the dude and every NPC). Bursts
+    // are EXCLUDED (one save must not negate a whole spray) and so are criticals (a crit lands).
+    if (combat_rt_enabled()
+        && roll == ROLL_SUCCESS
+        && anim != ANIM_FIRE_BURST
+        && anim != ANIM_FIRE_CONTINUOUS
+        && attack->defender != nullptr
+        && FID_TYPE(attack->defender->fid) == OBJ_TYPE_CRITTER) {
+        int luck = critterGetStat(attack->defender, STAT_LUCK);
+        if (luck > 0 && randomBetween(1, 100) <= luck) {
+            roll = ROLL_FAILURE;
+        }
+    }
+
+    if (forcedThrow) {
+        roll = ROLL_FAILURE; // it was never going to reach the target; where it lands is decided below
+    }
+
     switch (roll) {
     case ROLL_CRITICAL_SUCCESS:
         damageMultiplier = attackComputeCriticalHit(attack);
@@ -3926,7 +4046,7 @@ static int attackCompute(Attack* attack)
         attackComputeDamage(attack, ammoQuantity, damageMultiplier);
         break;
     case ROLL_FAILURE:
-        if (attackType == ATTACK_TYPE_RANGED || attackType == ATTACK_TYPE_THROW) {
+        if ((attackType == ATTACK_TYPE_RANGED || attackType == ATTACK_TYPE_THROW) && !forcedThrow) {
             _check_ranged_miss(attack);
         }
         break;
@@ -3935,7 +4055,27 @@ static int attackCompute(Attack* attack)
         break;
     }
 
-    if (attackType == ATTACK_TYPE_RANGED || attackType == ATTACK_TYPE_THROW) {
+    if (forcedThrow) {
+        // It flies from the hand to the tile; the first thing in the way stops it, as a miss's stray
+        // would. Nothing in the way: it lands on the tile, and a grenade goes off there (below).
+        attack->tile = combat_forced_throw_tile;
+        Object* blocker = attack->attacker;
+        _make_straight_path(attack->attacker, attack->attacker->tile, attack->tile, nullptr, &blocker, 32);
+        if (blocker == attack->attacker) {
+            blocker = nullptr;
+        }
+        if (blocker != nullptr) {
+            attack->tile = blocker->tile;
+        } else {
+            blocker = _obj_blocking_at(attack->attacker, attack->tile, attack->attacker->elevation);
+        }
+        if (blocker != nullptr && blocker != attack->attacker && (blocker->flags & OBJECT_SHOOT_THRU) == 0
+            && FID_TYPE(blocker->fid) == OBJ_TYPE_CRITTER) {
+            attack->attackerFlags |= DAM_HIT;
+            attack->defender = blocker;
+            attackComputeDamage(attack, 1, 2);
+        }
+    } else if (attackType == ATTACK_TYPE_RANGED || attackType == ATTACK_TYPE_THROW) {
         if ((attack->attackerFlags & (DAM_HIT | DAM_CRITICAL)) == 0) {
             int tile;
             if (isGrenade) {
@@ -4234,6 +4374,11 @@ static int attackComputeCriticalFailure(Attack* attack)
 
     if ((attack->attackerFlags & DAM_LOSE_TURN) != 0) {
         attack->attacker->data.critter.combat.ap = 0;
+
+        // ⚠️ ...and the pool that realtime ACTUALLY reads. combat.ap above is held pinned at max by
+        // combat_rt so movement stays free, so on its own this effect was a no-op. No turns to lose
+        // here -- you lose the points instead and wait out the regen.
+        combat_rt_zero_ap(attack->attacker);
     }
 
     if ((attack->attackerFlags & DAM_LOSE_AMMO) != 0) {
@@ -4671,8 +4816,35 @@ void attackComputeDeathFlags(Attack* attack)
 }
 
 // 0x424C04
+// [COMBAT/hit]: what one attack actually did to one victim, at the moment it lands (fallout1-ce,
+// 2026-10-18). Until then the trace said who attacked whom but never whether it hit or for how much,
+// so nothing could judge the AI from a trace alone (airep.js). hp= is the victim's HP before this damage.
+static void trace_hit(Attack* attack, Object* victim, int damage, bool hit, bool crit, int loc, bool extra)
+{
+    if (victim == nullptr || FID_TYPE(victim->fid) != OBJ_TYPE_CRITTER) {
+        return;
+    }
+    Object* attacker = attack->attacker;
+    bool attackerIsCritter = attacker != nullptr && FID_TYPE(attacker->fid) == OBJ_TYPE_CRITTER;
+    trace_event(TRACE_COMBAT, "hit", "att=%d attPid=%d def=%d defPid=%d hit=%d crit=%d dmg=%d hp=%d dist=%d mode=%d loc=%d extra=%d oops=%d",
+        attackerIsCritter ? attacker->id : -1, attacker != nullptr ? attacker->pid : -1,
+        victim->id, victim->pid,
+        hit || damage > 0 ? 1 : 0, crit ? 1 : 0, damage,
+        critterGetStat(victim, STAT_CURRENT_HIT_POINTS),
+        attacker != nullptr ? objectGetDistanceBetween(attacker, victim) : -1, attack->hitMode, loc, extra ? 1 : 0,
+        attack->oops == victim && attack->oops != attack->defender ? 1 : 0);
+}
+
 void _apply_damage(Attack* attack, bool animated)
 {
+    // The main victim's hit/critical bits live in attackerFlags (attackCompute); an extra was hit if it was hurt.
+    trace_hit(attack, attack->defender, attack->defenderDamage, (attack->attackerFlags & DAM_HIT) != 0,
+        (attack->attackerFlags & DAM_CRITICAL) != 0, attack->defenderHitLocation, false);
+    for (int index = 0; index < attack->extrasLength; index++) {
+        trace_hit(attack, attack->extras[index], attack->extrasDamage[index], (attack->extrasFlags[index] & DAM_HIT) != 0,
+            (attack->extrasFlags[index] & DAM_CRITICAL) != 0, attack->extrasHitLocation[index], true);
+    }
+
     Object* attacker = attack->attacker;
     bool attackerIsCritter = attacker != nullptr && FID_TYPE(attacker->fid) == OBJ_TYPE_CRITTER;
     bool v5 = attack->defender != attack->oops;
@@ -4707,7 +4879,12 @@ void _apply_damage(Attack* attack, bool animated)
     if (defenderIsCritter && (defender->data.critter.combat.results & DAM_DEAD) == 0) {
         _set_new_results(defender, attack->defenderFlags);
 
-        if (defenderIsCritter) {
+        // A miss that went into someone else (DAM_RANDOM_HIT): forgiven once if it is an ally of
+        // the moment -- see rt_forgive_stray (combat_rt.cc). Never the one aimed at (oops).
+        bool forgiven = attackerIsCritter && defender != attack->oops
+            && combat_rt_forgive_stray(attack->attacker, defender, attack->oops);
+
+        if (defenderIsCritter && !forgiven) {
             if (defenderIsCritter) {
                 if ((defender->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
                     if (!v5 || defender != gDude) {
@@ -4719,7 +4896,7 @@ void _apply_damage(Attack* attack, bool animated)
             }
         }
 
-        scriptSetObjects(defender->sid, attack->attacker, attack->weapon);
+        scriptSetObjects(defender->sid, forgiven ? nullptr : attack->attacker, attack->weapon);
         _damage_object(defender, attack->defenderDamage, animated, attack->defender != attack->oops, attacker);
 
         if (defenderIsCritter) {
@@ -4738,7 +4915,11 @@ void _apply_damage(Attack* attack, bool animated)
         if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER && (obj->data.critter.combat.results & DAM_DEAD) == 0) {
             _set_new_results(obj, attack->extrasFlags[index]);
 
-            if (defenderIsCritter) {
+            // A burst's stray round in an ally of the moment: forgiven once (rt_forgive_stray).
+            bool forgiven = attackerIsCritter
+                && combat_rt_forgive_stray(attack->attacker, obj, attack->oops);
+
+            if (defenderIsCritter && !forgiven) {
                 if ((obj->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
                     _critter_set_who_hit_me(obj, attack->attacker);
                 } else if (obj->data.critter.combat.team != attack->attacker->data.critter.combat.team) {
@@ -4746,7 +4927,7 @@ void _apply_damage(Attack* attack, bool animated)
                 }
             }
 
-            scriptSetObjects(obj->sid, attack->attacker, attack->weapon);
+            scriptSetObjects(obj->sid, forgiven ? nullptr : attack->attacker, attack->weapon);
             // TODO: Not sure about defender == oops.
             _damage_object(obj, attack->extrasDamage[index], animated, attack->defender == attack->oops, attack->attacker);
             _combatai_notify_onlookers(obj);
@@ -4768,7 +4949,25 @@ static void _check_for_death(Object* object, int damage, int* flags)
     if (object == nullptr || !_critter_flag_check(object->pid, CRITTER_INVULNERABLE)) {
         if (object == nullptr || PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
             if (damage > 0) {
-                if (critterGetHitPoints(object) - damage <= 0) {
+                int hits = critterGetHitPoints(object);
+
+                // REALTIME CONCURRENCY (fallout1-ce check_for_death). This runs at FIRE time, but
+                // combat_rt lets several attacks be in flight on one defender at once. Judging
+                // lethality against the CURRENT hp under-counts: two attacks individually survivable
+                // but jointly lethal both compute "not dead", and the killing blow falls through to
+                // critterAdjustHitPoints' emergency kill (no death animation, a flat blank corpse).
+                // Subtracting the in-flight damage makes these flags describe the hp the defender
+                // will have WHEN THIS ATTACK LANDS. killClaimed: another in-flight attack already owns
+                // the death fall; flagging a second would play two.
+                if (combat_rt_enabled()) {
+                    bool killClaimed = false;
+                    hits -= combat_rt_pending_damage_on(object, &killClaimed);
+                    if (killClaimed) {
+                        return;
+                    }
+                }
+
+                if (hits - damage <= 0) {
                     *flags |= DAM_DEAD;
                 }
             }
@@ -4779,6 +4978,14 @@ static void _check_for_death(Object* object, int damage, int* flags)
 // 0x424F2C
 static void _set_new_results(Object* critter, int flags)
 {
+    // The dude's own cripples and blindness, named at the source (see the cripple line in
+    // combat_rt.cc, which only sees that a bit appeared). If this line is missing next to a
+    // "cripple" line, it was not a hit.
+    if (critter == gDude && (flags & DAM_CRIP & ~gDude->data.critter.combat.results) != 0) {
+        trace_event(TRACE_COMBAT, "dude-hit-cripple", "flags=0x%x results=0x%x",
+            flags & DAM_CRIP, gDude->data.critter.combat.results);
+    }
+
     if (critter == nullptr) {
         return;
     }
@@ -4802,7 +5009,20 @@ static void _set_new_results(Object* critter, int flags)
         queueRemoveEventsByType(critter, EVENT_TYPE_KNOCKOUT);
 
         int endurance = critterGetStat(critter, STAT_ENDURANCE);
-        queueAddEvent(10 * (35 - 3 * endurance), critter, nullptr, EVENT_TYPE_KNOCKOUT);
+        int koTicks = 10 * (35 - 3 * endurance); // vanilla: (35 - 3*EN) game-SECONDS unconscious
+
+        // Realtime combat: game time flows in real seconds, so the vanilla 5-32s knockout is dead
+        // air -- in turn-based it was spread across the player's turns, here you just stand and
+        // wait. Keep the Endurance shape but make it a brief stun (~1/6, floored so it is still
+        // visibly a knockout). Turn-based unchanged.
+        if (combat_rt_enabled()) {
+            koTicks /= 6;
+            if (koTicks < 10) {
+                koTicks = 10; // ~1s minimum
+            }
+        }
+
+        queueAddEvent(koTicks, critter, nullptr, EVENT_TYPE_KNOCKOUT);
     }
 
     if (critter == gDude && (flags & DAM_CRIP_ARM_ANY) != 0) {
@@ -5317,11 +5537,155 @@ static void combatAddDamageFlagsDescription(char* dest, int flags, Object* critt
 }
 
 // 0x425E3C
+// True from the moment an attack is issued (_combat_attack) until its damage has been committed.
+// Realtime combat uses it to serialize attacks through the single global _main_ctd. Unlike
+// _combat_turn_running this is attack-specific (movement never sets it).
+bool combat_is_attack_pending()
+{
+    return _combat_cleanup_enabled;
+}
+
+// Recovery valve for realtime combat's stuck-lock watchdog: forcibly abandons a pending attack whose
+// animation was orphaned, so the lock can release. Never called in the normal attack flow.
+void combat_clear_pending_attack()
+{
+    _combat_cleanup_enabled = false;
+    _combat_turn_running = 0;
+}
+
+// Commits the pending attack's damage immediately -- the same ammo / display / _apply_damage /
+// _scr_end_combat cleanup _combat_anim_finished runs when _combat_turn_running drains to 0 -- and
+// returns true if there was one to commit. Realtime keeps the warm bit set continuously, so that
+// counter never drains; combat_rt calls this itself when the attacker's swing ends. It does NOT stand
+// the attacker back up (_combat_standup would call the blocking _combat_turn_run loop, which can't be
+// re-entered from the realtime frame update; combat_rt stands actors up in its own pass).
+bool combat_commit_pending_attack()
+{
+    if (!_combat_cleanup_enabled) {
+        return false;
+    }
+
+    _combat_cleanup_enabled = false;
+
+    Object* weapon = critterGetWeaponForHitMode(_main_ctd.attacker, _main_ctd.hitMode);
+    if (weapon != nullptr) {
+        if (ammoGetCapacity(weapon) > 0) {
+            int ammoQuantity = ammoGetQuantity(weapon);
+            ammoSetQuantity(weapon, ammoQuantity - _main_ctd.ammoQuantity);
+
+            if (_main_ctd.attacker == gDude) {
+                _intface_update_ammo_lights();
+            }
+        }
+    }
+
+    if (_combat_call_display) {
+        _combat_display(&_main_ctd);
+        _combat_call_display = false;
+    }
+
+    // Guard the realtime damage commit against a dangling whoHitMe on either party: _apply_damage ->
+    // _combatai_check_retaliation -> rating whoHitMe crashes if that critter was freed mid-fight.
+    combat_rt_validate_who_hit_me(_main_ctd.attacker, _main_ctd.defender);
+
+    // animated=true asks for the dude's HP counter to roll; in a realtime fight the interface steps
+    // that roll from the frame loop instead of blocking (intface_hp_roll_tick).
+    _apply_damage(&_main_ctd, true);
+
+    // Aggro the witnesses of a victim this hit KILLED (_combatai_notify_onlookers is inert in
+    // realtime, and combat_rt's spread needs a live seed). No-op when the victim survived.
+    combat_rt_notify_victim(_main_ctd.attacker, _main_ctd.defender);
+    for (int extraIndex = 0; extraIndex < _main_ctd.extrasLength; extraIndex++) {
+        combat_rt_notify_victim(_main_ctd.attacker, _main_ctd.extras[extraIndex]);
+    }
+
+    Object* attacker = _main_ctd.attacker;
+    if (attacker == gDude && _combat_highlight == 2) {
+        _combat_outline_on();
+    }
+
+    if (_scr_end_combat()) {
+        if ((gDude->data.critter.combat.results & DAM_KNOCKED_OUT) != 0) {
+            if (attacker->data.critter.combat.team == gDude->data.critter.combat.team) {
+                _combat_ending_guy = gDude->data.critter.combat.whoHitMe;
+            } else {
+                _combat_ending_guy = attacker;
+            }
+        }
+    }
+
+    attackInit(&_main_ctd, _main_ctd.attacker, nullptr, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
+
+    return true;
+}
+
+// Realtime concurrency: _combat_attack computes one attack into the global _main_ctd; these let
+// combat_rt take a private COPY and free the global at once, so many attacks are in flight together
+// and each commits from its own copy.
+void combat_take_pending_snapshot(Attack* out, bool* outCallDisplay)
+{
+    if (out != nullptr) {
+        *out = _main_ctd;
+    }
+    if (outCallDisplay != nullptr) {
+        *outCallDisplay = _combat_call_display != 0;
+    }
+}
+
+// Commit a snapshotted attack: restore it into the global and run the normal committer. Safe because
+// _combat_attack -- the only writer of _main_ctd -- never runs between combat_rt's commit pass and its
+// attack arbiter within a frame.
+bool combat_commit_snapshot(const Attack* snap, bool callDisplay)
+{
+    if (snap == nullptr) {
+        return false;
+    }
+    _main_ctd = *snap;
+    _combat_call_display = callDisplay;
+    _combat_cleanup_enabled = true;
+
+    // Second line of defence; combat_rt normally applied it before registering the reaction.
+    combat_late_lethal_upgrade(&_main_ctd);
+
+    return combat_commit_pending_attack();
+}
+
+// LATE-LETHAL NET (realtime only). Commit order is not fire order, so the blow that lands can be one
+// that measured "not lethal" against hp a sibling attack has since eaten; reaching _apply_damage
+// without DAM_DEAD hands the kill to the emergency critterKill path (no fall). ⚠️ Call it while the
+// defender's reaction can still be picked from the result (fallout1-ce, 2026-08-10: Ian snapped flat).
+bool combat_late_lethal_upgrade(Attack* attack)
+{
+    if (attack == nullptr || !combat_rt_enabled()) {
+        return false;
+    }
+
+    Object* defender = attack->defender;
+    if (defender != nullptr
+        && FID_TYPE(defender->fid) == OBJ_TYPE_CRITTER
+        && !_critter_flag_check(defender->pid, CRITTER_INVULNERABLE)
+        && attack->defenderDamage > 0
+        && (attack->defenderFlags & DAM_DEAD) == 0
+        && (defender->data.critter.combat.results & DAM_DEAD) == 0
+        && critterGetHitPoints(defender) - attack->defenderDamage <= 0) {
+        attack->defenderFlags |= DAM_DEAD;
+        trace_event(TRACE_WARN, "late-lethal", "pid=%d dmg=%d hp=%d",
+            defender->pid, attack->defenderDamage, critterGetHitPoints(defender));
+        return true;
+    }
+
+    return false;
+}
+
 void _combat_anim_begin()
 {
     if (++_combat_turn_running == 1 && gDude == _main_ctd.attacker) {
-        gameUiDisable(1);
-        gameMouseSetCursor(26);
+        // ⚠️ NOT IN REALTIME (fallout1-ce, 2026-10-11): the world keeps going, combat_rt re-enables the
+        // UI the next frame anyway, and the lock only flashed the waiting clock on every attack.
+        if (!combat_rt_enabled()) {
+            gameUiDisable(1);
+            gameMouseSetCursor(26);
+        }
         if (_combat_highlight == 2) {
             _combat_outline_off();
         }
@@ -5336,49 +5700,20 @@ void _combat_anim_finished()
         return;
     }
 
-    if (gDude == _main_ctd.attacker) {
+    if (gDude == _main_ctd.attacker && !combat_rt_enabled()) {
         gameUiEnable();
     }
 
-    if (_combat_cleanup_enabled) {
-        _combat_cleanup_enabled = false;
+    // Under realtime combat, combat_rt is the SOLE committer: it commits each attack the moment the
+    // swing ends. Committing here too whenever _combat_turn_running dips to 0 would race it -- clear
+    // _combat_cleanup_enabled while combat_rt still believes the attack is in flight and let the next
+    // _combat_attack clobber _main_ctd. So under combat_rt the commit (and standup) is deferred to it.
+    if (combat_rt_enabled()) {
+        return;
+    }
 
-        Object* weapon = critterGetWeaponForHitMode(_main_ctd.attacker, _main_ctd.hitMode);
-        if (weapon != nullptr) {
-            if (ammoGetCapacity(weapon) > 0) {
-                int ammoQuantity = ammoGetQuantity(weapon);
-                ammoSetQuantity(weapon, ammoQuantity - _main_ctd.ammoQuantity);
-
-                if (_main_ctd.attacker == gDude) {
-                    _intface_update_ammo_lights();
-                }
-            }
-        }
-
-        if (_combat_call_display) {
-            _combat_display(&_main_ctd);
-            _combat_call_display = false;
-        }
-
-        _apply_damage(&_main_ctd, true);
-
-        Object* attacker = _main_ctd.attacker;
-        if (attacker == gDude && _combat_highlight == 2) {
-            _combat_outline_on();
-        }
-
-        if (_scr_end_combat()) {
-            if ((gDude->data.critter.combat.results & DAM_KNOCKED_OUT) != 0) {
-                if (attacker->data.critter.combat.team == gDude->data.critter.combat.team) {
-                    _combat_ending_guy = gDude->data.critter.combat.whoHitMe;
-                } else {
-                    _combat_ending_guy = attacker;
-                }
-            }
-        }
-
-        attackInit(&_main_ctd, _main_ctd.attacker, nullptr, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
-
+    Object* attacker = _main_ctd.attacker;
+    if (combat_commit_pending_attack()) {
         if ((attacker->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN)) != 0) {
             if ((attacker->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD | DAM_LOSE_TURN)) == 0) {
                 _combat_standup(attacker);
@@ -5434,7 +5769,9 @@ static void _print_tohit(unsigned char* dest, int destPitch, int accuracy)
 }
 
 // 0x42612C
-static char* hitLocationGetName(Object* critter, int hitLocation)
+// Realtime build: exported (rt_hooks.h, under fallout1-ce's name combat_get_loc_name) for the gamepad
+// aimed-shot readout, so it names body parts with the game's own per-critter strings.
+char* hitLocationGetName(Object* critter, int hitLocation)
 {
     MessageListItem messageListItem;
     messageListItem.num = 1000 + 10 * _art_alias_num(critter->fid & 0xFFF) + hitLocation;
@@ -5472,20 +5809,203 @@ static void _draw_loc_(int eventCode, int color)
     }
 }
 
+// --- A CONTROLLER IN THE VANILLA CALLED-SHOT WINDOW (fallout1-ce) ------------------------------------
+//
+// His call: *"chci jako to je ve vanilla"*. R3 brings up THIS window, the one the game has always had:
+// the critter's called-shot picture, eight named locations with the real to-hit chance beside each,
+// and Cancel. ⚠️ THE WINDOW ITSELF IS UNTOUCHED VANILLA. This only teaches it a controller, and the
+// highlight it moves is the window's OWN hover paint (_draw_loc_), so a pad selection and a mouse hover
+// are the same pixels.
+//
+// Returns what to feed the window's loop: 0-7 for a chosen location, KEY_ESCAPE for cancel, or -1
+// for "nothing happened this frame".
+#define CALLED_SHOT_STICK_THRESHOLD 0.5f // how far the stick has to go to count as a direction
+#define CALLED_SHOT_STICK_REPEAT_MS 180 // hold-to-repeat, brisk enough to run the list in one push
+
+static int calledShotGamepadInput(int* sel, bool reset)
+{
+    static bool prevUp = false;
+    static bool prevDown = false;
+    static bool prevLeft = false;
+    static bool prevRight = false;
+    static bool prevA = false;
+    static bool prevB = false;
+    static bool prevBack = false;
+    static bool prevR3 = false;
+
+    if (reset) {
+        // ⚠️ A BUTTON ALREADY DOWN WHEN THE WINDOW OPENS IS NOT A PRESS MADE IN IT: sampling the pad
+        // here means only what is pressed from now on counts (the R3 that opened it is still down).
+        SDL_GameController* resetPad = gamepad_ui_get_controller();
+        if (resetPad != nullptr) {
+            SDL_GameControllerUpdate();
+            prevUp = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+            prevDown = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+            prevLeft = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0;
+            prevRight = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0;
+            prevA = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_A) != 0;
+            prevB = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_B) != 0;
+            prevBack = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_BACK) != 0;
+            prevR3 = SDL_GameControllerGetButton(resetPad, SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0;
+        } else {
+            prevUp = prevDown = prevLeft = prevRight = prevA = prevB = prevBack = prevR3 = false;
+        }
+        return -1;
+    }
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevUp = prevDown = prevLeft = prevRight = prevA = prevB = prevBack = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+
+    bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+    bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+    bool leftNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0;
+    bool rightNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0;
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool backNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) != 0;
+
+    // R3 opens this window and R3 (or A) confirms it. Choosing binds rather than fires.
+    bool r3Now = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0;
+    bool r3Confirm = r3Now && !prevR3;
+    prevR3 = r3Now;
+
+    bool upEdge = upNow && !prevUp;
+    bool downEdge = downNow && !prevDown;
+    bool leftEdge = leftNow && !prevLeft;
+    bool rightEdge = rightNow && !prevRight;
+    bool aEdge = aNow && !prevA;
+    bool bEdge = bNow && !prevB;
+    bool backEdge = backNow && !prevBack;
+
+    prevUp = upNow;
+    prevDown = downNow;
+    prevLeft = leftNow;
+    prevRight = rightNow;
+    prevA = aNow;
+    prevB = bNow;
+    prevBack = backNow;
+
+    // The right stick picks too: the first push steps AT ONCE and then repeats while held. The
+    // dominant axis wins outright, so a diagonal never jumps two entries at a time.
+    static int stickDir = 0; // 0 none, 1 up, 2 down, 3 left, 4 right
+    static unsigned int stickAt = 0;
+
+    float stickX = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
+    float stickY = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
+    float absX = stickX < 0.0f ? -stickX : stickX;
+    float absY = stickY < 0.0f ? -stickY : stickY;
+
+    int dir = 0;
+    if (absY >= absX) {
+        if (stickY < -CALLED_SHOT_STICK_THRESHOLD) {
+            dir = 1;
+        } else if (stickY > CALLED_SHOT_STICK_THRESHOLD) {
+            dir = 2;
+        }
+    } else {
+        if (stickX < -CALLED_SHOT_STICK_THRESHOLD) {
+            dir = 3;
+        } else if (stickX > CALLED_SHOT_STICK_THRESHOLD) {
+            dir = 4;
+        }
+    }
+
+    bool stickStep = false;
+    if (dir == 0) {
+        stickDir = 0;
+    } else if (dir != stickDir) {
+        stickDir = dir;
+        stickAt = getTicks();
+        stickStep = true;
+    } else if (getTicksSince(stickAt) >= CALLED_SHOT_STICK_REPEAT_MS) {
+        stickAt = getTicks();
+        stickStep = true;
+    }
+
+    int was = *sel;
+
+    // Up/down walk the column, left/right go to the other one at the same height; 0-3 is the
+    // left-hand list, 4-7 the right-hand one. ⚠️ NO WRAPPING, IN EITHER AXIS.
+    if (upEdge || (stickStep && dir == 1)) {
+        if (*sel % 4 != 0) {
+            *sel -= 1;
+        }
+    }
+    if (downEdge || (stickStep && dir == 2)) {
+        if (*sel % 4 != 3) {
+            *sel += 1;
+        }
+    }
+    if (leftEdge || (stickStep && dir == 3)) {
+        if (*sel >= 4) {
+            *sel -= 4;
+        }
+    }
+    if (rightEdge || (stickStep && dir == 4)) {
+        if (*sel < 4) {
+            *sel += 4;
+        }
+    }
+
+    if (*sel != was) {
+        _draw_loc_(was, _colorTable[992]);
+        _draw_loc_(*sel, _colorTable[31744]);
+        windowRefresh(gCalledShotWindow);
+        soundPlayFile("ib1p1xx1");
+    }
+
+    if (aEdge || r3Confirm) {
+        return *sel;
+    }
+
+    if (bEdge || backEdge) {
+        return KEY_ESCAPE;
+    }
+
+    return -1;
+}
+
+// Which of the window's eight entries names this hit location. Torso when it names none.
+static int calledShotIndexFor(int hitLocation)
+{
+    for (int i = 0; i < 4; i++) {
+        if (_hit_loc_left[i] == hitLocation) {
+            return i;
+        }
+        if (_hit_loc_right[i] == hitLocation) {
+            return i + 4;
+        }
+    }
+    return 4;
+}
+
 // 0x426218
-static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hitMode)
+static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hitMode, int initialLocation)
 {
     *hitLocation = HIT_LOCATION_TORSO;
 
-    if (critter == nullptr) {
+    // ⚠️ NO TARGET IS ALLOWED IN REALTIME (fallout1-ce 2026-10-17, "R3 by mělo fungovat i mimo, prostě
+    // si předpřipravit aim"): the window is then for BINDING a part ahead of the fight. The picture and
+    // the part names are the dude's own; the to-hit column stays empty.
+    if (critter == nullptr && !combat_rt_enabled()) {
         return 0;
     }
 
-    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+    if (critter != nullptr && PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
-    gCalledShotCritter = critter;
+    Object* shown = critter != nullptr ? critter : gDude;
+    gCalledShotCritter = shown;
+
+    // The gamepad's floating hand lives in an always-on-top window and showed straight through this
+    // one -- take it down before the window paints (see ip_overlay_guard in interact_prompt.cc).
+    interact_prompt_reset();
 
     // The default value is 68, which centers called shot window given it's
     // width (68 - 504 - 68).
@@ -5521,7 +6041,7 @@ static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hi
         CALLED_SHOT_WINDOW_WIDTH);
 
     FrmImage critterFrm;
-    int critterFid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_CALLED_SHOT_PIC, 0, 0);
+    int critterFid = buildFid(OBJ_TYPE_CRITTER, shown->fid & 0xFFF, ANIM_CALLED_SHOT_PIC, 0, 0);
     if (critterFrm.lock(critterFid)) {
         blitBufferToBuffer(critterFrm.getData(),
             170,
@@ -5570,20 +6090,30 @@ static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hi
         int probability;
         int btn;
 
-        probability = _determine_to_hit(gDude, critter, _hit_loc_left[index], hitMode);
-        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 33, CALLED_SHOT_WINDOW_WIDTH, probability);
+        if (critter != nullptr) {
+            probability = _determine_to_hit(gDude, critter, _hit_loc_left[index], hitMode);
+            _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 33, CALLED_SHOT_WINDOW_WIDTH, probability);
+        }
 
         btn = buttonCreate(gCalledShotWindow, 33, _call_ty[index] - 90, 128, 20, index, index, -1, index, nullptr, nullptr, nullptr, 0);
         buttonSetMouseCallbacks(btn, _draw_loc_on_, _draw_loc_off, nullptr, nullptr);
         _draw_loc_(index, _colorTable[992]);
 
-        probability = _determine_to_hit(gDude, critter, _hit_loc_right[index], hitMode);
-        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 453, CALLED_SHOT_WINDOW_WIDTH, probability);
+        if (critter != nullptr) {
+            probability = _determine_to_hit(gDude, critter, _hit_loc_right[index], hitMode);
+            _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 453, CALLED_SHOT_WINDOW_WIDTH, probability);
+        }
 
         btn = buttonCreate(gCalledShotWindow, 341, _call_ty[index] - 90, 128, 20, index + 4, index + 4, -1, index + 4, nullptr, nullptr, nullptr, 0);
         buttonSetMouseCallbacks(btn, _draw_loc_on_, _draw_loc_off, nullptr, nullptr);
         _draw_loc_(index + 4, _colorTable[992]);
     }
+
+    // Where the pad's selection starts: on the location it was last asked for, so repeating a shot is
+    // A and nothing else. Painted before the window is first drawn, so it is never shown unselected.
+    int padSel = calledShotIndexFor(initialLocation);
+    _draw_loc_(padSel, _colorTable[31744]);
+    calledShotGamepadInput(&padSel, true); // forget every edge from before this window
 
     windowRefresh(gCalledShotWindow);
 
@@ -5595,11 +6125,23 @@ static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hi
     _gmouse_disable(0);
     gameMouseSetCursor(MOUSE_CURSOR_ARROW);
 
+    // ⚠️ THIS SCREEN DRIVES ITS OWN NAVIGATION, so the pad's cursor layer must let go of the right
+    // stick: otherwise the same push both moves the selection AND creeps the mouse across the window,
+    // where the buttons' own hover paint would light a SECOND location name.
+    gamepad_ui_set_self_nav(true);
+
     int eventCode;
     while (true) {
         sharedFpsLimiter.mark();
 
         eventCode = inputGetInput();
+
+        // Controller: moves the highlight as a side effect, and only RETURNS something when the player
+        // chose or cancelled -- so it runs every frame, and a real keyboard/mouse event always wins.
+        int padKey = calledShotGamepadInput(&padSel, false);
+        if (eventCode == -1 && padKey != -1) {
+            eventCode = padKey;
+        }
 
         if (eventCode == KEY_ESCAPE) {
             break;
@@ -5617,6 +6159,8 @@ static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hi
         sharedFpsLimiter.throttle();
     }
 
+    gamepad_ui_set_self_nav(false);
+
     _gmouse_enable();
 
     if (gameUiWasDisabled) {
@@ -5627,6 +6171,10 @@ static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hi
 
     windowDestroy(gCalledShotWindow);
 
+    // ⚠️ THIS RAN AN INPUT LOOP OF ITS OWN, so every pad edge tracked outside it describes a world a
+    // window old: the A that chose is still physically DOWN. Without this it leaks out as a world click.
+    gamepad_ui_bump_input_epoch();
+
     if (eventCode == KEY_ESCAPE) {
         return -1;
     }
@@ -5636,6 +6184,29 @@ static int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hi
     soundPlayFile("icsxxxx1");
 
     return 0;
+}
+
+// Open the vanilla called-shot window and return the location the player chose, or -1 if they
+// cancelled. The realtime pad path uses this: same window, same numbers, same Cancel. ⚠️ It runs a
+// modal loop of its own, so the world holds still while the choice is made.
+int combat_called_shot_pick(Object* critter, int hitMode, int initialLocation)
+{
+    if (gDude == nullptr) {
+        return -1;
+    }
+
+    // critter may be null: the window then only binds a part ahead (see calledShotSelectHitLocation).
+    int hitLocation = HIT_LOCATION_TORSO;
+    if (calledShotSelectHitLocation(critter, &hitLocation, hitMode, initialLocation) == -1) {
+        return -1;
+    }
+
+    return hitLocation;
+}
+
+char* combat_get_loc_name(Object* critter, int hitLocation)
+{
+    return hitLocationGetName(critter, hitLocation);
 }
 
 // check for possibility of performing attacking
@@ -5702,11 +6273,26 @@ bool _combat_to_hit(Object* target, int* accuracy)
         return false;
     }
 
+    // Realtime: a held LB / RB quick throw goes out on its THROW mode (a spear's secondary, the slot's
+    // own being the thrust), so the % over its target is that throw's.
+    int throwMode;
+    if (combat_rt_enabled() && combat_rt_quick_throw_hit_mode(&throwMode)) {
+        hitMode = throwMode;
+        aiming = false;
+    }
+
     if (_combat_check_bad_shot(gDude, target, hitMode, aiming) != COMBAT_BAD_SHOT_OK) {
         return false;
     }
 
-    *accuracy = attackDetermineToHit(gDude, gDude->tile, target, HIT_LOCATION_UNCALLED, hitMode, true);
+    // ⚠️ THE AIMED PART'S CHANCE WHILE AIMING (fallout1-ce 2026-10-11). In realtime the weapon slot's
+    // AIMED mode fires at the part bound in the called-shot window, so the percentage over the target is
+    // that part's chance, not the uncalled one the shot will never use. Turn-based keeps vanilla's number.
+    int location = HIT_LOCATION_UNCALLED;
+    if (combat_rt_enabled() && aiming && critterCanAim(gDude, hitMode)) {
+        location = gamepad_ui_aim_part();
+    }
+    *accuracy = attackDetermineToHit(gDude, gDude->tile, target, location, hitMode, true);
 
     return true;
 }
@@ -5715,6 +6301,14 @@ bool _combat_to_hit(Object* target, int* accuracy)
 void _combat_attack_this(Object* target)
 {
     if (target == nullptr) {
+        return;
+    }
+
+    // Realtime owns the dude's attacks. This legacy path (the crosshair mouse click in game_mouse)
+    // would call _combat_attack directly, which sets the pending flag WITHOUT combat_rt's resolving
+    // slot -- the attack lock wedges until the watchdog. Route it into combat_rt's intent system.
+    if (combat_rt_enabled()) {
+        combat_rt_player_attack(target);
         return;
     }
 
@@ -5806,7 +6400,7 @@ void _combat_attack_this(Object* target)
     }
 
     int hitLocation;
-    if (calledShotSelectHitLocation(target, &hitLocation, hitMode) != -1) {
+    if (calledShotSelectHitLocation(target, &hitLocation, hitMode, HIT_LOCATION_TORSO) != -1) {
         _combat_attack(gDude, target, hitMode, hitLocation);
     }
 }
@@ -5816,6 +6410,12 @@ void _combat_attack_this(Object* target)
 // 0x426AA8
 void _combat_outline_on()
 {
+    // Realtime owns critter outlines (combat_rt's aim outlines: red / yellow / green while aiming).
+    // This vanilla pass outlined everybody only outside a fight and left them stuck when one began.
+    if (combat_rt_enabled()) {
+        return;
+    }
+
     if (settings.preferences.target_highlight == TARGET_HIGHLIGHT_OFF) {
         return;
     }
@@ -5855,6 +6455,11 @@ void _combat_outline_off()
     int i;
     int v5;
     Object** v9;
+
+    // See _combat_outline_on: in realtime the aim outlines are combat_rt's, and this must not strip them.
+    if (combat_rt_enabled()) {
+        return;
+    }
 
     if (gCombatState & 1) {
         for (i = 0; i < _list_total; i++) {

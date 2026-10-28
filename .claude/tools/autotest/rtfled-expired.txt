@@ -1,0 +1,20 @@
+# (B) the 24 game-hour window: the same leave-and-return, but 25 game hours pass away (clock) -- forgotten.
+name rtfled-expired
+map ARTEMPLE.MAP
+seed 1
+duration 26
+dude tile 17288 rot 2
+dude hp 400
+dude armor 2
+cleararea 20
+spawn 16777454 17888 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 17892 rot 5 wield 8 item 29 4 hostile
+
+mapgo 6000 DESERT2.MAP -1 0
+clock 9000 25
+mapgo 11000 ARTEMPLE.MAP 17288 0
+note 24000 end
+
+expect fled-remember] map=126 n=[23] 
+expect fled-expired\] map=126
+expect-not fled-reaggro

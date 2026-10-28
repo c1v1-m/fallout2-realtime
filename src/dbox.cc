@@ -23,6 +23,11 @@
 #include "window_manager.h"
 #include "word_wrap.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's bmpdlog.cc changes, ported).
+#include "rt/game/gamepad_ui.h"
+
 namespace fallout {
 
 #define FILE_DIALOG_LINE_COUNT 12
@@ -148,6 +153,174 @@ static int gSaveFileDialogFrmIds[FILE_DIALOG_FRM_COUNT] = {
 };
 
 // 0x41CF20
+// Gamepad support for the modal message / yes-no box (showDialogBox): A confirms (KEY_RETURN ->
+// Yes/OK), B cancels (KEY_ESCAPE -> No). Read directly and edge-detected, because these boxes often
+// pop up over a screen that set self_nav (main menu, options), which suppresses the shared
+// A-as-click -- so the cursor path cannot reach the Yes/No buttons. Returns a keycode or -1.
+
+// Set just before the box's loop starts: the FIRST poll of a new box must adopt whatever the pad is
+// holding as the baseline instead of reading it as a fresh press.
+//
+// ⚠️ WITHOUT THIS, EVERY CONFIRMATION ANSWERED ITSELF: the A that picks "Exit Game" is still down
+// when the "are you sure?" box goes up, and it rose-edged instantly into Yes.
+static bool dialog_pad_prime = false;
+
+static int dialog_gamepad_keycode()
+{
+    static bool prevA = false;
+    static bool prevB = false;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevA = false;
+        prevB = false;
+        dialog_pad_prime = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+    if (dialog_pad_prime) {
+        // First poll of this box: adopt the live state, emit nothing.
+        dialog_pad_prime = false;
+        prevA = aNow;
+        prevB = bNow;
+        return -1;
+    }
+
+    int keyCode = -1;
+    if (aNow && !prevA) {
+        keyCode = KEY_RETURN;
+    } else if (bNow && !prevB) {
+        keyCode = KEY_ESCAPE;
+    }
+
+    prevA = aNow;
+    prevB = bNow;
+    return keyCode;
+}
+
+// --- Gamepad navigation for the two file dialogs (LOAD / SAVE character, PRINT TO FILE). ---
+//
+// ⚠️ WITHOUT THIS THE SAVE DIALOG IS A DEAD END ON A PAD: a line is picked by CLICKING it and
+// confirmed by DOUBLE-clicking, while the arrow keys move the PAGE rather than the selection -- and
+// the character editor PINS its pointer on dead panel while the pad drives it. So the pad gets the
+// plain thing a list is expected to do: up/down move the SELECTION (an absolute index; the page
+// follows), A is DONE, B is CANCEL. In the save dialog a move also copies the highlighted name into
+// the edit field, because with no keyboard attached picking from the list IS how a name gets typed.
+enum FileDialogPadAction {
+    FILE_DIALOG_PAD_NONE,
+    FILE_DIALOG_PAD_UP,
+    FILE_DIALOG_PAD_DOWN,
+    FILE_DIALOG_PAD_CONFIRM,
+    FILE_DIALOG_PAD_CANCEL,
+};
+
+#define FILE_DIALOG_PAD_REPEAT_DELAY_MS 350
+#define FILE_DIALOG_PAD_REPEAT_RATE_MS 90
+#define FILE_DIALOG_PAD_STICK_THRESHOLD 12000
+
+// Same discipline as dialog_pad_prime: the A that OPENED this dialog is still down.
+static bool file_dialog_pad_prime = false;
+
+static int file_dialog_pad_action()
+{
+    static bool prevA = false;
+    static bool prevB = false;
+    static int prevDir = 0;
+    static unsigned int nextStepAt = 0;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevA = false;
+        prevB = false;
+        prevDir = 0;
+        file_dialog_pad_prime = false;
+        return FILE_DIALOG_PAD_NONE;
+    }
+
+    SDL_GameControllerUpdate();
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+    int axisY = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+    bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || axisY < -FILE_DIALOG_PAD_STICK_THRESHOLD;
+    bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || axisY > FILE_DIALOG_PAD_STICK_THRESHOLD;
+    int dir = upNow ? 1 : (downNow ? 2 : 0);
+
+    if (file_dialog_pad_prime) {
+        file_dialog_pad_prime = false;
+        prevA = aNow;
+        prevB = bNow;
+        prevDir = dir;
+        nextStepAt = getTicks() + FILE_DIALOG_PAD_REPEAT_DELAY_MS;
+        return FILE_DIALOG_PAD_NONE;
+    }
+
+    int action = FILE_DIALOG_PAD_NONE;
+    if (aNow && !prevA) {
+        action = FILE_DIALOG_PAD_CONFIRM;
+    } else if (bNow && !prevB) {
+        action = FILE_DIALOG_PAD_CANCEL;
+    } else if (dir != 0) {
+        // Held directions auto-repeat.
+        if (dir != prevDir) {
+            action = dir == 1 ? FILE_DIALOG_PAD_UP : FILE_DIALOG_PAD_DOWN;
+            nextStepAt = getTicks() + FILE_DIALOG_PAD_REPEAT_DELAY_MS;
+        } else if (getTicks() >= nextStepAt) {
+            action = dir == 1 ? FILE_DIALOG_PAD_UP : FILE_DIALOG_PAD_DOWN;
+            nextStepAt = getTicks() + FILE_DIALOG_PAD_REPEAT_RATE_MS;
+        }
+    }
+
+    prevA = aNow;
+    prevB = bNow;
+    prevDir = dir;
+    return action;
+}
+
+// Move the highlight by `delta` over the WHOLE list, scrolling the page to follow.
+static void file_dialog_pad_step(int delta, int fileListLength, int* selectedFileIndex, int* pageOffset)
+{
+    if (fileListLength <= 0) {
+        return;
+    }
+
+    int index = *pageOffset + *selectedFileIndex + delta;
+    if (index < 0) {
+        index = 0;
+    }
+    if (index > fileListLength - 1) {
+        index = fileListLength - 1;
+    }
+
+    int maxOffset = fileListLength - FILE_DIALOG_LINE_COUNT;
+    if (maxOffset < 0) {
+        maxOffset = 0;
+    }
+
+    int offset = *pageOffset;
+    if (index < offset) {
+        offset = index;
+    }
+    if (index >= offset + FILE_DIALOG_LINE_COUNT) {
+        offset = index - FILE_DIALOG_LINE_COUNT + 1;
+    }
+    if (offset > maxOffset) {
+        offset = maxOffset;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+
+    *pageOffset = offset;
+    *selectedFileIndex = index - offset;
+}
+
 int showDialogBox(const char* title, const char** body, int bodyLength, int x, int y, int titleColor, const char* a8, int bodyColor, int flags)
 {
     MessageList messageList;
@@ -523,11 +696,21 @@ int showDialogBox(const char* title, const char** body, int bodyLength, int x, i
 
     windowRefresh(win);
 
+    // Re-baseline the pad edge detector for THIS box (see dialog_pad_prime).
+    dialog_pad_prime = true;
+
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        if (keyCode == -1) {
+            int padKey = dialog_gamepad_keycode();
+            if (padKey != -1) {
+                keyCode = padKey;
+            }
+        }
 
         if (keyCode == 500) {
             rc = 1;
@@ -561,6 +744,9 @@ int showDialogBox(const char* title, const char** body, int bodyLength, int x, i
         messageListFree(&messageList);
     }
 
+    // Every outer loop that keeps its own button edges is now stale -- the button that answered this
+    // box is very likely still down.
+    gamepad_ui_bump_input_epoch();
     return rc;
 }
 
@@ -728,6 +914,8 @@ int showLoadFileDialog(char* title, char** fileList, char* dest, int fileListLen
     int doubleClickSelectedFileIndex = -2;
     int doubleClickTimer = FILE_DIALOG_DOUBLE_CLICK_DELAY;
 
+    file_dialog_pad_prime = true;
+
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
@@ -739,6 +927,20 @@ int showLoadFileDialog(char* title, char** fileList, char* dest, int fileListLen
         bool isScrolling = false;
 
         convertMouseWheelToArrowKey(&keyCode);
+
+        int padAction = file_dialog_pad_action();
+        if (padAction == FILE_DIALOG_PAD_CONFIRM) {
+            keyCode = 500; // DONE, which takes the highlighted line
+        } else if (padAction == FILE_DIALOG_PAD_CANCEL) {
+            keyCode = 501;
+        } else if (padAction == FILE_DIALOG_PAD_UP || padAction == FILE_DIALOG_PAD_DOWN) {
+            file_dialog_pad_step(padAction == FILE_DIALOG_PAD_UP ? -1 : 1,
+                fileListLength, &selectedFileIndex, &pageOffset);
+            fileDialogRenderFileList(windowBuffer, fileList, pageOffset, fileListLength, selectedFileIndex, backgroundWidth);
+            windowRefresh(win);
+            doubleClickSelectedFileIndex = -2;
+            keyCode = -1; // the move IS this frame's input
+        }
 
         if (keyCode == 500) {
             if (fileListLength != 0) {
@@ -920,6 +1122,10 @@ int showLoadFileDialog(char* title, char** fileList, char* dest, int fileListLen
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    // The button that answered this dialog is very likely still down; the screen underneath (the
+    // character sheet runs its own edge detector) must know its edges are stale.
+    gamepad_ui_bump_input_epoch();
 
     windowDestroy(win);
 
@@ -1123,6 +1329,8 @@ int showSaveFileDialog(char* title, char** fileList, char* dest, int fileListLen
     int doubleClickSelectedFileIndex = -2;
     int doubleClickTimer = FILE_DIALOG_DOUBLE_CLICK_DELAY;
 
+    file_dialog_pad_prime = true;
+
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
@@ -1134,6 +1342,41 @@ int showSaveFileDialog(char* title, char** fileList, char* dest, int fileListLen
         bool isScrolling = false;
 
         convertMouseWheelToArrowKey(&keyCode);
+
+        int padAction = file_dialog_pad_action();
+        if (padAction == FILE_DIALOG_PAD_CONFIRM) {
+            keyCode = KEY_RETURN; // DONE, saving under whatever is in the name field
+        } else if (padAction == FILE_DIALOG_PAD_CANCEL) {
+            keyCode = 501;
+        } else if (padAction == FILE_DIALOG_PAD_UP || padAction == FILE_DIALOG_PAD_DOWN) {
+            if (fileListLength != 0) {
+                file_dialog_pad_step(padAction == FILE_DIALOG_PAD_UP ? -1 : 1,
+                    fileListLength, &selectedFileIndex, &pageOffset);
+
+                // The highlighted name goes straight into the edit field, exactly as a single click
+                // does: on a pad there is no keyboard to type one with, so this IS the name entry.
+                bufferFill(fileNameBufferPtr, fontGetStringWidth(fileNameCopy), cursorHeight, backgroundWidth, 100);
+                strncpy(fileNameCopy, fileList[selectedFileIndex + pageOffset], 16);
+
+                int index;
+                for (index = 0; index < 12; index++) {
+                    if (fileNameCopy[index] == '.' || fileNameCopy[index] == '\0') {
+                        break;
+                    }
+                }
+
+                fileNameCopy[index] = '\0';
+                fileNameCopyLength = strlen(fileNameCopy);
+                fileNameCopy[fileNameCopyLength] = ' ';
+                fileNameCopy[fileNameCopyLength + 1] = '\0';
+
+                fontDrawText(fileNameBufferPtr, fileNameCopy, backgroundWidth, backgroundWidth, _colorTable[992]);
+                fileDialogRenderFileList(windowBuffer, fileList, pageOffset, fileListLength, selectedFileIndex, backgroundWidth);
+                windowRefresh(win);
+                doubleClickSelectedFileIndex = -2;
+            }
+            keyCode = -1; // the move IS this frame's input
+        }
 
         if (keyCode == 500) {
             rc = 0;
@@ -1380,6 +1623,9 @@ int showSaveFileDialog(char* title, char** fileList, char* dest, int fileListLen
     }
 
     endTextInput();
+
+    // See showLoadFileDialog: the A that confirmed is still down when the character sheet resumes.
+    gamepad_ui_bump_input_epoch();
 
     if (rc == 0) {
         if (fileNameCopyLength != 0) {

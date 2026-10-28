@@ -1,0 +1,15 @@
+# F2 (2026-10-24): his pasture save; the dude runs from the bugman past the herd and on -- the bugman
+# chasing him turns to a brahmin that is nearer than he is (bugman-brahmin fromDude=1), Torr joins in.
+name m-pasture-run
+map KLAGRAZ.MAP
+loadslot 3
+seed 1
+duration 40
+
+walkto 1500 16100
+walkto 6000 14300
+walkto 12000 13500
+note 38000 end
+
+expect bugman-turn\] .*fromDude=1
+expect bugman-turn\] .*toPid=16777244

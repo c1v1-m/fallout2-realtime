@@ -1,0 +1,19 @@
+# F2 (2026-10-24, the Deck: "hra spadla při stisknutí menu"): BACK held (the run to the exit) while a
+# raider is fighting him prints "Not while you're being shot at." -- a string literal, which the message
+# window's line breaking wrote into when the text had to wrap (a 640 bar: the Deck, this test folder).
+name screen-back-in-fight-f2
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude hp 300
+
+spawn 16777455 20301 rot 5 wield 4 hostile hp 300
+
+pad 4000 BACK 1
+pad 4800 BACK 0
+pad 7000 BACK 1
+pad 7800 BACK 0
+
+expect Not while you're being shot at
+expect \[FLOW/autotest\] end why=time

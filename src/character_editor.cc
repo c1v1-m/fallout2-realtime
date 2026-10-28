@@ -47,6 +47,14 @@
 #include "word_wrap.h"
 #include "worldmap.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's editor.cc changes, ported).
+#include "rt/game/combat_rt.h" // rate of fire, printed on the stat and combat-skill cards
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define RENDER_ALL_STATS 7
@@ -789,6 +797,1031 @@ struct CustomKarmaFolderDescription {
 static std::vector<CustomKarmaFolderDescription> gCustomKarmaFolderDescriptions;
 static std::vector<TownReputationEntry> gCustomTownReputationEntries;
 
+
+// --- CARD FOOTER (fallout1-ce's editor.cc, ported) ---------------------------
+//
+// Two optional lines characterEditorDrawCardWithOptions (and, for the perk notes, perkDialogDrawCard)
+// prints under the vanilla description. Set just before the call, consumed and cleared by the card.
+// A buffer, not a parameter: the card has dozens of call sites and only three of them want a line.
+// Each line is word-wrapped at the card's own text column there.
+#define CARD_FOOTER_LINES 2
+#define CARD_FOOTER_LEN 96
+static char card_footer[CARD_FOOTER_LINES][CARD_FOOTER_LEN];
+
+static void card_footer_clear()
+{
+    for (int i = 0; i < CARD_FOOTER_LINES; i++) {
+        card_footer[i][0] = '\0';
+    }
+}
+
+// --- RATE OF FIRE ON THE CARD -----------------------------------------------
+//
+// ⚠️ EVERYTHING HERE IS PHRASED AS A RATE, NEVER AS A DELAY. The cooldown itself is a duration, so
+// a "15% skill bonus" is 15% off the WAIT, which is +17.6% shots -- two different numbers for one
+// effect. So the cards say rate of fire throughout: bigger is always faster.
+//
+// The values come out of combat_rt, computed from gDude as it stands RIGHT NOW -- the editor edits
+// gDude in place, and characterEditorDrawCard is re-run after every point spent, so the number on
+// the card tracks the slider as you move it.
+
+static const char* card_attack_category(int attackType)
+{
+    switch (attackType) {
+    case ATTACK_TYPE_RANGED:
+        return "Ranged";
+    case ATTACK_TYPE_THROW:
+        return "Thrown";
+    default:
+        return "Melee";
+    }
+}
+
+// A multiplier ON THE COOLDOWN turned into the percentage change in RATE it represents.
+// mult 0.85 (15% less waiting) -> +18% shots.
+static int card_rate_pct(float coolMult)
+{
+    if (coolMult <= 0.0f) {
+        return 0;
+    }
+    float pct = (1.0f / coolMult - 1.0f) * 100.0f;
+    return (int)(pct + (pct >= 0.0f ? 0.5f : -0.5f));
+}
+
+// One of the six combat skills: what you actually attack at, and how much of it this skill bought.
+static void card_footer_for_skill(int skill)
+{
+    if (!combat_rt_enabled()) {
+        return;
+    }
+
+    float seconds;
+    float statMult;
+    float skillMult;
+    if (!combat_rt_skill_attack_speed(gDude, skill, skillGetValue(gDude, skill),
+            &seconds, &statMult, &skillMult)) {
+        return;
+    }
+
+    // ⚠️ Every line here is short enough for one row on the narrowest card it can appear on (136 px
+    // for a skill, 141 px for a stat). Wrapping is still honoured, so a longer line is merely ugly.
+    snprintf(card_footer[0], CARD_FOOTER_LEN, "Attack every %.2f s", seconds);
+
+    // Second line only when the skill term is actually doing something; "+0%" reads as a bug.
+    int pct = card_rate_pct(skillMult);
+    if (pct != 0) {
+        snprintf(card_footer[1], CARD_FOOTER_LEN, "Skill bonus: %+d%% rate", pct);
+    }
+}
+
+// STR / PE / AGI: the bigger half of the same number. Printed as the multiplier plus the two
+// endpoints, because a bare "x1.99" says nothing about the seconds you will actually wait.
+static void card_footer_for_stat(int stat)
+{
+    if (!combat_rt_enabled()) {
+        return;
+    }
+
+    float mult;
+    int attackType;
+    if (!combat_rt_stat_attack_speed(stat, critterGetStat(gDude, stat), &mult, &attackType)) {
+        return;
+    }
+
+    float base = combat_rt_attack_cooldown_base();
+    int pct = card_rate_pct(mult);
+
+    // At 5 the stat is the baseline; say the speed itself instead of "+0%" over "2.60 s -> 2.60 s".
+    if (pct == 0) {
+        snprintf(card_footer[0], CARD_FOOTER_LEN, "%s: every %.2f s",
+            card_attack_category(attackType), base * mult);
+        return;
+    }
+
+    snprintf(card_footer[0], CARD_FOOTER_LEN, "%s rate: %+d%%",
+        card_attack_category(attackType), pct);
+    snprintf(card_footer[1], CARD_FOOTER_LEN, "%.2f s -> %.2f s", base, base * mult);
+}
+
+// A perk that does more in realtime than its vanilla text says (perk_realtime_note). On both perk
+// cards: the character screen's folder and the level-up window, where the choice is made.
+static void card_footer_for_perk(int perk)
+{
+    const char* note = combat_rt_enabled() ? perk_realtime_note(perk) : nullptr;
+    if (note != nullptr) {
+        snprintf(card_footer[0], CARD_FOOTER_LEN, "%s", note);
+    }
+}
+
+// The perk whose line the perks folder last drew highlighted, or -1 (a trait, a heading, nothing).
+// Set by characterEditorDrawPerksFolder, read by characterEditorDrawCard for the footer.
+static int gCharacterEditorFolderCardPerk = -1;
+
+// ---------------------------------------------------------------------------
+// Gamepad navigation for the character editor (fallout1-ce's editor.cc, ported; both the creation
+// screen and the character sheet).
+//
+// A focus model over every focusable thing on the screen, navigated SPATIALLY, driving the SAME
+// `characterEditorSelectedItem` the mouse path already uses -- so the engine's own highlight (and
+// the description card) shows the controller focus for free. Actions are injected as the screen's
+// OWN button event codes via enqueueInputEvent, so the existing handlers run unchanged.
+//   D-pad / left stick ... move the focus to the nearest thing that way (held = repeat)
+//   LB / RB .............. jump to the first item of the previous / next kind
+//   A (tap) .............. act: +1 SPECIAL / tag a skill / +1 skill point / toggle a trait / press
+//   A (hold) / START ..... DONE           B ... CANCEL          X ... -1 (or Gender during creation)
+//   Y .................... spend every remaining point on the focused stat / skill
+enum {
+    CE_ITEM_STAT, // SPECIAL, editable during creation only
+    CE_ITEM_STATUS, // Hit Points / Poisoned / Radiated / cripples -- read-only, sheet only
+    CE_ITEM_DERIVED, // AC, AP, carry weight, ... -- read-only, sheet only
+    CE_ITEM_FOLDER_TAB, // PERKS / KARMA / KILLS tab strip -- sheet only
+    CE_ITEM_FOLDER_LINE, // one visible row of the open folder -- sheet only
+    CE_ITEM_SKILL,
+    CE_ITEM_TRAIT, // creation only
+    CE_ITEM_BUTTON, // PRINT/OPTIONS, DONE, CANCEL
+    CE_ITEM_BIO, // NAME / AGE / GENDER strip, top-left, creation only
+};
+
+// characterEditorSelectedItem of the first trait row (82..97: 0..7 left column, 8..15 right).
+#define CE_FIRST_TRAIT 82
+
+static bool ce_prev_up;
+static bool ce_prev_down;
+static bool ce_prev_left;
+static bool ce_prev_right;
+static bool ce_prev_lb;
+static bool ce_prev_rb;
+static bool ce_prev_a;
+static bool ce_prev_b;
+static bool ce_prev_x;
+static bool ce_prev_y;
+static bool ce_prev_start;
+
+// Stick/D-pad repeat while a direction is held, and how long A must be held to mean DONE.
+#define CE_REPEAT_DELAY_MS 320
+#define CE_REPEAT_RATE_MS 85
+// ⚠️ 400 was not a hold, it was a slightly slow press: spending points is a TAP action. A hold has
+// to feel held.
+#define CE_HOLD_MS 900
+
+static unsigned int ce_a_down_at = 0;
+static bool ce_a_consumed = false;
+
+// Direction auto-repeat state. FILE statics so the epoch guard can reset them: a direction held
+// through a nested window must not fire a step the moment that window closes.
+static int ce_held_dir = 0;
+static unsigned int ce_next_step_at = 0;
+
+// Last gamepad_ui input epoch this screen saw. See the guard at the top of ce_pad_poll.
+static unsigned int ce_last_epoch = 0;
+
+// PRINT/OPTIONS, DONE, CANCEL -- in the order they sit on screen (x 343 / 455 / 552, all y 454).
+// The codes are this window's own, and its loop eats them on the very next iteration.
+struct CeButton {
+    int x;
+    int code;
+};
+
+static const CeButton ce_buttons[] = {
+    { 343, 501 }, // PRINT on the sheet, OPTIONS during creation
+    { 455, 500 }, // DONE
+    { 552, 502 }, // CANCEL
+};
+
+#define CE_BUTTON_COUNT ((int)(sizeof(ce_buttons) / sizeof(ce_buttons[0])))
+#define CE_BUTTON_Y 454
+
+// Points still to spend on the previous pad frame (-1 = the screen just opened). When the last one
+// goes, the highlight jumps to DONE -- see the end of ce_pad_poll.
+static int ce_points_left_prev = -1;
+
+// Status block: 8 rows from y=46, and the derived stats: 10 rows from y=179. Both are drawn at
+// x=194 (characterEditorDrawDerivedStats), stepping fontGetLineHeight() + 3.
+#define CE_STATUS_COUNT 8
+#define CE_STATUS_X 194
+#define CE_STATUS_Y 46
+#define CE_DERIVED_X 194
+#define CE_DERIVED_Y 179
+#define CE_ROW_STEP (fontGetLineHeight() + 3)
+
+// FOCUS FRAME: a 1px box around the whole focused row, in Fallout's own selection yellow -- a tint
+// on one line of a screen this dense does not answer "which control am I editing". Drawn and
+// erased through a SAVE-UNDER, once per loop iteration: erase at the top of the frame, let the
+// engine repaint whatever it wants, draw again at the end.
+#define CE_HL_MAX_W 300
+#define CE_HL_MAX_H 40
+
+static unsigned char ce_hl_top[CE_HL_MAX_W];
+static unsigned char ce_hl_bottom[CE_HL_MAX_W];
+static unsigned char ce_hl_left[CE_HL_MAX_H];
+static unsigned char ce_hl_right[CE_HL_MAX_H];
+static int ce_hl_x = -1;
+static int ce_hl_y;
+static int ce_hl_w;
+static int ce_hl_h;
+
+static void ce_focus_bounds(int* x, int* y, int* w, int* h);
+
+static void ce_hl_erase()
+{
+    if (ce_hl_x < 0 || gCharacterEditorWindowBuffer == nullptr) {
+        return;
+    }
+
+    unsigned char* buf = gCharacterEditorWindowBuffer;
+    memcpy(buf + 640 * ce_hl_y + ce_hl_x, ce_hl_top, ce_hl_w);
+    memcpy(buf + 640 * (ce_hl_y + ce_hl_h - 1) + ce_hl_x, ce_hl_bottom, ce_hl_w);
+    for (int i = 0; i < ce_hl_h; i++) {
+        unsigned char* row = buf + 640 * (ce_hl_y + i);
+        row[ce_hl_x] = ce_hl_left[i];
+        row[ce_hl_x + ce_hl_w - 1] = ce_hl_right[i];
+    }
+
+    ce_hl_x = -1;
+}
+
+static void ce_hl_draw()
+{
+    if (gCharacterEditorWindowBuffer == nullptr) {
+        return;
+    }
+
+    int x;
+    int y;
+    int w;
+    int h;
+    ce_focus_bounds(&x, &y, &w, &h);
+
+    if (x < 0 || y < 0 || w < 3 || h < 3 || w > CE_HL_MAX_W || h > CE_HL_MAX_H
+        || x + w > 640 || y + h > 480) {
+        return;
+    }
+
+    unsigned char* buf = gCharacterEditorWindowBuffer;
+
+    // Whole footprint saved BEFORE any of it is drawn, or the corners come back yellow.
+    memcpy(ce_hl_top, buf + 640 * y + x, w);
+    memcpy(ce_hl_bottom, buf + 640 * (y + h - 1) + x, w);
+    for (int i = 0; i < h; i++) {
+        const unsigned char* row = buf + 640 * (y + i);
+        ce_hl_left[i] = row[x];
+        ce_hl_right[i] = row[x + w - 1];
+    }
+
+    unsigned char color = _colorTable[32747];
+    memset(buf + 640 * y + x, color, w);
+    memset(buf + 640 * (y + h - 1) + x, color, w);
+    for (int i = 0; i < h; i++) {
+        unsigned char* row = buf + 640 * (y + i);
+        row[x] = color;
+        row[x + w - 1] = color;
+    }
+
+    ce_hl_x = x;
+    ce_hl_y = y;
+    ce_hl_w = w;
+    ce_hl_h = h;
+}
+
+// The three creation-only buttons along the top edge, left to right.
+static const int ce_bio_codes[] = { NAME_BTN_CODE, AGE_BTN_CODE, SEX_BTN_CODE };
+static const int ce_bio_graphics[] = { EDITOR_GRAPHIC_NAME_ON, EDITOR_GRAPHIC_AGE_ON, EDITOR_GRAPHIC_SEX_ON };
+
+#define CE_BIO_COUNT ((int)(sizeof(ce_bio_codes) / sizeof(ce_bio_codes[0])))
+
+// --- CHARACTER-SHEET FOLDER (PERKS / KARMA / KILLS) ------------------------
+//
+// Vanilla drives it by mouse -- characterEditorHandleFolderButtonPressed splits the tab strip by
+// x, zone 527 turns a click in the list into characterEditorSelectedItem 10 + row. Both halves are
+// just focusable items here.
+//
+// ⚠️ The values are VANILLA's: 40 / 42 / 41 for the three tabs (karma is 42, kills 41) and 10 + the
+// VISIBLE row for a line. Fallout 2's folder SCROLLS (nine rows from y 364, every row selectable,
+// headings included), so a line item is a visible row, and stepping past the top or bottom one
+// scrolls the list instead of leaving it -- see ce_folder_scroll_step.
+#define CE_FOLDER_TAB_Y 327
+#define CE_FOLDER_TAB_H 18
+#define CE_FOLDER_ROW_Y 364
+#define CE_FOLDER_ROW_X 34
+#define CE_FOLDER_ROW_W 280
+
+// Tab splits copied from characterEditorHandleFolderButtonPressed's thresholds (> 110 karma,
+// >= 208 kills) rather than measured off the art, so the pad and the mouse agree by construction.
+static const int ce_folder_tab_x[] = { 11, 110, 208 };
+static const int ce_folder_tab_w[] = { 99, 98, 106 };
+static const int ce_folder_tab_folder[] = { EDITOR_FOLDER_PERKS, EDITOR_FOLDER_KARMA, EDITOR_FOLDER_KILLS };
+static const int ce_folder_tab_info[] = { 40, 42, 41 };
+
+struct CeItem {
+    int kind;
+    int index; // which stat / row / skill / trait / button
+    int x;
+    int y;
+    int w;
+    int h;
+};
+
+#define CE_ITEM_MAX 80
+static CeItem ce_items[CE_ITEM_MAX];
+static int ce_item_count = 0;
+static int ce_focus = 0;
+
+static void ce_add_item(int kind, int index, int x, int y, int w, int h)
+{
+    if (ce_item_count >= CE_ITEM_MAX) {
+        return;
+    }
+    CeItem* it = &(ce_items[ce_item_count++]);
+    it->kind = kind;
+    it->index = index;
+    it->x = x;
+    it->y = y;
+    it->w = w;
+    it->h = h;
+}
+
+// How many rows of the open folder are on screen. Valid once characterEditorDrawFolders has run
+// for that folder (it counts every line into gCharacterEditorFolderViewCurrentLine).
+static int ce_folder_visible_rows()
+{
+    int rows = gCharacterEditorFolderViewCurrentLine - gCharacterEditorFolderViewTopLine;
+    if (rows > gCharacterEditorFolderViewMaxLines) {
+        rows = gCharacterEditorFolderViewMaxLines;
+    }
+    return rows > 0 ? rows : 0;
+}
+
+static void ce_add_folder_lines()
+{
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+    int step = fontGetLineHeight() + 1;
+
+    int rows = ce_folder_visible_rows();
+    for (int i = 0; i < rows; i++) {
+        ce_add_item(CE_ITEM_FOLDER_LINE, i, CE_FOLDER_ROW_X - 3, CE_FOLDER_ROW_Y + i * step - 1,
+            CE_FOLDER_ROW_W + 6, step + 1);
+    }
+
+    fontSetCurrent(oldFont);
+}
+
+// Geometry taken from the drawing code, not guessed: gCharacterEditorPrimaryStatY for SPECIAL, the
+// two blocks at x=194 (y=46 and y=179, step lineHeight+3), the skills at y=27 + i*(lineHeight+1)
+// from x=380, the traits' two columns at x=47/199 from y=353, and the three little red buttons.
+static void ce_build_items()
+{
+    ce_item_count = 0;
+
+    for (int i = 0; i < 7; i++) {
+        ce_add_item(CE_ITEM_STAT, i, 30, gCharacterEditorPrimaryStatY[i] - 2, 145, 30);
+    }
+
+    fontSetCurrent(101);
+
+    if (!gCharacterEditorIsCreationMode) {
+        for (int i = 0; i < CE_STATUS_COUNT; i++) {
+            ce_add_item(CE_ITEM_STATUS, i, CE_STATUS_X - 3, CE_STATUS_Y + i * CE_ROW_STEP - 1,
+                124, fontGetLineHeight() + 2);
+        }
+        for (int i = 0; i < EDITOR_DERIVED_STAT_COUNT; i++) {
+            ce_add_item(CE_ITEM_DERIVED, i, CE_DERIVED_X - 3, CE_DERIVED_Y + i * CE_ROW_STEP - 1,
+                122, fontGetLineHeight() + 2);
+        }
+    }
+
+    for (int i = 0; i < SKILL_COUNT; i++) {
+        ce_add_item(CE_ITEM_SKILL, i, 376, 27 + i * (fontGetLineHeight() + 1) - 1, 240, fontGetLineHeight() + 2);
+    }
+
+    // The folder, sheet only. Tabs BEFORE lines so a tab keeps its item index when the line set
+    // changes underneath it -- ce_folder_select relies on that to hold focus across a rebuild.
+    if (!gCharacterEditorIsCreationMode) {
+        for (int i = 0; i < 3; i++) {
+            ce_add_item(CE_ITEM_FOLDER_TAB, i, ce_folder_tab_x[i], CE_FOLDER_TAB_Y,
+                ce_folder_tab_w[i], CE_FOLDER_TAB_H);
+        }
+        ce_add_folder_lines();
+    }
+
+    if (gCharacterEditorIsCreationMode) {
+        double tstep = fontGetLineHeight() + 3 + 0.56;
+        for (int i = 0; i < TRAIT_COUNT; i++) {
+            int col = i / 8;
+            int row = i % 8;
+            ce_add_item(CE_ITEM_TRAIT, i, (col != 0 ? 199 : 47) - 3,
+                353 + (int)(row * tstep) - 1, col != 0 ? 96 : 150, fontGetLineHeight() + 2);
+        }
+    }
+
+    // NAME / AGE / GENDER, laid out exactly as the button registration does it. Added LAST so the
+    // item indices below them do not shift (focus starts at item 0 = STRENGTH).
+    if (gCharacterEditorIsCreationMode) {
+        int bx = NAME_BUTTON_X;
+        for (int i = 0; i < CE_BIO_COUNT; i++) {
+            ce_add_item(CE_ITEM_BIO, i, bx, NAME_BUTTON_Y,
+                _editorFrmImages[ce_bio_graphics[i]].getWidth(), _editorFrmImages[ce_bio_graphics[i]].getHeight());
+            bx += _editorFrmImages[ce_bio_graphics[i]].getWidth();
+        }
+    }
+
+    for (int i = 0; i < CE_BUTTON_COUNT; i++) {
+        ce_add_item(CE_ITEM_BUTTON, i, ce_buttons[i].x - 3, CE_BUTTON_Y - 3,
+            _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth() + 6,
+            _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight() + 6);
+    }
+
+    if (ce_focus >= ce_item_count) {
+        ce_focus = 0;
+    }
+}
+
+// Opens one of the three folder tabs.
+//
+// ⚠️ THE ORDER IS LOAD-BEARING: characterEditorDrawFolders runs FIRST because it is what counts the
+// lines of the folder being opened, and ce_build_items reads that count.
+// ⚠️ This REBUILDS ce_items, so any CeItem* the caller is holding is dangling afterwards.
+static void ce_folder_select(int tab)
+{
+    if (tab < 0 || tab >= (int)(sizeof(ce_folder_tab_folder) / sizeof(ce_folder_tab_folder[0]))) {
+        return;
+    }
+    if (characterEditorWindowSelectedFolder != ce_folder_tab_folder[tab]) {
+        soundPlayFile("ib3p1xx1"); // the click the folder button plays for the same action
+    }
+    characterEditorWindowSelectedFolder = ce_folder_tab_folder[tab];
+    characterEditorSelectedItem = ce_folder_tab_info[tab];
+    characterEditorDrawFolders();
+    ce_build_items();
+}
+
+static void ce_focus_bounds(int* x, int* y, int* w, int* h)
+{
+    const CeItem* it = &(ce_items[ce_focus]);
+    *x = it->x;
+    *y = it->y;
+    *w = it->w;
+    *h = it->h;
+}
+
+static void ce_refresh_focus()
+{
+    const CeItem* it = &(ce_items[ce_focus]);
+
+    switch (it->kind) {
+    case CE_ITEM_STAT:
+        characterEditorSelectedItem = it->index;
+        break;
+    case CE_ITEM_STATUS:
+        characterEditorSelectedItem = EDITOR_HIT_POINTS + it->index;
+        break;
+    case CE_ITEM_DERIVED:
+        characterEditorSelectedItem = EDITOR_FIRST_DERIVED_STAT + it->index;
+        break;
+    case CE_ITEM_SKILL:
+        characterEditorSelectedItem = it->index + EDITOR_FIRST_SKILL;
+        // ⚠️ gCharacterEditorCurrentSkill is what the engine's own +/- act on and is otherwise only
+        // ever set by CLICKING a row, so without this every point went into skill 0.
+        gCharacterEditorCurrentSkill = it->index;
+        break;
+    case CE_ITEM_TRAIT:
+        characterEditorSelectedItem = it->index + CE_FIRST_TRAIT;
+        break;
+    case CE_ITEM_FOLDER_TAB:
+        // Focusing a tab OPENS it -- the same way pointing at a skill row selects it. Rebuilds the
+        // item list; `it` is not touched again below.
+        ce_folder_select(it->index);
+        break;
+    case CE_ITEM_FOLDER_LINE:
+        characterEditorSelectedItem = 10 + it->index;
+        break;
+    default:
+        break; // a button explains nothing -- leave the last description up
+    }
+
+    characterEditorDrawPrimaryStat(RENDER_ALL_STATS, 0, 0);
+    characterEditorDrawOptionalTraits();
+    characterEditorDrawSkills(0);
+    characterEditorDrawPcStats();
+    // Before the card: the folder is what fills in the folder card for the highlighted row.
+    characterEditorDrawFolders();
+    characterEditorDrawDerivedStats();
+    characterEditorDrawCard();
+    windowRefresh(gCharacterEditorWindow);
+}
+
+// Up/down on the top or bottom VISIBLE folder row scrolls the folder instead of leaving it, while
+// there is more list that way. The very scroll the keyboard arrows do in characterEditorShow, so the
+// highlighted row stays where it is and the list moves under it. Returns true when it scrolled.
+static bool ce_folder_scroll_step(int dy)
+{
+    const CeItem* cur = &(ce_items[ce_focus]);
+    if (cur->kind != CE_ITEM_FOLDER_LINE) {
+        return false;
+    }
+
+    int rows = ce_folder_visible_rows();
+    if (dy < 0) {
+        if (cur->index != 0 || gCharacterEditorFolderViewTopLine <= 0) {
+            return false;
+        }
+        characterEditorFolderViewScroll(-1);
+        characterEditorSelectedItem = 10;
+    } else {
+        if (cur->index != rows - 1
+            || gCharacterEditorFolderViewTopLine + rows >= gCharacterEditorFolderViewCurrentLine) {
+            return false;
+        }
+        characterEditorFolderViewScroll(1);
+        characterEditorSelectedItem = 10 + rows - 1;
+    }
+
+    int keep = ce_focus;
+    ce_build_items();
+    ce_focus = keep < ce_item_count ? keep : 0;
+    ce_refresh_focus();
+    soundPlayFile("ib1p1xx1");
+    return true;
+}
+
+// Nearest item in the pushed direction. A candidate must move at least CE_STEP_MIN along the pushed
+// axis (a few pixels of sloppy alignment is not a direction), and one that OVERLAPS on the other axis
+// (a true row/column neighbour) beats one merely in line with it.
+#define CE_STEP_MIN 6
+
+static void ce_focus_step(int dx, int dy)
+{
+    if (dy != 0 && ce_folder_scroll_step(dy)) {
+        return;
+    }
+
+    const CeItem* cur = &(ce_items[ce_focus]);
+    int cx = cur->x + cur->w / 2;
+    int cy = cur->y + cur->h / 2;
+
+    int best = -1;
+    int bestScore = 0;
+    bool bestOverlaps = false;
+
+    for (int i = 0; i < ce_item_count; i++) {
+        if (i == ce_focus) {
+            continue;
+        }
+
+        const CeItem* it = &(ce_items[i]);
+        int ix = it->x + it->w / 2;
+        int iy = it->y + it->h / 2;
+
+        int along = dx != 0 ? (ix - cx) * dx : (iy - cy) * dy;
+        if (along < CE_STEP_MIN) {
+            continue;
+        }
+
+        int across = dx != 0 ? (iy - cy) : (ix - cx);
+        if (across < 0) {
+            across = -across;
+        }
+
+        bool overlaps = dx != 0
+            ? (it->y < cur->y + cur->h && it->y + it->h > cur->y)
+            : (it->x < cur->x + cur->w && it->x + it->w > cur->x);
+
+        // No slop cap: this layout has real gaps (the skills column is far to the right of
+        // everything else), and refusing to cross them made DONE unreachable from the skill list.
+        int score = along + 2 * across;
+
+        if (best == -1 || (overlaps && !bestOverlaps)
+            || (overlaps == bestOverlaps && score < bestScore)) {
+            best = i;
+            bestScore = score;
+            bestOverlaps = overlaps;
+        }
+    }
+
+    if (best != -1) {
+        ce_focus = best;
+        ce_refresh_focus();
+        soundPlayFile("ib1p1xx1");
+    }
+}
+
+// LB/RB: the QUICK jump, straight to the first item of the next/previous kind.
+static void ce_focus_jump(int dir)
+{
+    int kind = ce_items[ce_focus].kind;
+    int at = ce_focus;
+
+    for (int guard = 0; guard < ce_item_count; guard++) {
+        at = (at + ce_item_count + dir) % ce_item_count;
+        if (ce_items[at].kind != kind) {
+            int k = ce_items[at].kind;
+            for (int i = 0; i < ce_item_count; i++) {
+                if (ce_items[i].kind == k) {
+                    at = i;
+                    break;
+                }
+            }
+            ce_focus = at;
+            ce_refresh_focus();
+            soundPlayFile("ib1p1xx1");
+            return;
+        }
+    }
+}
+
+// ONE SPECIAL point in or out of the focused stat, during creation. Not through the +/- buttons:
+// characterEditorAdjustPrimaryStat is a blocking hold-to-repeat loop that only ends on the mouse-up
+// code 518, which the pad never sends.
+// ⚠️ WHICH stat comes from the FOCUS -- a parallel cursor once spent every point on STRENGTH.
+static bool ce_stat_step(int dir)
+{
+    if (!gCharacterEditorIsCreationMode) {
+        return false; // SPECIAL is only editable during creation
+    }
+
+    const CeItem* focused = &(ce_items[ce_focus]);
+    if (focused->kind != CE_ITEM_STAT) {
+        return false;
+    }
+
+    int stat = focused->index;
+    int savedPoints = gCharacterEditorRemainingCharacterPoints;
+    int previousValue = critterGetBaseStatWithTraitModifier(gDude, stat) + critterGetBonusStat(gDude, stat);
+    bool changed;
+
+    if (dir > 0) {
+        changed = gCharacterEditorRemainingCharacterPoints > 0 && previousValue < 10 && critterIncBaseStat(gDude, stat) == 0;
+        if (changed) {
+            gCharacterEditorRemainingCharacterPoints--;
+        }
+    } else {
+        changed = critterDecBaseStat(gDude, stat) == 0;
+        if (changed) {
+            gCharacterEditorRemainingCharacterPoints++;
+        }
+    }
+
+    if (!changed) {
+        soundPlayFile("iisxxxx1"); // at a limit, or out of points
+        return false;
+    }
+
+    characterEditorDrawPrimaryStat(stat, ANIMATE, previousValue);
+    characterEditorDrawBigNumber(126, 282, ANIMATE, gCharacterEditorRemainingCharacterPoints, savedPoints, gCharacterEditorWindow);
+    critterUpdateDerivedStats(gDude);
+    characterEditorDrawDerivedStats();
+    characterEditorDrawSkills(0);
+    characterEditorSelectedItem = stat;
+    characterEditorDrawCard();
+    windowRefresh(gCharacterEditorWindow);
+    return true;
+}
+
+// ONE point in or out of the focused SKILL, on the character SHEET. Same reasoning as ce_stat_step:
+// characterEditorHandleAdjustSkillButtonPressed is another blocking held-repeat loop that exits only
+// on 522/524, release codes the pad never produces -- feeding it 521 spent every point you had.
+static bool ce_skill_step(int dir)
+{
+    if (gCharacterEditorIsCreationMode) {
+        return false; // creation spends points on TAG skills, not on the slider
+    }
+
+    int unspent = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS);
+    bool changed = false;
+
+    if (dir > 0) {
+        if (unspent > 0) {
+            changed = skillAdd(gDude, gCharacterEditorCurrentSkill) == 0;
+        }
+    } else {
+        // Never below where the screen was opened: the engine's own rule for taking a point back.
+        if (skillGetValue(gDude, gCharacterEditorCurrentSkill) > gCharacterEditorSkillsBackup[gCharacterEditorCurrentSkill]) {
+            changed = skillSub(gDude, gCharacterEditorCurrentSkill) == 0;
+        }
+    }
+
+    if (!changed) {
+        soundPlayFile("iisxxxx1");
+        return false;
+    }
+
+    characterEditorSelectedItem = gCharacterEditorCurrentSkill + EDITOR_FIRST_SKILL;
+    characterEditorDrawCard();
+    characterEditorDrawSkills(1);
+    characterEditorDrawBigNumber(522, 228, ANIMATE, pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS), unspent, gCharacterEditorWindow);
+    windowRefresh(gCharacterEditorWindow);
+    return true;
+}
+
+// Y: pour EVERY remaining point into whatever is focused, one legal step at a time -- the same single
+// steps the D-pad uses, so every rule keeps applying (the cap of 10, the derived recalc, the skill's
+// rising cost, "never below the opening value"). Stops the moment a step refuses.
+static void ce_spend_all()
+{
+    bool spent = false;
+
+    for (int guard = 0; guard < 500; guard++) {
+        bool stepped;
+        const CeItem* it = &(ce_items[ce_focus]);
+        if (gCharacterEditorIsCreationMode && it->kind == CE_ITEM_STAT) {
+            if (gCharacterEditorRemainingCharacterPoints <= 0) {
+                break;
+            }
+            stepped = ce_stat_step(1);
+        } else if (!gCharacterEditorIsCreationMode && it->kind == CE_ITEM_SKILL) {
+            if (pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS) <= 0) {
+                break;
+            }
+            stepped = ce_skill_step(1);
+        } else {
+            break;
+        }
+
+        if (!stepped) {
+            break;
+        }
+        spent = true;
+    }
+
+    if (!spent) {
+        soundPlayFile("iisxxxx1");
+    }
+}
+
+// A: act on whatever is focused.
+static void ce_pad_activate()
+{
+    const CeItem* it = &(ce_items[ce_focus]);
+
+    switch (it->kind) {
+    case CE_ITEM_STAT:
+        if (gCharacterEditorIsCreationMode) {
+            ce_stat_step(1);
+        } else {
+            soundPlayFile("iisxxxx1"); // read-only on the sheet
+        }
+        break;
+    case CE_ITEM_SKILL:
+        // Tagging is a CREATION-only action; on the sheet A spends a point.
+        if (gCharacterEditorIsCreationMode) {
+            enqueueInputEvent(536 + it->index);
+        } else {
+            gCharacterEditorCurrentSkill = it->index;
+            ce_skill_step(1);
+        }
+        break;
+    case CE_ITEM_TRAIT:
+        enqueueInputEvent(555 + it->index);
+        break;
+    case CE_ITEM_BUTTON:
+        enqueueInputEvent(ce_buttons[it->index].code);
+        break;
+    case CE_ITEM_BIO:
+        // NAME / AGE / GENDER each open their own nested window. ⚠️ The name one needs a KEYBOARD
+        // (on a Deck: Steam + X) to type into -- the pad gets you to the field and confirms it.
+        enqueueInputEvent(ce_bio_codes[it->index]);
+        break;
+    default:
+        soundPlayFile("iisxxxx1"); // a read-only row -- the description is the point
+        break;
+    }
+}
+
+// X: give a point back.
+static void ce_pad_undo()
+{
+    const CeItem* it = &(ce_items[ce_focus]);
+
+    if (it->kind == CE_ITEM_STAT && gCharacterEditorIsCreationMode) {
+        ce_stat_step(-1);
+    } else if (it->kind == CE_ITEM_SKILL && !gCharacterEditorIsCreationMode) {
+        gCharacterEditorCurrentSkill = it->index;
+        ce_skill_step(-1);
+    } else if (gCharacterEditorIsCreationMode) {
+        enqueueInputEvent(SEX_BTN_CODE); // Gender window -- creation only
+    } else {
+        soundPlayFile("iisxxxx1");
+    }
+}
+
+static void ce_pad_poll(SDL_GameController* pad)
+{
+    SDL_GameControllerUpdate();
+
+    bool up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+    bool down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+    bool left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
+    bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
+    bool lb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+    bool rb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
+    bool a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool x = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
+    bool y = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    bool start = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
+
+    // ⚠️ A NESTED WINDOW JUST RAN ITS OWN INPUT LOOP -- our edges describe the pad from BEFORE it, so
+    // adopt the live state and act on nothing this poll. Without it, taking a perk shut the whole
+    // sheet: the perk window confirms on the PRESS edge and returns while A is still DOWN, and A here
+    // acts on RELEASE. ce_a_consumed, not just the edges, says "the nested window spent this press".
+    unsigned int epoch = gamepad_ui_input_epoch();
+    if (epoch != ce_last_epoch) {
+        ce_last_epoch = epoch;
+        ce_prev_up = up;
+        ce_prev_down = down;
+        ce_prev_left = left;
+        ce_prev_right = right;
+        ce_prev_lb = lb;
+        ce_prev_rb = rb;
+        ce_prev_a = a;
+        ce_prev_b = b;
+        ce_prev_x = x;
+        ce_prev_y = y;
+        ce_prev_start = start;
+        ce_a_consumed = true;
+        ce_held_dir = up ? 1 : (down ? 2 : (left ? 3 : (right ? 4 : 0)));
+        ce_next_step_at = getTicks() + CE_REPEAT_DELAY_MS;
+        return;
+    }
+
+    // ⚠️ HELD DIRECTIONS AUTO-REPEAT: first step at once, then a pause, then a steady stream.
+    {
+        int dir = up ? 1 : (down ? 2 : (left ? 3 : (right ? 4 : 0)));
+
+        bool fire = false;
+        if (dir != ce_held_dir) {
+            ce_held_dir = dir;
+            if (dir != 0) {
+                fire = true;
+                ce_next_step_at = getTicks() + CE_REPEAT_DELAY_MS;
+            }
+        } else if (dir != 0 && getTicks() >= ce_next_step_at) {
+            fire = true;
+            ce_next_step_at = getTicks() + CE_REPEAT_RATE_MS;
+        }
+
+        if (fire) {
+            switch (dir) {
+            case 1:
+                ce_focus_step(0, -1);
+                break;
+            case 2:
+                ce_focus_step(0, 1);
+                break;
+            case 3:
+                ce_focus_step(-1, 0);
+                break;
+            default:
+                ce_focus_step(1, 0);
+                break;
+            }
+        }
+    }
+
+    if (rb && !ce_prev_rb) {
+        ce_focus_jump(1);
+    } else if (lb && !ce_prev_lb) {
+        ce_focus_jump(-1);
+    }
+
+    // ⚠️ A IS TAP-vs-HOLD, so the tap can only be judged on RELEASE. AND THE HOLD IS DEAD WHILE
+    // CREATION STILL HAS POINTS TO SPEND: DONE is refused then, and a press it steals can only
+    // raise "You must use all character points".
+    bool holdCanConfirm = !(gCharacterEditorIsCreationMode && gCharacterEditorRemainingCharacterPoints > 0);
+    if (a && !ce_prev_a) {
+        ce_a_down_at = getTicks();
+        ce_a_consumed = false;
+    } else if (a && holdCanConfirm && !ce_a_consumed && getTicks() - ce_a_down_at >= CE_HOLD_MS) {
+        ce_a_consumed = true; // the hold is spent -- the release must not also act
+        soundPlayFile("ib1p1xx1");
+        enqueueInputEvent(500); // DONE
+    } else if (!a && ce_prev_a && !ce_a_consumed) {
+        ce_pad_activate();
+    }
+
+    if (b && !ce_prev_b) {
+        enqueueInputEvent(KEY_ESCAPE);
+    } else if (y && !ce_prev_y) {
+        ce_spend_all();
+    } else if (x && !ce_prev_x) {
+        ce_pad_undo();
+    } else if (start && !ce_prev_start) {
+        // START IS DONE, the way consoles confirm a menu; the label beside DONE says so. With
+        // creation points unspent, DONE answers with vanilla's own "spend them" box.
+        soundPlayFile("ib1p1xx1");
+        enqueueInputEvent(500); // DONE
+    }
+
+    // ⚠️ THE LAST POINT SPENT -> THE HIGHLIGHT GOES TO DONE. Only on that edge, so moving away again
+    // stays free, and never as the screen opens (-1). Creation counts character points, the sheet the
+    // unspent skill points.
+    int pointsLeft = gCharacterEditorIsCreationMode ? gCharacterEditorRemainingCharacterPoints : pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS);
+    if (ce_points_left_prev > 0 && pointsLeft <= 0) {
+        for (int i = 0; i < ce_item_count; i++) {
+            if (ce_items[i].kind == CE_ITEM_BUTTON && ce_buttons[ce_items[i].index].code == 500) {
+                ce_focus = i;
+                trace_event(TRACE_INPUT, "ce-focus-done", "glbl=%d", gCharacterEditorIsCreationMode ? 1 : 0);
+                break;
+            }
+        }
+    }
+    ce_points_left_prev = pointsLeft;
+
+    ce_prev_up = up;
+    ce_prev_down = down;
+    ce_prev_left = left;
+    ce_prev_right = right;
+    ce_prev_lb = lb;
+    ce_prev_rb = rb;
+    ce_prev_a = a;
+    ce_prev_b = b;
+    ce_prev_x = x;
+    ce_prev_y = y;
+    ce_prev_start = start;
+}
+
+// Prime edge-detection so a button still held from the previous screen (the A that picked "New
+// Game") does not fire on the first frame -- AND mark the held A consumed, because A acts on RELEASE.
+static void ce_pad_prime(SDL_GameController* pad)
+{
+    SDL_GameControllerUpdate();
+    ce_prev_up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+    ce_prev_down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+    ce_prev_left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0;
+    ce_prev_right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0;
+    ce_prev_lb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+    ce_prev_rb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
+    ce_prev_a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    ce_prev_b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    ce_prev_x = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
+    ce_prev_y = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    ce_prev_start = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
+
+    ce_a_consumed = true;
+    ce_held_dir = ce_prev_up ? 1 : (ce_prev_down ? 2 : (ce_prev_left ? 3 : (ce_prev_right ? 4 : 0)));
+    ce_next_step_at = getTicks() + CE_REPEAT_DELAY_MS;
+
+    // Adopt the CURRENT epoch: this prime IS the resynchronisation the guard would otherwise do.
+    ce_last_epoch = gamepad_ui_input_epoch();
+}
+
+// Auto-hide the editor cursor (controller only): hidden by default, revealed while the mouse moves,
+// re-hidden after idle.
+#define CE_CURSOR_IDLE_MS 2000
+
+// Where the pointer is pinned while the pad drives this screen. x 340 is the bare frame between the
+// panels that end at 314 and the skills panel that starts at 370 -- no button of this window covers
+// it at any y, the info hot-zones 525-534 included.
+#define CE_PARK_X 340
+#define CE_PARK_Y 300
+
+static void ce_park_cursor()
+{
+    Rect r;
+    if (windowGetRect(gCharacterEditorWindow, &r) == 0) {
+        _mouse_set_position(r.left + CE_PARK_X, r.top + CE_PARK_Y);
+    }
+}
+
+static void ce_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned int* lastMove)
+{
+    // ⚠️ PIN THE POINTER UNLESS THE RIGHT STICK IS DELIBERATELY PUSHED: the left stick moved the
+    // focus AND the pointer, walking it onto PRINT / DONE, where the next click pressed them. Re-pinned
+    // every frame, so whatever moves it, it is back on dead panel before anything can be pressed.
+    {
+        SDL_GameController* pad = gamepad_ui_get_controller();
+        if (pad != nullptr) {
+            float rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
+            float ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
+            if (rx * rx + ry * ry < 0.09f) {
+                ce_park_cursor();
+            }
+        }
+    }
+
+    int x;
+    int y;
+    mouseGetPosition(&x, &y);
+
+    if (x != *lastX || y != *lastY) {
+        *lastMove = getTicks();
+        if (!*shown) {
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            *shown = true;
+        }
+    } else if (*shown && getTicksSince(*lastMove) >= CE_CURSOR_IDLE_MS) {
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        *shown = false;
+    }
+
+    *lastX = x;
+    *lastY = y;
+}
+
 // 0x431DF8
 int characterEditorShow(bool isCreationMode)
 {
@@ -802,6 +1835,11 @@ int characterEditorShow(bool isCreationMode)
     gCharacterEditorIsCreationMode = isCreationMode;
 
     characterEditorSavePlayer();
+
+    // ⚠️ DROP ANYTHING STILL QUEUED FROM THE SCREEN WE CAME FROM. Button event codes are only unique
+    // WITHIN a window, and this screen shares its numbers with the in-game options menu (there 500 =
+    // SAVE and 501 = LOAD, here 500 = DONE and 501 = PRINT) -- one global queue, and the pad injects.
+    inputEventQueueReset();
 
     if (characterEditorWindowInit() == -1) {
         debugPrint("\n ** Error loading character editor data! **\n");
@@ -819,14 +1857,72 @@ int characterEditorShow(bool isCreationMode)
         }
     }
 
+    // Controller navigation, both screens (see ce_build_items for what each one has).
+    SDL_GameController* cePad = gamepad_ui_get_controller();
+    bool ceSuppressWas = false; // restored on exit -- character SELECTION sets it too
+    bool ceCursorShown = true;
+    int ceCursorX = 0;
+    int ceCursorY = 0;
+    unsigned int ceCursorMove = getTicks();
+    if (cePad != nullptr) {
+        ce_build_items();
+        ce_points_left_prev = -1;
+        // Creation opens on SPECIAL (where the points go first); the sheet opens on the skills,
+        // which is what that screen is for. Everything else is one push away.
+        ce_focus = 0;
+        if (!gCharacterEditorIsCreationMode) {
+            for (int i = 0; i < ce_item_count; i++) {
+                if (ce_items[i].kind == CE_ITEM_SKILL) {
+                    ce_focus = i;
+                    break;
+                }
+            }
+        }
+        // Keep the engine's own cursor in step from the very first frame, seeded from the FOCUS.
+        if (ce_items[ce_focus].kind == CE_ITEM_SKILL) {
+            gCharacterEditorCurrentSkill = ce_items[ce_focus].index;
+        }
+        ce_pad_prime(cePad);
+        // We act on A ourselves (ce_pad_activate). Without this the modal A-router would ALSO
+        // synthesise a left click wherever the pointer was last left.
+        ceSuppressWas = gamepad_ui_set_suppress_a_click(true);
+
+        // ⚠️ AND STOP THE SHARED LAYER MOVING THE POINTER: gpui_menu_snap steps the mouse between the
+        // buttons of any MODAL window off the left stick, which would walk it onto PRINT and DONE
+        // underneath our focus.
+        gamepad_ui_set_suppress_snap(true);
+
+        ce_refresh_focus();
+
+        // Park the pointer on dead panel rather than wherever the world left it.
+        ce_park_cursor();
+
+        mouseGetPosition(&ceCursorX, &ceCursorY);
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        ceCursorShown = false;
+    }
+
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
+
+        if (cePad != nullptr) {
+            // Strictly erase -> handle input -> draw, once per frame (the frame is put back at the
+            // bottom of this loop), so the save-under never holds anything stale.
+            ce_hl_erase();
+            ce_pad_poll(cePad);
+            ce_tick_cursor(&ceCursorShown, &ceCursorX, &ceCursorY, &ceCursorMove);
+        }
 
         _frame_time = getTicks();
         int keyCode = inputGetInput();
 
         convertMouseWheelToArrowKey(&keyCode);
+
+        if (cePad != nullptr && keyCode != -1) {
+            trace_event(TRACE_INPUT, "ce-key", "code=%d glbl=%d kind=%d idx=%d",
+                keyCode, gCharacterEditorIsCreationMode ? 1 : 0, ce_items[ce_focus].kind, ce_items[ce_focus].index);
+        }
 
         bool done = false;
         if (keyCode == 500) {
@@ -1173,8 +2269,26 @@ int characterEditorShow(bool isCreationMode)
             }
         }
 
+        // The frame goes back on last, over whatever the engine repainted this iteration.
+        if (cePad != nullptr) {
+            ce_hl_draw();
+            windowRefresh(gCharacterEditorWindow);
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
+    }
+
+    if (cePad != nullptr) {
+        ce_hl_erase();
+    }
+
+    // And leave none of OUR codes behind for whatever loop runs next, for the same reason.
+    inputEventQueueReset();
+    gamepad_ui_set_suppress_a_click(ceSuppressWas);
+    if (cePad != nullptr) {
+        gamepad_ui_set_suppress_snap(false);
+        gameMouseSetCursor(MOUSE_CURSOR_ARROW);
     }
 
     if (rc == 0) {
@@ -1515,10 +2629,34 @@ static int characterEditorWindowInit()
     // CANCEL
     str = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 102);
     fontDrawText(gCharacterEditorWindowBuffer + (EDITOR_WINDOW_WIDTH * CANCEL_BTN_Y) + CANCEL_BTN_X, str, EDITOR_WINDOW_WIDTH, EDITOR_WINDOW_WIDTH, _colorTable[18979]);
+    int cancelLabelEnd = CANCEL_BTN_X + fontGetStringWidth(str);
 
     // DONE
     str = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 100);
     fontDrawText(gCharacterEditorWindowBuffer + (EDITOR_WINDOW_WIDTH * DONE_BTN_Y) + DONE_BTN_X, str, EDITOR_WINDOW_WIDTH, EDITOR_WINDOW_WIDTH, _colorTable[18979]);
+    int doneLabelEnd = DONE_BTN_X + fontGetStringWidth(str);
+
+    // ⚠️ THE PAD'S KEYS BESIDE THEM ("jak to ten hráč pozná?"): START closes with DONE, B with CANCEL,
+    // so each says so right after its own label, in the small font and the yellow the bar uses for
+    // bindings. Only with a controller connected. Dropped rather than drawn over the next button if a
+    // longer (translated) label leaves no room.
+    if (gamepad_ui_get_controller() != nullptr) {
+        int labelFont = fontGetCurrent();
+        int labelH = fontGetLineHeight();
+        fontSetCurrent(101);
+        int hintY = DONE_BTN_Y + (labelH - fontGetLineHeight()) / 2;
+        const char* doneHint = "START";
+        if (doneLabelEnd + 5 + fontGetStringWidth(doneHint) < 552 - 2) {
+            fontDrawText(gCharacterEditorWindowBuffer + (EDITOR_WINDOW_WIDTH * hintY) + doneLabelEnd + 5, doneHint,
+                EDITOR_WINDOW_WIDTH, EDITOR_WINDOW_WIDTH, _colorTable[32747]);
+        }
+        const char* cancelHint = "B";
+        if (cancelLabelEnd + 5 + fontGetStringWidth(cancelHint) < EDITOR_WINDOW_WIDTH - 4) {
+            fontDrawText(gCharacterEditorWindowBuffer + (EDITOR_WINDOW_WIDTH * hintY) + cancelLabelEnd + 5, cancelHint,
+                EDITOR_WINDOW_WIDTH, EDITOR_WINDOW_WIDTH, _colorTable[32747]);
+        }
+        fontSetCurrent(labelFont);
+    }
 
     characterEditorDrawPrimaryStat(RENDER_ALL_STATS, 0, 0);
     characterEditorDrawDerivedStats();
@@ -1935,6 +3073,14 @@ static int _get_input_str(int win, int cancelKeyCode, char* text, int maxLength,
 
     beginTextInput();
 
+    // ⚠️ THE PAD CONFIRMS TOO (on a Steam Deck: "napsal jsem si jméno ... ale nemohl jsem potvrdit
+    // nick"). The name is typed on Steam's keyboard (Steam + X); A or START then confirm like Enter, B
+    // cancels like Esc. Edges only, starting from whatever is held as the box opens.
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    bool padPrevA = pad != nullptr && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool padPrevStart = pad != nullptr && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
+    bool padPrevB = pad != nullptr && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+
     int blinkingCounter = 3;
     bool blink = false;
 
@@ -1945,6 +3091,25 @@ static int _get_input_str(int win, int cancelKeyCode, char* text, int maxLength,
         _frame_time = getTicks();
 
         int keyCode = inputGetInput();
+
+        pad = gamepad_ui_get_controller();
+        if (pad != nullptr) {
+            SDL_GameControllerUpdate();
+            bool padA = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+            bool padStart = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
+            bool padB = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+            if (keyCode == -1) {
+                if ((padA && !padPrevA) || (padStart && !padPrevStart)) {
+                    keyCode = KEY_RETURN;
+                } else if (padB && !padPrevB) {
+                    keyCode = KEY_ESCAPE;
+                }
+            }
+            padPrevA = padA;
+            padPrevStart = padStart;
+            padPrevB = padB;
+        }
+
         if (keyCode == cancelKeyCode) {
             rc = 0;
         } else if (keyCode == KEY_RETURN) {
@@ -1999,6 +3164,9 @@ static int _get_input_str(int win, int cancelKeyCode, char* text, int maxLength,
     }
 
     endTextInput();
+
+    // The A / START / B that closed the box is still held as the screen underneath resumes.
+    gamepad_ui_bump_input_epoch();
 
     if (rc == 0 || nameLength > 0) {
         copy[nameLength] = '\0';
@@ -2099,6 +3267,8 @@ static void characterEditorDrawPerksFolder()
     int perkLevel;
     bool hasContent = false;
 
+    gCharacterEditorFolderCardPerk = -1;
+
     characterEditorFolderViewClear();
 
     if (gCharacterEditorTempTraits[0] != -1) {
@@ -2160,6 +3330,7 @@ static void characterEditorDrawPerksFolder()
                 }
 
                 if (characterEditorFolderViewDrawString(perkName)) {
+                    gCharacterEditorFolderCardPerk = perk;
                     gCharacterEditorFolderCardFrmId = perkGetFrmId(perk);
                     gCharacterEditorFolderCardTitle = perkGetName(perk);
                     gCharacterEditorFolderCardSubtitle = nullptr;
@@ -3059,12 +4230,18 @@ static void characterEditorDrawCard()
         return;
     }
 
+    // Belt and braces: the card clears the footer as it prints it, but it has early returns before
+    // that point, and a stale footer would then be printed on the NEXT card.
+    card_footer_clear();
+
     blitBufferToBuffer(_editorBackgroundFrmImage.getData() + (640 * 267) + 345, 277, 170, 640, gCharacterEditorWindowBuffer + (267 * 640) + 345, 640);
 
     if (characterEditorSelectedItem >= 0 && characterEditorSelectedItem < 7) {
         description = statGetDescription(characterEditorSelectedItem);
         title = statGetName(characterEditorSelectedItem);
         graphicId = statGetFrmId(characterEditorSelectedItem);
+        // 0..6 IS the STAT_* index; the footer helper ignores the four that own no attack category.
+        card_footer_for_stat(characterEditorSelectedItem);
         characterEditorDrawCardWithOptions(graphicId, title, nullptr, description);
     } else if (characterEditorSelectedItem >= 7 && characterEditorSelectedItem < 10) {
         if (gCharacterEditorIsCreationMode) {
@@ -3097,6 +4274,11 @@ static void characterEditorDrawCard()
             }
         }
     } else if ((characterEditorSelectedItem >= 10 && characterEditorSelectedItem < 43) || (characterEditorSelectedItem >= 82 && characterEditorSelectedItem < 98)) {
+        if (characterEditorSelectedItem < 43
+            && characterEditorWindowSelectedFolder == EDITOR_FOLDER_PERKS
+            && gCharacterEditorFolderCardPerk != -1) {
+            card_footer_for_perk(gCharacterEditorFolderCardPerk);
+        }
         characterEditorDrawCardWithOptions(gCharacterEditorFolderCardFrmId, gCharacterEditorFolderCardTitle, gCharacterEditorFolderCardSubtitle, gCharacterEditorFolderCardDescription);
     } else if (characterEditorSelectedItem >= 43 && characterEditorSelectedItem < 51) {
         switch (characterEditorSelectedItem) {
@@ -3161,6 +4343,7 @@ static void characterEditorDrawCard()
         graphicId = skillGetFrmId(skill);
         title = skillGetName(skill);
         description = skillGetDescription(skill);
+        card_footer_for_skill(skill); // a no-op for the twelve non-combat skills
         characterEditorDrawCardWithOptions(graphicId, title, formatted, description);
     } else if (characterEditorSelectedItem >= 79 && characterEditorSelectedItem < 82) {
         switch (characterEditorSelectedItem) {
@@ -3418,6 +4601,15 @@ static int characterEditorEditAge()
         buttonSetCallbacks(prevBtn, _gsound_med_butt_press, nullptr);
     }
 
+    // ⚠️ PAD NAVIGATION -- this loop read only the keyboard, so on a controller you could open AGE and
+    // not change it. Left/right (or up/down) step the age, A confirms, B cancels; held repeats on the
+    // character screen's cadence. A/B PRIMED from the live pad: the A that opened this is still down.
+    SDL_GameController* agePrimePad = gamepad_ui_get_controller();
+    bool agePrevA = agePrimePad != nullptr && SDL_GameControllerGetButton(agePrimePad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool agePrevB = agePrimePad != nullptr && SDL_GameControllerGetButton(agePrimePad, SDL_CONTROLLER_BUTTON_B) != 0;
+    int ageHeldDir = 0;
+    unsigned int ageNextStepAt = 0;
+
     while (true) {
         sharedFpsLimiter.mark();
 
@@ -3425,6 +4617,48 @@ static int characterEditorEditAge()
         change = 0;
         flags = 0;
         int v32 = 0;
+
+        // Re-fetched every frame, never cached: the controller handle opens lazily.
+        SDL_GameController* agePad = gamepad_ui_get_controller();
+        if (agePad != nullptr) {
+            SDL_GameControllerUpdate();
+
+            bool aNow = SDL_GameControllerGetButton(agePad, SDL_CONTROLLER_BUTTON_A) != 0;
+            bool bNow = SDL_GameControllerGetButton(agePad, SDL_CONTROLLER_BUTTON_B) != 0;
+            bool lessNow = SDL_GameControllerGetButton(agePad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
+                || SDL_GameControllerGetButton(agePad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+                || SDL_GameControllerGetAxis(agePad, SDL_CONTROLLER_AXIS_LEFTX) < -16000
+                || SDL_GameControllerGetAxis(agePad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+            bool moreNow = SDL_GameControllerGetButton(agePad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
+                || SDL_GameControllerGetButton(agePad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+                || SDL_GameControllerGetAxis(agePad, SDL_CONTROLLER_AXIS_LEFTX) > 16000
+                || SDL_GameControllerGetAxis(agePad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+
+            // ⚠️ ARROW KEYS, NOT THE ARROW BUTTONS' 501/502: those are the arrows' MOUSE-DOWN codes,
+            // and the vanilla code answers one with its own hold-to-repeat loop that runs until the
+            // MOUSE-UP code (503/504) the pad never sends -- one press ran the age to its limit. The
+            // arrow keys step once (here up = older, down = younger), and the pad repeats by itself.
+            int dir = moreNow ? 1 : (lessNow ? -1 : 0);
+            if (dir != ageHeldDir) {
+                ageHeldDir = dir;
+                if (dir != 0) {
+                    enqueueInputEvent(dir > 0 ? KEY_ARROW_UP : KEY_ARROW_DOWN);
+                    ageNextStepAt = getTicks() + CE_REPEAT_DELAY_MS;
+                }
+            } else if (dir != 0 && getTicks() >= ageNextStepAt) {
+                enqueueInputEvent(dir > 0 ? KEY_ARROW_UP : KEY_ARROW_DOWN);
+                ageNextStepAt = getTicks() + CE_REPEAT_RATE_MS;
+            }
+
+            if (aNow && !agePrevA) {
+                enqueueInputEvent(500); // DONE
+            } else if (bNow && !agePrevB) {
+                enqueueInputEvent(KEY_ESCAPE);
+            }
+
+            agePrevA = aNow;
+            agePrevB = bNow;
+        }
 
         keyCode = inputGetInput();
 
@@ -3434,6 +4668,11 @@ static int characterEditorEditAge()
             }
 
             windowDestroy(win);
+
+            // ⚠️ The A that confirmed is still held as the editor's poll resumes -- and A there acts
+            // on RELEASE, on the very AGE button that opened this. See the epoch guard in ce_pad_poll.
+            inputEventQueueReset();
+            gamepad_ui_bump_input_epoch();
             return 0;
         } else if (keyCode == KEY_ESCAPE || _game_user_wants_to_quit != 0) {
             break;
@@ -3559,6 +4798,11 @@ static int characterEditorEditAge()
     windowRefresh(gCharacterEditorWindow);
     windowRefresh(win);
     windowDestroy(win);
+
+    // ⚠️ The button that closed this window is still held as the parent's poll resumes.
+    inputEventQueueReset();
+    gamepad_ui_bump_input_epoch();
+
     return 0;
 }
 
@@ -3653,8 +4897,54 @@ static void characterEditorEditGender()
     int savedGender = critterGetStat(gDude, STAT_GENDER);
     _win_set_button_rest_state(btns[savedGender], 1, 0);
 
+    // Controller: left = male, right = female, A/START = confirm, B = cancel. Edges primed from the
+    // live pad so the A/X that opened this window doesn't fire immediately.
+    SDL_GameController* sexPad = gamepad_ui_get_controller();
+    bool sexPrevLeft = false;
+    bool sexPrevRight = false;
+    bool sexPrevA = false;
+    bool sexPrevB = false;
+    if (sexPad != nullptr) {
+        SDL_GameControllerUpdate();
+        sexPrevLeft = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0;
+        sexPrevRight = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0;
+        sexPrevA = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_A) != 0
+            || SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_START) != 0;
+        sexPrevB = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_B) != 0;
+    }
+
     while (true) {
         sharedFpsLimiter.mark();
+
+        if (sexPad != nullptr) {
+            SDL_GameControllerUpdate();
+            bool l = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
+                || SDL_GameControllerGetAxis(sexPad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
+            bool r = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
+                || SDL_GameControllerGetAxis(sexPad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
+            bool aBtn = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_A) != 0
+                || SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_START) != 0;
+            bool bBtn = SDL_GameControllerGetButton(sexPad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+            if (l && !sexPrevLeft) {
+                _win_set_button_rest_state(btns[0], 1, 0);
+                enqueueInputEvent(501);
+            } else if (r && !sexPrevRight) {
+                _win_set_button_rest_state(btns[1], 1, 0);
+                enqueueInputEvent(502);
+            }
+
+            if (aBtn && !sexPrevA) {
+                enqueueInputEvent(500);
+            } else if (bBtn && !sexPrevB) {
+                enqueueInputEvent(KEY_ESCAPE);
+            }
+
+            sexPrevLeft = l;
+            sexPrevRight = r;
+            sexPrevA = aBtn;
+            sexPrevB = bBtn;
+        }
 
         _frame_time = getTicks();
 
@@ -3703,6 +4993,12 @@ static void characterEditorEditGender()
 
     characterEditorDrawGender();
     windowDestroy(win);
+
+    // ⚠️ DRAIN WHATEVER THIS WINDOW POSTED AND NOBODY ATE: its pad handler injects 501 / 502 / 500,
+    // and in the editor loop those SAME numbers mean PRINT, CANCEL and DONE. And the button that
+    // closed it is still held as the parent's poll resumes.
+    inputEventQueueReset();
+    gamepad_ui_bump_input_epoch();
 }
 
 // 0x4379BC
@@ -3885,9 +5181,90 @@ static int characterEditorShowOptions()
 
         fontSetCurrent(101);
 
+        // ⚠️ PAD NAVIGATION. Five buttons in one column with codes 500..504, so the whole nav is one
+        // index: up/down moves it, A sends the code that button would have sent, B leaves. Edge state
+        // PRIMED from the live pad: the A that opened this window is very likely still held.
+        const int optCount = 5;
+        int optSel = 0;
+        int optHlY = -1;
+        SDL_GameController* primePad = gamepad_ui_get_controller();
+        bool optPrevA = primePad != nullptr && SDL_GameControllerGetButton(primePad, SDL_CONTROLLER_BUTTON_A) != 0;
+        bool optPrevB = primePad != nullptr && SDL_GameControllerGetButton(primePad, SDL_CONTROLLER_BUTTON_B) != 0;
+        bool optPrevUp = false;
+        bool optPrevDown = false;
+
         int rc = 0;
         while (rc == 0) {
             sharedFpsLimiter.mark();
+
+            // Re-fetched every frame: a pad first seen while this window is up has to work too.
+            SDL_GameController* optPad = gamepad_ui_get_controller();
+            if (optPad != nullptr) {
+                SDL_GameControllerUpdate();
+
+                bool aNow = SDL_GameControllerGetButton(optPad, SDL_CONTROLLER_BUTTON_A) != 0;
+                bool bNow = SDL_GameControllerGetButton(optPad, SDL_CONTROLLER_BUTTON_B) != 0;
+                bool upNow = SDL_GameControllerGetButton(optPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+                    || SDL_GameControllerGetAxis(optPad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+                bool downNow = SDL_GameControllerGetButton(optPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+                    || SDL_GameControllerGetAxis(optPad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+
+                if (upNow && !optPrevUp) {
+                    optSel = (optSel + optCount - 1) % optCount;
+                } else if (downNow && !optPrevDown) {
+                    optSel = (optSel + 1) % optCount;
+                }
+
+                if (aNow && !optPrevA) {
+                    soundPlayFile("ib1p1xx1");
+                    enqueueInputEvent(500 + optSel);
+                } else if (bNow && !optPrevB) {
+                    enqueueInputEvent(KEY_ESCAPE);
+                }
+
+                optPrevA = aNow;
+                optPrevB = bNow;
+                optPrevUp = upNow;
+                optPrevDown = downNow;
+
+                // A one-pixel frame drawn one pixel OUTSIDE the button's rect: that ring lies on the
+                // window's own background art, so erasing it from the art can never scrub a label.
+                int wantY = 17 + optSel * (height + 3);
+                if (wantY != optHlY) {
+                    int gw = _editorFrmImages[41].getWidth();
+                    int gh = _editorFrmImages[41].getHeight();
+                    unsigned char* art = _editorFrmImages[41].getData();
+                    int fx = 12;
+                    int fw = width + 2;
+                    int fh = height + 2;
+
+                    if (fx >= 0 && fx + fw <= gw) {
+                        if (optHlY > 0 && optHlY - 1 + fh <= gh) {
+                            int fy = optHlY - 1;
+                            memcpy(windowBuffer + gw * fy + fx, art + gw * fy + fx, fw);
+                            memcpy(windowBuffer + gw * (fy + fh - 1) + fx, art + gw * (fy + fh - 1) + fx, fw);
+                            for (int i = 0; i < fh; i++) {
+                                windowBuffer[gw * (fy + i) + fx] = art[gw * (fy + i) + fx];
+                                windowBuffer[gw * (fy + i) + fx + fw - 1] = art[gw * (fy + i) + fx + fw - 1];
+                            }
+                        }
+
+                        if (wantY > 0 && wantY - 1 + fh <= gh) {
+                            int fy = wantY - 1;
+                            unsigned char color = _colorTable[32747];
+                            memset(windowBuffer + gw * fy + fx, color, fw);
+                            memset(windowBuffer + gw * (fy + fh - 1) + fx, color, fw);
+                            for (int i = 0; i < fh; i++) {
+                                windowBuffer[gw * (fy + i) + fx] = color;
+                                windowBuffer[gw * (fy + i) + fx + fw - 1] = color;
+                            }
+                        }
+
+                        optHlY = wantY;
+                        windowRefresh(win);
+                    }
+                }
+            }
 
             int keyCode = inputGetInput();
 
@@ -4026,6 +5403,9 @@ static int characterEditorShowOptions()
                     if (loadFileDialogRc == -1) {
                         fileNameListFree(&fileNameList, 0);
                         // FIXME: This branch ignores cleanup at the end of the loop.
+                        // The A that pressed LOAD is still held, and the file dialog failed before its own
+                        // loop (and its own bump) ran -- see the confirm path in the age window.
+                        gamepad_ui_bump_input_epoch();
                         return -1;
                     }
 
@@ -4188,6 +5568,10 @@ static int characterEditorShowOptions()
             internal_free(down[index]);
         }
 
+        // ⚠️ The button that closed this window is still held as the parent's poll resumes.
+        inputEventQueueReset();
+        gamepad_ui_bump_input_epoch();
+
         return 0;
     }
 
@@ -4258,6 +5642,9 @@ static int characterEditorShowOptions()
     }
 
     fileNameListFree(&fileNames, 0);
+
+    inputEventQueueReset();
+    gamepad_ui_bump_input_epoch();
 
     return 0;
 }
@@ -4995,6 +6382,39 @@ static int characterEditorDrawCardWithOptions(int graphicId, const char* name, c
         description[ending] = c;
         y += descriptionFontLineHeight;
     }
+
+    // FOOTER: what this stat, skill or perk does in THIS build, under the vanilla description with a
+    // blank line between them. ⚠️ Not appended to `description`: wordWrap has no hard break, so text
+    // glued on would run into the last vanilla sentence. Wrapped at the card's OWN width (the same
+    // `extraDescriptionWidth + 136` the description uses -- the picture decides it), and stopped at
+    // y 436 where the card art ends: a long vanilla description wins, ours is the addition.
+    int footerY = y + descriptionFontLineHeight;
+    for (int i = 0; i < CARD_FOOTER_LINES; i++) {
+        if (card_footer[i][0] == '\0') {
+            continue;
+        }
+
+        short footerBreaks[WORD_WRAP_MAX_COUNT];
+        short footerBreakCount;
+        if (wordWrap(card_footer[i], extraDescriptionWidth + 136, footerBreaks, &footerBreakCount) != 0) {
+            continue;
+        }
+
+        for (short j = 0; j < footerBreakCount - 1; j++) {
+            if (footerY + descriptionFontLineHeight > 436) {
+                break;
+            }
+
+            short beginning = footerBreaks[j];
+            short ending = footerBreaks[j + 1];
+            char c = card_footer[i][ending];
+            card_footer[i][ending] = '\0';
+            fontDrawText(gCharacterEditorWindowBuffer + 640 * footerY + 348, card_footer[i] + beginning, 640, 640, _colorTable[0]);
+            card_footer[i][ending] = c;
+            footerY += descriptionFontLineHeight;
+        }
+    }
+    card_footer_clear();
 
     if (graphicId != gCharacterEditorCardFrmId || strcmp(name, gCharacterEditorCardTitle) != 0) {
         if (gCharacterEditorCardDrawn) {
@@ -5772,6 +7192,7 @@ static void perkDialogRefreshPerks()
         perkRank = perkRankBuffer;
     }
 
+    card_footer_for_perk(perk);
     perkDialogDrawCard(perkFrmId, perkName, perkRank, perkDescription);
 
     windowRefresh(gPerkDialogWindow);
@@ -5925,6 +7346,7 @@ static int perkDialogShow()
         perkRank = perkRankBuffer;
     }
 
+    card_footer_for_perk(perk);
     perkDialogDrawCard(perkFrmId, perkName, perkRank, perkDescription);
     windowRefresh(gPerkDialogWindow);
 
@@ -5986,9 +7408,53 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
 
     int v7 = 0;
 
+    // ⚠️ PAD NAVIGATION -- this is the LEVEL-UP PERK PICK (and the trait / tag-skill lists of the perks
+    // that ask for one), so on a pad you could not choose your perk at all. The loop already speaks
+    // arrow keys and Enter / Esc, so the pad just types them. A/B primed from the live pad.
+    SDL_GameController* pdPrimePad = gamepad_ui_get_controller();
+    bool pdPrevA = pdPrimePad != nullptr && SDL_GameControllerGetButton(pdPrimePad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool pdPrevB = pdPrimePad != nullptr && SDL_GameControllerGetButton(pdPrimePad, SDL_CONTROLLER_BUTTON_B) != 0;
+    int pdHeldDir = 0;
+    unsigned int pdNextStepAt = 0;
+
     int rc = 0;
     while (rc == 0) {
         sharedFpsLimiter.mark();
+
+        // Re-fetched every frame, never cached: the controller handle opens lazily.
+        SDL_GameController* pdPad = gamepad_ui_get_controller();
+        if (pdPad != nullptr) {
+            SDL_GameControllerUpdate();
+
+            bool aNow = SDL_GameControllerGetButton(pdPad, SDL_CONTROLLER_BUTTON_A) != 0;
+            bool bNow = SDL_GameControllerGetButton(pdPad, SDL_CONTROLLER_BUTTON_B) != 0;
+            bool upNow = SDL_GameControllerGetButton(pdPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+                || SDL_GameControllerGetAxis(pdPad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+            bool downNow = SDL_GameControllerGetButton(pdPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+                || SDL_GameControllerGetAxis(pdPad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+
+            // Held up/down repeats, so walking a long perk list is one hold.
+            int dir = upNow ? -1 : (downNow ? 1 : 0);
+            if (dir != pdHeldDir) {
+                pdHeldDir = dir;
+                if (dir != 0) {
+                    enqueueInputEvent(dir < 0 ? KEY_ARROW_UP : KEY_ARROW_DOWN);
+                    pdNextStepAt = getTicks() + CE_REPEAT_DELAY_MS;
+                }
+            } else if (dir != 0 && getTicks() >= pdNextStepAt) {
+                enqueueInputEvent(dir < 0 ? KEY_ARROW_UP : KEY_ARROW_DOWN);
+                pdNextStepAt = getTicks() + CE_REPEAT_RATE_MS;
+            }
+
+            if (aNow && !pdPrevA) {
+                enqueueInputEvent(KEY_RETURN); // take the highlighted perk
+            } else if (bNow && !pdPrevB) {
+                enqueueInputEvent(KEY_ESCAPE); // back out without picking
+            }
+
+            pdPrevA = aNow;
+            pdPrevB = bNow;
+        }
 
         int keyCode = inputGetInput();
         int v19 = 0;
@@ -6248,6 +7714,12 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    // ⚠️ THE A THAT TOOK THE PERK IS STILL DOWN, and the character sheet's poll acts on A's RELEASE:
+    // it closed the whole sheet the moment a perk was chosen. The bump makes ce_pad_poll drop its
+    // stale edges on the next frame.
+    inputEventQueueReset();
+    gamepad_ui_bump_input_epoch();
 
     return rc;
 }
@@ -6693,6 +8165,36 @@ static int perkDialogDrawCard(int frmId, const char* name, const char* rank, cha
 
         y += yStep;
     }
+
+    // The realtime note (card_footer_for_perk), tighter than on the big card: a 4 px gap, the same
+    // column as the description, and nothing past y 196 where the paper ends (PERKWIN.FRM).
+    int footerY = y + 4;
+    for (int i = 0; i < CARD_FOOTER_LINES; i++) {
+        if (card_footer[i][0] == '\0') {
+            continue;
+        }
+
+        short footerBreaks[WORD_WRAP_MAX_COUNT];
+        short footerBreakCount;
+        if (wordWrap(card_footer[i], 133 + extraDescriptionWidth, footerBreaks, &footerBreakCount) != 0) {
+            continue;
+        }
+
+        for (short j = 0; j < footerBreakCount - 1; j++) {
+            if (footerY + fontGetLineHeight() > 196 + 1) {
+                break;
+            }
+
+            char* footerBeginning = card_footer[i] + footerBreaks[j];
+            char* footerEnding = card_footer[i] + footerBreaks[j + 1];
+            char footerCh = *footerEnding;
+            *footerEnding = '\0';
+            fontDrawText(gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * footerY + 280, footerBeginning, PERK_WINDOW_WIDTH, PERK_WINDOW_WIDTH, _colorTable[0]);
+            *footerEnding = footerCh;
+            footerY += yStep;
+        }
+    }
+    card_footer_clear();
 
     if (frmId != gPerkDialogCardFrmId || strcmp(gPerkDialogCardTitle, name) != 0) {
         if (gPerkDialogCardDrawn) {

@@ -32,6 +32,12 @@
 #include "tile.h"
 #include "window_manager.h"
 
+// Realtime (fallout1-ce's gmouse.cc changes, ported).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 typedef enum ScrollableDirections {
@@ -319,6 +325,21 @@ static int gameMouseUpdateHexCursorFid(Rect* rect);
 static int _gmouse_3d_move_to(int x, int y, int elevation, Rect* rect);
 static int gameMouseHandleScrolling(int x, int y, int cursor);
 static int objectIsDoor(Object* object);
+static void gameMousePutToHitFrame(Object* pointedObject);
+
+// CE: PID of an item to use with the current use-on crosshair INSTEAD of the hand item (-1 = the hand
+// item, as vanilla). Set by the pad's quick-use page (gmouse_set_use_on_item).
+static int gmouse_use_on_override_pid = -1;
+
+// When true the MOVE/ARROW cursor object is kept turned OFF (gamepad free-play). Cursor OBJECT only,
+// never the low-level mouse pipeline, so it can never affect input. Driven from gamepad_ui_tick.
+static bool gmouse_move_cursor_hidden = false;
+
+// Suppresses EVERY iso cursor, crosshair included (the pad's body-part picker owns the target).
+static bool gmouse_cursor_suppressed = false;
+
+// ⚠️ SET WHILE gameMouseRefreshImmediately RUNS, i.e. from INSIDE a db read (fallout1-ce 2026-10-19).
+static bool gmouse_in_db_refresh = false;
 static bool gameMouseClickOnInterfaceBar();
 
 static void customMouseModeFrmsInit();
@@ -646,6 +667,12 @@ void gameMouseRefresh()
         break;
     }
 
+    // Nothing below may redraw the world from inside a db read (gmouse_in_db_refresh): the hex
+    // cursor's move and the hover test both repaint, and painting needs protos read from the same disk.
+    if (gmouse_in_db_refresh) {
+        return;
+    }
+
     Rect r1;
     if (_gmouse_3d_move_to(mouseX, mouseY, gElevation, &r1) == 0) {
         tileWindowRefreshRect(&r1, gElevation);
@@ -686,7 +713,9 @@ void gameMouseRefresh()
                             primaryAction = GAME_MOUSE_ACTION_MENU_ITEM_ROTATE;
                         } else {
                             if (_obj_action_can_talk_to(pointedObject)) {
-                                if (isInCombat()) {
+                                // Under threat, not merely "combat warm" -- realtime holds the combat
+                                // bit set while anything anywhere is chasing (combat_rt_under_threat).
+                                if (combat_rt_under_threat()) {
                                     primaryAction = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
                                 } else {
                                     primaryAction = GAME_MOUSE_ACTION_MENU_ITEM_TALK;
@@ -746,43 +775,8 @@ void gameMouseRefresh()
                         }
                     }
 
-                    int color;
-                    int accuracy;
-                    char formattedAccuracy[8];
-                    if (_combat_to_hit(pointedObject, &accuracy)) {
-                        snprintf(formattedAccuracy, sizeof(formattedAccuracy), "%d%%", accuracy);
-
-                        if (pointedObjectIsCritter) {
-                            if (pointedObject->data.critter.combat.team != 0) {
-                                color = _colorTable[32767];
-                            } else {
-                                color = _colorTable[32495];
-                            }
-                        } else {
-                            color = _colorTable[17969];
-                        }
-                    } else {
-                        snprintf(formattedAccuracy, sizeof(formattedAccuracy), " %c ", 'X');
-
-                        if (pointedObjectIsCritter) {
-                            if (pointedObject->data.critter.combat.team != 0) {
-                                color = _colorTable[31744];
-                            } else {
-                                color = _colorTable[18161];
-                            }
-                        } else {
-                            color = _colorTable[32239];
-                        }
-                    }
-
-                    if (gameMouseRenderAccuracy(formattedAccuracy, color) == 0) {
-                        Rect tmp;
-                        int fid = buildFid(OBJ_TYPE_INTERFACE, 284, 0, 0, 0);
-                        // NOTE: Uninline.
-                        if (gmouse_3d_set_flat_fid(fid, &tmp) == 0) {
-                            tileWindowRefreshRect(&tmp, gElevation);
-                        }
-                    }
+                    (void)pointedObjectIsCritter;
+                    gameMousePutToHitFrame(pointedObject);
 
                     if (gGameMousePointedObject != pointedObject) {
                         gGameMousePointedObject = pointedObject;
@@ -796,6 +790,18 @@ void gameMouseRefresh()
 
                 _gmouse_3d_last_move_time = v3;
                 _gmouse_3d_hover_test = true;
+            }
+            return;
+        }
+
+        // MOVE mode, cursor parked for a quarter second: vanilla paints the red "you can walk here" hex.
+        // ⚠️ NOT WHILE THE LEFT STICK WALKS HIM, AND NOT ON A CONTROLLER AT ALL (fallout1-ce): the hex is
+        // a MOUSE affordance; on a pad the pointer is just wherever the stick last shoved it, and the
+        // hex bloomed on the ground for a tile nobody asked about.
+        if (combat_rt_stick_walking() || gamepad_ui_get_controller() != nullptr) {
+            Rect tmp;
+            if (gameMouseUpdateHexCursorFid(&tmp) == 0) {
+                tileWindowRefreshRect(&tmp, gElevation);
             }
             return;
         }
@@ -872,6 +878,18 @@ void gameMouseRefresh()
         tileWindowRefreshRect(&r26, gElevation);
         break;
     }
+}
+
+// Which object an armed cursor's click went to, and why: the pad's glued pick or the pixel.
+static void gmouse_trace_use_on(const char* what, Object* pixel, Object* pick)
+{
+    Object* used = pick != nullptr ? pick : pixel;
+    trace_event(TRACE_ACTION, "use-on", "%s target=%s pid=%d id=%d tile=%d src=%s pixel=%s",
+        what,
+        used != nullptr ? objectGetName(used) : "-", used != nullptr ? used->pid : -1, used != nullptr ? used->id : -1,
+        used != nullptr ? used->tile : -1,
+        pick != nullptr ? "pick" : "pixel",
+        pixel != nullptr ? objectGetName(pixel) : "-");
 }
 
 bool gameMouseClickOnInterfaceBar()
@@ -964,7 +982,9 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         }
                     } else {
                         if (_obj_action_can_talk_to(targetObj)) {
-                            if (isInCombat()) {
+                            // Same rule as the gamepad prompt (interact_prompt.cc): a fight in view
+                            // blocks talking even when it is not aimed at the player.
+                            if (combat_rt_fight_in_view()) {
                                 if (_obj_examine(gDude, targetObj) == -1) {
                                     _obj_look_at(gDude, targetObj);
                                 }
@@ -1016,16 +1036,50 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
         if (gGameMouseMode == GAME_MOUSE_MODE_USE_CROSSHAIR) {
             Object* object = gameMouseGetObjectUnderCursor(-1, true, gElevation);
+
+            // CE: the pad steps this crosshair from object to object and glues it on the one it means
+            // -- then THAT is the target, not whatever is drawn topmost at the pixel.
+            Object* padPick = gamepad_ui_targeting_pick();
+            gmouse_trace_use_on("item", object, padPick);
+            if (padPick != nullptr) {
+                object = padPick;
+            }
+
+            // CE: armed from the pad's quick-use page for an item NOT in the hand -- see
+            // gmouse_set_use_on_item. Taken here and cleared whatever happens.
+            int overridePid = gmouse_use_on_override_pid;
+            gmouse_use_on_override_pid = -1;
+
             if (object != nullptr) {
-                Object* weapon;
-                if (interfaceGetActiveItem(&weapon) != -1) {
+                Object* weapon = nullptr;
+                int itemFound = -1;
+                if (overridePid != -1) {
+                    Inventory* inv = &(gDude->data.inventory);
+                    for (int i = 0; i < inv->length; i++) {
+                        if (inv->items[i].item != nullptr && inv->items[i].item->pid == overridePid) {
+                            weapon = inv->items[i].item;
+                            itemFound = 0;
+                            break;
+                        }
+                    }
+                } else {
+                    itemFound = interfaceGetActiveItem(&weapon);
+                }
+                if (itemFound != -1) {
                     if (isInCombat()) {
                         int hitMode = interfaceGetCurrentHand()
                             ? HIT_MODE_RIGHT_WEAPON_PRIMARY
                             : HIT_MODE_LEFT_WEAPON_PRIMARY;
 
-                        int actionPointsRequired = itemGetActionPointCost(gDude, hitMode, false);
-                        if (actionPointsRequired <= gDude->data.critter.combat.ap) {
+                        // A quick-use item is not the hand item: it comes out of the pack, at the pack's price
+                        // (gamepad_ui_pack_ap_cost, fallout1-ce 2026-10-19 -- it was the plain 2 AP of using an item).
+                        int actionPointsRequired = overridePid != -1 ? gamepad_ui_pack_ap_cost() : itemGetActionPointCost(gDude, hitMode, false);
+                        // Realtime holds engine combat.ap maxed, so charge combat_rt's pool instead.
+                        if (combat_rt_enabled()) {
+                            if (combat_rt_spend_ap(actionPointsRequired)) {
+                                _action_use_an_item_on_object(gDude, object, weapon);
+                            }
+                        } else if (actionPointsRequired <= gDude->data.critter.combat.ap) {
                             if (_action_use_an_item_on_object(gDude, object, weapon) != -1) {
                                 int actionPoints = gDude->data.critter.combat.ap;
                                 if (actionPointsRequired > actionPoints) {
@@ -1038,6 +1092,10 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         }
                     } else {
                         _action_use_an_item_on_object(gDude, object, weapon);
+                    }
+                    // A lockpick on a lock: the pad arms it again once this attempt has played out.
+                    if (weapon != nullptr) {
+                        gamepad_ui_lockpick_used(weapon->pid, object, overridePid == -1);
                     }
                 }
             }
@@ -1054,9 +1112,18 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             || gGameMouseMode == GAME_MOUSE_MODE_USE_SCIENCE
             || gGameMouseMode == GAME_MOUSE_MODE_USE_REPAIR) {
             Object* object = gameMouseGetObjectUnderCursor(-1, 1, gElevation);
+            Object* padPick = gamepad_ui_targeting_pick(); // see the USE_CROSSHAIR case above
+            gmouse_trace_use_on("skill", object, padPick);
+            if (padPick != nullptr) {
+                object = padPick;
+            }
             if (object == nullptr || actionUseSkill(gDude, object, gGameMouseModeSkills[gGameMouseMode - FIRST_GAME_MOUSE_MODE_SKILL]) != -1) {
-                gameMouseSetCursor(MOUSE_CURSOR_NONE);
-                gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                // A skill armed FROM THE PAD stays armed (re-arming on a pad is a whole ring);
+                // it is cancelled explicitly with B (gamepad_ui).
+                if (!gamepad_ui_skill_cursor_sticky()) {
+                    gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                    gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                }
             }
             return;
         }
@@ -1082,7 +1149,7 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                     actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_ROTATE;
                 } else {
                     if (_obj_action_can_talk_to(targetObj)) {
-                        if (!isInCombat()) {
+                        if (!combat_rt_under_threat()) {
                             actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_TALK;
                         }
                     } else {
@@ -1130,6 +1197,8 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
                     int newMouseY = mouseY;
                     int actionIndex = 0;
+                    // The gamepad layer feeds this hold-drag popup (custom-drawn, not GNW buttons).
+                    gamepad_ui_set_action_popup_active(true);
                     while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) == 0) {
                         sharedFpsLimiter.mark();
 
@@ -1137,6 +1206,20 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
                         if (_game_user_wants_to_quit != 0) {
                             actionMenuItems[actionIndex] = 0;
+                        }
+
+                        // D-pad up/down steps the highlighted action directly; A confirms.
+                        int dpad = gamepad_ui_action_popup_dpad();
+                        if (dpad < 0 && actionIndex > 0) {
+                            actionIndex -= 1;
+                            if (gameMouseHighlightActionMenuItemAtIndex(actionIndex) == 0) {
+                                tileWindowRefreshRect(&cursorRect, gElevation);
+                            }
+                        } else if (dpad > 0 && actionIndex < actionMenuItemsCount - 1) {
+                            actionIndex += 1;
+                            if (gameMouseHighlightActionMenuItemAtIndex(actionIndex) == 0) {
+                                tileWindowRefreshRect(&cursorRect, gElevation);
+                            }
                         }
 
                         int updatedMouseX;
@@ -1310,6 +1393,16 @@ int gameMouseSetCursor(int cursor)
         return -1;
     }
 
+    // ⚠️ THE LOADING PLANET IN THE MIDDLE (Fallout 2 Realtime 2026-10-24, the Deck: "když se přechází do
+    // nové mapy, tak je loading animace bokem, vycentruj ji doprostřed"). A map or a save loading turns
+    // the pointer into the spinning planet wherever the pointer is -- with a mouse that is where you
+    // look; on a pad it is the hidden pointer, parked wherever the last screen or the right stick left
+    // it. With a controller connected, the planet's picture is centred on the screen when it comes up.
+    if (cursor == MOUSE_CURSOR_WAIT_PLANET && gGameMouseCursor != MOUSE_CURSOR_WAIT_PLANET
+        && gamepad_ui_get_controller() != nullptr) {
+        _mouse_set_position(screenGetWidth() / 2 - width / 2 + offsetX, screenGetHeight() / 2 - height / 2 + offsetY);
+    }
+
     if (gGameMouseCursorFrmHandle != INVALID_CACHE_ENTRY) {
         artUnlock(gGameMouseCursorFrmHandle);
     }
@@ -1346,6 +1439,13 @@ int gmouse_3d_modes_are_enabled()
 }
 
 // 0x44CA18
+// CE: use the item with this PID on the current use-on crosshair instead of the hand item (the pad's
+// quick-use page). Only meaningful while that crosshair is armed.
+void gmouse_set_use_on_item(int pid)
+{
+    gmouse_use_on_override_pid = gGameMouseMode == GAME_MOUSE_MODE_USE_CROSSHAIR ? pid : -1;
+}
+
 void gameMouseSetMode(int mode)
 {
     if (!gGameMouseInitialized) {
@@ -1354,6 +1454,11 @@ void gameMouseSetMode(int mode)
 
     if (!_gmouse_3d_modes_enabled) {
         return;
+    }
+
+    // Leaving the use-on crosshair by any road drops a quick-use item it was armed for.
+    if (mode != GAME_MOUSE_MODE_USE_CROSSHAIR) {
+        gmouse_use_on_override_pid = -1;
     }
 
     if (mode == gGameMouseMode) {
@@ -1514,6 +1619,18 @@ void gameMouseResetBouncingCursorFid()
 void gameMouseObjectsShow()
 {
     if (!gGameMouseInitialized) {
+        return;
+    }
+
+    // Free-play cursor hidden: keep the iso cursor object OFF. gameMouseRefresh calls this every frame
+    // to re-show it, so the guard lives here. An aim/crosshair/skill cursor still shows.
+    if (gmouse_cursor_suppressed) {
+        return;
+    }
+
+    if (gmouse_move_cursor_hidden
+        && (gGameMouseMode == GAME_MOUSE_MODE_MOVE
+            || gGameMouseMode == GAME_MOUSE_MODE_ARROW)) {
         return;
     }
 
@@ -2342,6 +2459,13 @@ int gameMouseHandleScrolling(int x, int y, int cursor)
         return -1;
     }
 
+    // ⚠️ NO EDGE SCROLL WHILE THE CAMERA FOLLOWS THE DUDE (fallout1-ce 2026-10-08): realtime centres
+    // the camera on the dude every frame, so the screen-edge scroll can only fight it -- a parked
+    // pointer on an edge shoved the map, the follow-cam dragged it back, forever.
+    if (combat_rt_enabled()) {
+        return -1;
+    }
+
     int flags = 0;
 
     if (x <= _scr_size.left) {
@@ -2463,10 +2587,128 @@ static void customMouseModeFrmsInit()
     configGetInt(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_USE_REPAIR_FRM_KEY, &(gGameMouseModeFrmIds[GAME_MOUSE_MODE_USE_REPAIR]));
 }
 
+// The to-hit cursor for an explicit target (the percentage, or an X when the shot is impossible),
+// shared by the mouse crosshair hover and the controller lock-on.
+static void gameMousePutToHitFrame(Object* pointedObject)
+{
+    bool pointedObjectIsCritter = FID_TYPE(pointedObject->fid) == OBJ_TYPE_CRITTER;
+
+    int color;
+    int accuracy;
+    char formattedAccuracy[8];
+    if (_combat_to_hit(pointedObject, &accuracy)) {
+        snprintf(formattedAccuracy, sizeof(formattedAccuracy), "%d%%", accuracy);
+
+        if (pointedObjectIsCritter) {
+            if (pointedObject->data.critter.combat.team != 0) {
+                color = _colorTable[32767];
+            } else {
+                color = _colorTable[32495];
+            }
+        } else {
+            color = _colorTable[17969];
+        }
+    } else {
+        snprintf(formattedAccuracy, sizeof(formattedAccuracy), " %c ", 'X');
+
+        if (pointedObjectIsCritter) {
+            if (pointedObject->data.critter.combat.team != 0) {
+                color = _colorTable[31744];
+            } else {
+                color = _colorTable[18161];
+            }
+        } else {
+            color = _colorTable[32239];
+        }
+    }
+
+    if (gameMouseRenderAccuracy(formattedAccuracy, color) == 0) {
+        Rect tmp;
+        int fid = buildFid(OBJ_TYPE_INTERFACE, 284, 0, 0, 0);
+        // NOTE: Uninline.
+        if (gmouse_3d_set_flat_fid(fid, &tmp) == 0) {
+            tileWindowRefreshRect(&tmp, gElevation);
+        }
+    }
+}
+
+// Draws the crosshair to-hit indicator for an explicit target, bypassing the hover-stillness gate
+// gameMouseRefresh waits on. The controller lock-on calls this every frame so the % shows even while
+// the player or target move. No-op if the 3D mouse is off.
+void gmouse_3d_show_to_hit(Object* target)
+{
+    if (target == nullptr || !gameMouseObjectsIsVisible()) {
+        return;
+    }
+
+    gameMousePutToHitFrame(target);
+}
+
+// Hide/show the iso MOVE cursor for gamepad free-play. Idempotent; cursor object only.
+void gmouse_set_move_cursor_hidden(bool hidden)
+{
+    if (gmouse_move_cursor_hidden == hidden) {
+        return;
+    }
+
+    gmouse_move_cursor_hidden = hidden;
+
+    if (!gGameMouseInitialized) {
+        return;
+    }
+
+    if (hidden) {
+        gameMouseObjectsHide();
+    } else {
+        gameMouseObjectsShow();
+    }
+}
+
+bool gmouse_move_cursor_is_hidden()
+{
+    return gmouse_move_cursor_hidden;
+}
+
+// Hide/show EVERY iso cursor including the crosshair. Idempotent, cursor objects only.
+void gmouse_set_cursor_suppressed(bool suppressed)
+{
+    if (gmouse_cursor_suppressed == suppressed) {
+        return;
+    }
+
+    gmouse_cursor_suppressed = suppressed;
+
+    if (!gGameMouseInitialized) {
+        return;
+    }
+
+    if (suppressed) {
+        gameMouseObjectsHide();
+    } else {
+        gameMouseObjectsShow();
+    }
+}
+
 void gameMouseRefreshImmediately()
 {
+    // ⚠️ IT RUNS INSIDE A DB READ, SO IT MUST NOT DRAW THE WORLD (fallout1-ce 2026-10-19 crash): the map
+    // load registers this as the read callback, painting loads protos from the same disk, and a moved
+    // cursor repainted from INSIDE a proto read. A nested call does nothing at all.
+    if (gmouse_in_db_refresh) {
+        return;
+    }
+    gmouse_in_db_refresh = true;
     gameMouseRefresh();
-    renderPresent();
+
+    // ⚠️ AT MOST ~20 PRESENTS A SECOND: this runs every few KB a map load reads, and each present can
+    // wait on the compositor (the Steam Deck took 9.8 s to load a map). The cursor only needs to look alive.
+    static unsigned int lastPresent = 0;
+    unsigned int now = getTicks();
+    if (now - lastPresent >= 50) {
+        lastPresent = now;
+        renderPresent();
+    }
+    gmouse_in_db_refresh = false;
 }
 
 Object* gmouse_get_outlined_object()

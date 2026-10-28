@@ -1,0 +1,21 @@
+# (B) through a save on another map: fight at ARTEMPLE, leave mid-fight for DESERT2, quick save there.
+# ⚠️ Overwrites the test SLOT01.
+name rtfled-save-away
+map ARTEMPLE.MAP
+seed 1
+duration 14
+dude tile 17288 rot 2
+dude hp 400
+dude armor 2
+cleararea 20
+spawn 16777454 17888 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 17892 rot 5 wield 8 item 29 4 hostile
+
+mapgo 6000 DESERT2.MAP -1 0
+pad 9000 start 1
+pad 10000 start 0
+note 12000 saved
+
+expect fled-remember] map=126 n=[23] 
+expect fled-save\] n=[23] 
+expect save-slot\] slot=1 desc=Quick Save rc=

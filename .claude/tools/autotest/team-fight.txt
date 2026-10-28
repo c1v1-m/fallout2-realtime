@@ -1,0 +1,22 @@
+# F2 (2026-10-24): an encounter of two groups -- set up as wmSetupRandomEncounter does (teamfight) --
+# fights as a whole: every critter of each team gets the nearest of the other (_caiTeamCombatInit, which
+# realtime used to skip with _combat_begin). Three raiders a side, the dude well out of it.
+name team-fight-f2
+map DESERT1.MAP
+seed 1
+duration 25
+dude tile 15100 rot 2
+dude hp 300
+
+spawn 16777455 21110 rot 2 wield 4 team 50 hp 60
+spawn 16777455 21112 rot 2 wield 4 team 50 hp 60
+spawn 16777455 21310 rot 2 wield 4 team 50 hp 60
+spawn 16777455 21118 rot 5 wield 4 team 51 hp 60
+spawn 16777455 21120 rot 5 wield 4 team 51 hp 60
+spawn 16777455 21318 rot 5 wield 4 team 51 hp 60
+teamfight 50 51
+
+note 20000 end
+
+expect team-combat\] atkTeam=51 defTeam=50 critters=7
+expect-not COMBAT/attack\] NPC .*->pid=16777216

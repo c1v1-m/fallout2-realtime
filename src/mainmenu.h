@@ -14,6 +14,8 @@ typedef enum MainMenuOption {
     MAIN_MENU_EXIT,
     MAIN_MENU_SELFRUN,
     MAIN_MENU_OPTIONS,
+    // Realtime build (fallout1-ce): the newest save, no load screen.
+    MAIN_MENU_CONTINUE,
 } MainMenuOption;
 
 // Realtime build: true while the main menu runs (read by the gamepad layer).

@@ -1,0 +1,13 @@
+# F2 (2026-10-24, his pick "Torr bojuje se štíry" + "Štíři jdou po brahmínech"): his own save on
+# arriving at Torr's pasture (KLAGRAZ, Deck SLOT03 copied into the test folder). The dude stands at the
+# map's entrance; the bugmen go for the brahmin they see and Torr goes for the bugmen near him.
+name m-pasture
+map KLAGRAZ.MAP
+loadslot 3
+seed 1
+duration 90
+
+at 0 idle
+
+# (no bugman-brahmin here: the bugman stays on the dude while he stands next to it -- m-pasture-run)
+expect torr-defends

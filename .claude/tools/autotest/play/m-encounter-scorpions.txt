@@ -1,0 +1,13 @@
+# F2 (2026-10-24, the Deck: "radškorpioni jen koukají a kytky mě koušou"): his own save at the start of
+# the encounter (3-6) Sm_Scorpions AND (2-4) Spore_Plants AMBUSH Player (SLOT04, copied from the Deck). The
+# plants bite from the start; the radscorpions (pid 16777221, ECScorp: attack on sight) must join the
+# ambush while the plants are still at it -- the old exe kept their heartbeat stopped for the whole fight.
+name m-encounter-scorpions
+map DESERT1.MAP
+loadslot 4
+seed 1
+duration 45
+
+at 0 idle
+
+expect notify-attack\] atk pid=16777221

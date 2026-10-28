@@ -1,0 +1,28 @@
+# Fallout 2 port of fallout1-ce's screen-controls: the Pip-Boy CONTROLS page (ONE page, his list, since
+# fallout1-ce 2026-10-23). D-pad up opens the Pip-Boy, RB twice is the ARCHIVES tab, CONTROLS is the
+# list's last entry -- and in a new game the ONLY one (no movie seen yet), which the D-pad must still
+# park the pointer on (pipboy.cc pip_pad_keycode, 2026-10-23).
+# ⚠️ A new Fallout 2 dude has no Pip-Boy until the vault-suit movie: run it with
+# PipBoyAvailableAtGameStart=2 under [Misc] in build/Release/ddraw.ini (and take it out again).
+name screen-controls-f2
+map DESERT1.MAP
+seed 1
+duration 11
+dude tile 20100 rot 2
+
+open 1000 pipboy
+tap 2600 RB
+tap 3200 RB
+tap 3800 DOWN
+tap 4900 A
+shot 6000
+# the first B steps back from the page to the list, the second closes the Pip-Boy
+tap 6800 B
+shot 7300
+tap 7800 B
+note 9000 every screen should be closed by now
+
+expect \[FLOW/autotest\] shot t=
+expect \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=640x480
+expect \[FLOW/autotest\] modal none t=7[89]\d\d
+expect \[FLOW/autotest\] end why=time .* modal=-1

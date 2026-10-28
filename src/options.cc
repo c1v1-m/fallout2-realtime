@@ -23,6 +23,7 @@
 
 #include <SDL.h>
 
+#include "rt/game/gamepad_ui.h"
 #include "rt/rt_hooks.h"
 
 namespace fallout {
@@ -89,6 +90,49 @@ static bool gOptionsWindowIsoWasEnabled;
 
 static FrmImage _optionsFrmImages[OPTIONS_WINDOW_FRM_COUNT];
 
+// Button ids of the option rows (Save / Load / Preferences / Exit / Done), so the pad nav can show the
+// selected one by swapping its up-image to the "on" art -- which survives the button refresh, unlike
+// drawing into the window buffer.
+#define OPTIONS_MENU_COUNT (OPTIONS_WINDOW_BUTTONS_COUNT / 2)
+static int gOptionsMenuButtons[OPTIONS_MENU_COUNT] = { -1, -1, -1, -1, -1 };
+
+// Show option `sel` highlighted (its "on" art as the resting image) and the rest normal.
+static void options_gamepad_highlight(int sel)
+{
+    for (int i = 0; i < OPTIONS_MENU_COUNT; i++) {
+        if (gOptionsMenuButtons[i] == -1) {
+            continue;
+        }
+        unsigned char* up = (i == sel) ? _opbtns[i * 2 + 1] : _opbtns[i * 2];
+        _win_register_button_image(gOptionsMenuButtons[i], up, _opbtns[i * 2 + 1], nullptr, true);
+    }
+}
+
+// Auto-hide the options cursor (controller only): hidden by default, revealed while the right stick
+// or the mouse moves it, re-hidden after idle.
+#define OPTIONS_CURSOR_IDLE_MS 2000
+
+static void options_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned int* lastMove)
+{
+    int x;
+    int y;
+    mouseGetPosition(&x, &y);
+
+    if (x != *lastX || y != *lastY) {
+        *lastMove = getTicks();
+        if (!*shown) {
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            *shown = true;
+        }
+    } else if (*shown && getTicksSince(*lastMove) >= OPTIONS_CURSOR_IDLE_MS) {
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        *shown = false;
+    }
+
+    *lastX = x;
+    *lastY = y;
+}
+
 // 0x48FC50
 int showOptions()
 {
@@ -99,18 +143,94 @@ int showOptions()
         return -1;
     }
 
-    // Realtime build: B on the pad backs out, like ESC (armed on release -- see rt_pad_pressed).
-    bool padBArmed = false;
+    // Gamepad navigation: highlight the selected row and move it with the D-pad / left stick, confirm
+    // with A, close with B -- the main menu's feel, without the jumpy snap cursor.
+    SDL_GameController* optnPad = gamepad_ui_get_controller();
+    int optnSel = 0;
+    bool optnPrevUp = false;
+    bool optnPrevDown = false;
+    bool optnPrevA = false;
+    bool optnPrevB = false;
+    bool optnCursorShown = true;
+    int optnCursorX = 0;
+    int optnCursorY = 0;
+    unsigned int optnCursorMove = getTicks();
+    if (optnPad != nullptr) {
+        gamepad_ui_set_self_nav(true);
+        options_gamepad_highlight(optnSel);
+        windowRefresh(gOptionsWindow);
+        mouseGetPosition(&optnCursorX, &optnCursorY);
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        optnCursorShown = false;
+
+        // Seeded as HELD: the button that opened this menu is very likely still down.
+        SDL_GameControllerUpdate();
+        optnPrevA = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_A) != 0;
+        optnPrevB = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_B) != 0;
+    }
+
+    unsigned int optnEpoch = gamepad_ui_input_epoch();
 
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
-        int keyCode = inputGetInput();
+        if (optnPad != nullptr) {
+            // Re-assert after a sub-screen (Save / Load / Preferences run their own loops and clear
+            // self_nav / restore the cursor on exit).
+            gamepad_ui_set_self_nav(true);
 
-        if (keyCode == -1 && rt_pad_pressed(SDL_CONTROLLER_BUTTON_B, &padBArmed)) {
-            keyCode = KEY_ESCAPE;
+            SDL_GameControllerUpdate();
+            bool upNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+                || SDL_GameControllerGetAxis(optnPad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+            bool downNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+                || SDL_GameControllerGetAxis(optnPad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+            bool aNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_A) != 0;
+            bool bNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+            // A sub-screen ran its own loop: the button that closed it is still down. Adopt the live
+            // state, act on nothing this frame.
+            unsigned int epoch = gamepad_ui_input_epoch();
+            if (epoch != optnEpoch) {
+                optnEpoch = epoch;
+                optnPrevUp = upNow;
+                optnPrevDown = downNow;
+                optnPrevA = aNow;
+                optnPrevB = bNow;
+                options_gamepad_highlight(optnSel);
+                windowRefresh(gOptionsWindow);
+                gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                optnCursorShown = false;
+            }
+
+            if (upNow && !optnPrevUp) {
+                optnSel = (optnSel + OPTIONS_MENU_COUNT - 1) % OPTIONS_MENU_COUNT;
+                options_gamepad_highlight(optnSel);
+                windowRefresh(gOptionsWindow);
+                soundPlayFile("ib1p1xx1");
+            } else if (downNow && !optnPrevDown) {
+                optnSel = (optnSel + 1) % OPTIONS_MENU_COUNT;
+                options_gamepad_highlight(optnSel);
+                windowRefresh(gOptionsWindow);
+                soundPlayFile("ib1p1xx1");
+            }
+
+            if (aNow && !optnPrevA) {
+                // The highlighted row's own event code (500 + index), handled by the switch below.
+                enqueueInputEvent(500 + optnSel);
+            } else if (bNow && !optnPrevB) {
+                enqueueInputEvent(KEY_ESCAPE);
+            }
+
+            optnPrevUp = upNow;
+            optnPrevDown = downNow;
+            optnPrevA = aNow;
+            optnPrevB = bNow;
+
+            options_tick_cursor(&optnCursorShown, &optnCursorX, &optnCursorY, &optnCursorMove);
         }
+
+        int keyCode = inputGetInput();
 
         if (keyCode == KEY_ESCAPE || keyCode == 504 || _game_user_wants_to_quit != 0) {
             rc = 0;
@@ -145,8 +265,6 @@ int showOptions()
             case 502:
                 // PREFERENCES
                 doPreferences(false);
-                // The B that closed Preferences is still down: it must not close this menu too.
-                padBArmed = false;
                 break;
             case KEY_PLUS:
             case KEY_EQUAL:
@@ -174,7 +292,18 @@ int showOptions()
         sharedFpsLimiter.throttle();
     }
 
+    if (optnPad != nullptr) {
+        gamepad_ui_set_self_nav(false);
+        gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+    }
+
     optionsWindowFree();
+
+    // ⚠️ DRAIN: this menu's pad injects 500 + row, and those exact numbers mean DONE / PRINT / CANCEL
+    // in the character editor, which can open on the very next frame. And the B that closed it is
+    // still held as the game resumes -- the same counter the load/save screen and the boxes use.
+    inputEventQueueReset();
+    gamepad_ui_bump_input_epoch();
 
     return rc;
 }
@@ -296,6 +425,7 @@ static int optionsWindowInit()
             _opbtns[index + 1],
             nullptr,
             BUTTON_FLAG_TRANSPARENT);
+        gOptionsMenuButtons[index / 2] = btn;
         if (btn != -1) {
             buttonSetCallbacks(btn, _gsound_lrg_butt_press, _gsound_lrg_butt_release);
         }

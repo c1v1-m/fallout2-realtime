@@ -10,6 +10,9 @@ namespace fallout {
 
 extern int _combatNumTurns;
 extern unsigned int gCombatState;
+// Realtime build: exported for combat_rt (see combat.cc).
+extern CombatStartData* _gcsd;
+extern int _combat_exps;
 
 extern int _combat_free_move;
 

@@ -1,0 +1,21 @@
+# F2 play-through: spore plants with Plant Spikes (item 365 x4 -- as worldmap.txt gives them).
+name c-spores-spikes
+map DESERT1.MAP
+seed 1
+duration 45
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude stat EN 8
+dude hp 300
+dude skill small_guns 150
+dude armor 17
+dude wield 23
+dude item 35 4
+dude item 40 4
+
+spawn 16777232 21300 rot 5 item 365 4 hostile
+spawn 16777232 21304 rot 5 item 365 4 hostile
+spawn 16777232 21500 rot 5 item 365 4 hostile
+
+at 0 fight

@@ -32,6 +32,10 @@ SDL_GameController* gamepad_ui_get_controller();
 // window check.
 bool gamepad_ui_menu_active();
 
+// What reaching into the pack costs in a fight: the inventory's price, 4 AP less one per rank of
+// Quick Pockets (see gpui_pack_cost).
+int gamepad_ui_pack_ap_cost();
+
 // True while the on-body aimed-shot picker is up (LB held, green body-part markers drawn on the
 // locked enemy, right stick selecting a part). combat_rt checks this to halt walking and keep the
 // right stick on part-selection instead of lock-switching, like it does for the radial wheels.
@@ -59,6 +63,9 @@ bool gamepad_ui_attack_held();
 // The body part bound in the LB called-shot window (a HIT_LOCATION_*). An attack made while the
 // weapon slot is on its AIMED mode goes there -- see rt_player_called_loc in combat_rt.
 int gamepad_ui_aim_part();
+
+// True while a LB / RB quick throw is out in the hand and its button still held (drawn or ready).
+bool gamepad_ui_quick_throw_held();
 
 // True while the AIM trigger (LT) is pulled. LT aims the same way R3 does -- see the lock
 // block in combat_rt -- and like every analog read in this layer it needs the Schmitt
@@ -152,6 +159,10 @@ bool gamepad_ui_skill_cursor_sticky();
 // the pointer decide (gmouse reads it on the click). See gpui_tpick_stick.
 struct Object;
 Object* gamepad_ui_targeting_pick();
+
+// A lockpick was just used on target from the use-on crosshair (gmouse.cc): while the lock holds, the
+// crosshair comes back for it after the attempt (gpui_lockpick_retry_tick).
+void gamepad_ui_lockpick_used(int pid, Object* target, bool fromHand);
 
 // THE QUICK SLOTS (2026-10-15): 0 = LB, 1 = RB. A slot holds a bound item pid, or -1 = it picks by
 // itself (LB the best throwable, RB the best heal). Saved in combat_rt's save chunk; reset to auto on

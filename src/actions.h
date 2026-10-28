@@ -25,6 +25,9 @@ bool actionCheckPush(Object* a1, Object* a2);
 int actionPush(Object* a1, Object* a2);
 int _action_can_talk_to(Object* a1, Object* a2);
 
+// Realtime: projectiles visible in the air (the self-played runs photograph them).
+int action_rt_flights_in_air();
+
 } // namespace fallout
 
 #endif /* ACTIONS_H */

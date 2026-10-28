@@ -1,0 +1,15 @@
+# Fallout 2: the Temple of Trials with its own map script and critters (the giant ants). The dude
+# starts at the entrance with a spear and walks at the nearest enemy -- vanilla scripts in realtime.
+name temple-ants-f2
+map ARTEMPLE.MAP
+mapscript on
+seed 1
+duration 70
+
+dude tile 17488 rot 2
+dude hp 60
+dude wield 7
+dude item 40 3
+
+# no provoke: it turns Klint at the entrance hostile too
+at 0 advance

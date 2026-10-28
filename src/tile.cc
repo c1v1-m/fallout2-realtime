@@ -20,6 +20,9 @@
 #include "settings.h"
 #include "svga.h"
 
+// Realtime (fallout1-ce's tile.cc changes, ported).
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 typedef struct RightsideUpTableEntry {
@@ -607,6 +610,137 @@ int tileSetCenter(int tile, int flags)
     return 0;
 }
 
+// Realtime follow-cam helper (fallout1-ce). Centers on `tile` exactly like tileSetCenter, then shifts
+// the whole rendered view by (offsetX, offsetY) pixels. Both anchor pairs are nudged by the same
+// delta -- _tile_offx/y (tiles, grid, objects) and _square_offx/y (floor, roof) -- so the ground and
+// everything on it move together. combat_rt eases a shrinking offset frame-to-frame so the camera
+// slides into place instead of snapping a whole tile at once. Returns tileSetCenter's result (-1 if
+// the tile is out of bounds/blocked, in which case no shift is applied).
+int tile_set_center_offset(int tile, int flags, int offsetX, int offsetY)
+{
+    // Center without refreshing yet -- refreshed once below, after the pixel shift.
+    int rc = tileSetCenter(tile, flags & ~TILE_SET_CENTER_REFRESH_WINDOW);
+    if (rc != 0) {
+        return rc;
+    }
+
+    _tile_offx += offsetX;
+    _tile_offy += offsetY;
+    _square_offx += offsetX;
+    _square_offy += offsetY;
+
+    if ((flags & TILE_SET_CENTER_REFRESH_WINDOW) != 0) {
+        tileWindowRefresh();
+    }
+
+    return 0;
+}
+
+// Debug overlay: radius (in hex tiles) of a red ring drawn around gDude, or 0 for off. Used to
+// visualize a tile distance (e.g. the gunshot-hearing radius) in-world.
+static int tile_dbg_ring_radius = 0;
+
+void tile_debug_ring_set(int radius)
+{
+    tile_dbg_ring_radius = radius > 0 ? radius : 0;
+    tileWindowRefresh();
+}
+
+int tile_debug_ring_get()
+{
+    return tile_dbg_ring_radius;
+}
+
+// Every hex at exactly tileDistanceBetween == radius from gDude gets a small red marker, so the
+// outline is the TRUE hex boundary, not a screen-space circle. Drawn after the world is composited,
+// clipped to the dirty rect, so it survives every redraw.
+static void tile_render_debug_ring(Rect* rectToUpdate, int elevation)
+{
+    if (tile_dbg_ring_radius <= 0 || gDude == nullptr || gDude->elevation != elevation) {
+        return;
+    }
+
+    int R = tile_dbg_ring_radius;
+    int center = gDude->tile;
+    int col = center % gHexGridWidth;
+    int row = center / gHexGridWidth;
+    int red = _colorTable[31744];
+
+    for (int dr = -R - 1; dr <= R + 1; dr++) {
+        int r2 = row + dr;
+        if (r2 < 0 || r2 >= gHexGridHeight) {
+            continue;
+        }
+        for (int dc = -2 * R - 2; dc <= 2 * R + 2; dc++) {
+            int c2 = col + dc;
+            if (c2 < 0 || c2 >= gHexGridWidth) {
+                continue;
+            }
+
+            int t = r2 * gHexGridWidth + c2;
+            if (!tileIsValid(t) || tileDistanceBetween(center, t) != R) {
+                continue;
+            }
+
+            int sx;
+            int sy;
+            if (tileToScreenXY(t, &sx, &sy, elevation) == -1) {
+                continue;
+            }
+            sx += 16; // tile anchor -> approx hex centre
+            sy += 8;
+
+            for (int py = sy - 1; py <= sy + 1; py++) {
+                if (py < rectToUpdate->top || py > rectToUpdate->bottom) {
+                    continue;
+                }
+                for (int px = sx - 1; px <= sx + 1; px++) {
+                    if (px < rectToUpdate->left || px > rectToUpdate->right) {
+                        continue;
+                    }
+                    gTileWindowBuffer[py * gTileWindowPitch + px] = red;
+                }
+            }
+        }
+    }
+}
+
+static TileOverlayFn tile_overlay = nullptr;
+
+// Something drawn over the world after it is composited, clipped to the rect being refreshed
+// (combat_rt's bullet tracers). The callback draws with tile_overlay_line.
+void tile_set_overlay(TileOverlayFn fn)
+{
+    tile_overlay = fn;
+}
+
+// A one-pixel line into the composited world, clipped to clip (window coordinates, as tileToScreenXY gives).
+void tile_overlay_line(Rect* clip, int x0, int y0, int x1, int y1, int color)
+{
+    int dx = abs(x1 - x0);
+    int dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (int guard = 0; guard < 4096; guard++) {
+        if (x0 >= clip->left && x0 <= clip->right && y0 >= clip->top && y0 <= clip->bottom) {
+            gTileWindowBuffer[y0 * gTileWindowPitch + x0] = (unsigned char)color;
+        }
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
 // 0x4B1554
 static void tileRefreshMapper(Rect* rect, int elevation)
 {
@@ -651,6 +785,10 @@ static void tileRefreshGame(Rect* rect, int elevation)
     _obj_render_pre_roof(&rectToUpdate, elevation);
     tileRenderRoofsInRect(&rectToUpdate, elevation);
     _obj_render_post_roof(&rectToUpdate, elevation);
+    tile_render_debug_ring(&rectToUpdate, elevation);
+    if (tile_overlay != nullptr) {
+        tile_overlay(&rectToUpdate, elevation);
+    }
     gTileWindowRefreshProc(&rectToUpdate);
 }
 

@@ -1,0 +1,22 @@
+# Realtime save chunk (A): a quick save (START held) in the middle of a fight. Two pistol raiders are told to
+# attack (spawn hostile = combat_rt_notify_attack, whoHitMe = dude); the bot is off (pad timeline), the dude
+# only takes it. ⚠️ Overwrites build/Release/data/SAVEGAME/SLOT01 -- back it up first.
+name rtchunk-save-fight
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+spawn 16777454 20700 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 20706 rot 5 wield 8 item 29 4 hostile
+
+note 500 the raiders come
+pad 6000 start 1
+pad 7000 start 0
+note 10000 saved
+
+expect combat-enter\]
+expect fight-save\] map=0 elev=0 n=2
+expect fled-save\] n=0
+expect save-slot\] slot=1 desc=Quick Save rc=

@@ -21,6 +21,11 @@ namespace fallout {
 // 0x51E444
 bool gProgramIsActive = false;
 
+// The game plays by itself (rt/game/autotest.cc): a hidden window that never loses "focus", so it
+// never sleeps on a focus loss. gnw_visible_override shows the window anyway (--autotest-visible).
+bool gnw_headless = false;
+bool gnw_visible_override = false;
+
 #ifdef _WIN32
 HANDLE GNW95_mutex = nullptr;
 #endif

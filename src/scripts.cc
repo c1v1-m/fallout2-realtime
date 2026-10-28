@@ -40,6 +40,10 @@
 #include "window_manager_private.h"
 #include "worldmap.h"
 
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define SCRIPT_LIST_EXTENT_SIZE 16
@@ -704,7 +708,26 @@ static void _doBkProcesses()
 // 0x4A3CA0
 static void _script_chk_critters()
 {
-    if (!_gdialogActive() && !isInCombat()) {
+    // Ambient CRITTER scripts are suspended during a fight so they cannot interfere with it (fallout1-ce
+    // 2026-09/10). Right, but the test has to be "is a fight happening to the player", not isInCombat():
+    // realtime keeps the combat bit warm while any critter anywhere is still chasing, so this stopped
+    // every NPC's idle script on the whole map, indefinitely.
+    //
+    // ⚠️ AND SO THE HEARTBEAT IS ALWAYS critter_p_proc NOW. Vanilla picked SCRIPT_PROC_COMBAT whenever
+    // isInCombat(), which its own gate made dead code; this narrower gate would have let combat_p_proc
+    // through with a stale fixed_param, re-running turn starts on every heartbeat. Combat events come
+    // from combat_rt (rt_script_turn_tick), and only from there.
+    //
+    // ⚠️ ...EXCEPT ON A RANDOM ENCOUNTER MAP (Fallout 2 Realtime 2026-10-24, the Deck: "radškorpioni jen
+    // koukají a kytky mě koušou"). An encounter's critters attack by their own heartbeat -- ECScorp's
+    // critter_p_proc is "if I see the dude, attack him" -- and the first group that did (the spore plants)
+    // made the fight that stopped every other heartbeat: six radscorpions stood five tiles off for as long
+    // as the plants, which never move, kept biting. Vanilla has the same order of events, but its fight
+    // with two immobile plants is a few turns long; this one lasts while he stands in their reach. On a
+    // map that is nothing but its encounter (maps.txt saved=No) the bystanders' scripts keep running, so
+    // whoever sees him joins the ambush the way its script says; towns keep the rule above.
+    bool encounterMap = combat_rt_enabled() && !wmMapIsSaveable();
+    if (!_gdialogActive() && (encounterMap || !combat_rt_under_threat())) {
         ScriptList* scriptList;
         ScriptListExtent* scriptListExtent;
 
@@ -723,7 +746,7 @@ static void _script_chk_critters()
         }
 
         if (_count_ < scriptsCount) {
-            int proc = isInCombat() ? SCRIPT_PROC_COMBAT : SCRIPT_PROC_CRITTER;
+            int proc = SCRIPT_PROC_CRITTER;
             int extentIndex = _count_ / SCRIPT_LIST_EXTENT_SIZE;
             int scriptIndex = _count_ % SCRIPT_LIST_EXTENT_SIZE;
 
@@ -736,7 +759,11 @@ static void _script_chk_critters()
 
             if (scriptListExtent != nullptr) {
                 Script* script = &(scriptListExtent->scripts[scriptIndex]);
-                scriptExecProc(script->sid, proc);
+                // ...and not for a critter that is itself in the fight (combat_rt_critter_fighting):
+                // vanilla gave no fighter a heartbeat, and its errands would pull it out of the fight.
+                if (!combat_rt_critter_fighting(script->owner)) {
+                    scriptExecProc(script->sid, proc);
+                }
             }
         }
     }
@@ -749,8 +776,12 @@ static void _script_chk_timed_events()
 {
     int v0 = _get_bk_time();
 
+    // TIMED SCRIPT EVENTS. Vanilla holds the queue during a fight, harmless when a fight is twenty
+    // seconds long. Under realtime the combat bit can stay warm for minutes because something is
+    // chasing somewhere, and that froze every scripted timer in the game (fallout1-ce). Bound the stall
+    // to an actual fight instead -- combat_rt_under_threat, isInCombat in turn-based.
     int v1 = false;
-    if (!isInCombat()) {
+    if (!combat_rt_under_threat()) {
         v1 = true;
     }
 
@@ -765,8 +796,45 @@ static void _script_chk_timed_events()
 
     if (getTicksBetween(v0, _last_time__) >= 100) {
         _last_time__ = v0;
-        if (!isInCombat()) {
-            gGameTime += 1;
+
+        // THE GAME CLOCK: one tick per 100 ms, ten ticks a game second -- out of combat game time runs
+        // at wall-clock speed, and poison, radiation, day and night and every scripted timer ride on it.
+        //
+        // ⚠️ IN REALTIME THE CLOCK NEVER STOPS, not even in a fight (fallout1-ce 2026-09-24, his call).
+        // Vanilla's clock stops in combat and makes up for it at the top of every round (5 game seconds,
+        // _combat_sequence); realtime has no rounds, so game time stood still for a whole fight and a
+        // timed explosive set in one went off only after it ("dal jsem dynamit a nevybuchnul").
+        // Turn-based keeps the vanilla rule: there the per-round increment still runs.
+        if (combat_rt_enabled() || !isInCombat()) {
+            // ⚠️ TIME KEEPS PACE WITH THE LEGS. Travel speed compresses walking into less real time;
+            // the clock compresses with it WHILE HE MOVES (anim_travel_speed_in_effect is a tile-time
+            // multiplier, 0.5 = twice as fast, so the rate is its reciprocal), or crossing a poisoned
+            // map at Very fast would cost half the poison -- a hidden difficulty lever. Fractional,
+            // hence the carry.
+            static float clockCarry = 0.0f;
+            float rate = 1.0f;
+            if (gDude != nullptr) {
+                int anim = FID_ANIM_TYPE(gDude->fid);
+                if (anim == ANIM_WALK || anim == ANIM_RUNNING) {
+                    float travel = anim_travel_speed_in_effect();
+                    if (travel > 0.05f) {
+                        rate = 1.0f / travel;
+                    }
+                }
+            }
+
+            clockCarry += rate;
+            int whole = (int)clockCarry;
+            clockCarry -= (float)whole;
+            gGameTime += whole;
+
+            // An edge, not a heartbeat: the rate changes when he starts or stops walking.
+            static float tracedRate = -1.0f;
+            if (rate != tracedRate) {
+                tracedRate = rate;
+                trace_event(TRACE_FLOW, "clock", "rate=%.2f gtime=%u travel=%.2f",
+                    rate, gGameTime, anim_travel_speed_in_effect());
+            }
         }
         v1 = true;
     }
@@ -1131,7 +1199,9 @@ void _scripts_request_combat_locked(CombatStartData* combat)
 // 0x4A461C
 void scripts_request_townmap()
 {
-    if (isInCombat()) {
+    // combat_rt owns combat in realtime: the turn-based "leave the fight" flag would quit the game
+    // (fallout1-ce; the same trap as terminate_combat and the map exits).
+    if (isInCombat() && !combat_rt_enabled()) {
         _game_user_wants_to_quit = 1;
     }
 
@@ -1142,7 +1212,8 @@ void scripts_request_townmap()
 // 0x4A4644
 void scriptsRequestWorldMap()
 {
-    if (isInCombat()) {
+    // As scripts_request_townmap.
+    if (isInCombat() && !combat_rt_enabled()) {
         _game_user_wants_to_quit = 1;
     }
 

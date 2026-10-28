@@ -19,6 +19,9 @@
 #include "text_font.h"
 #include "window_manager.h"
 
+// Realtime (fallout1-ce display.cc).
+#include "rt/game/game_trace.h"
+
 namespace fallout {
 
 // The maximum number of lines display monitor can hold. Once this value
@@ -232,6 +235,20 @@ void displayMonitorAddMessage(char* str)
     if (!gDisplayMonitorInitialized) {
         return;
     }
+
+    // What the message window said: a script's "You unlock the door" is often the only sign it ran.
+    trace_event(TRACE_STATE, "msg", "%s", str);
+
+    // ⚠️ A COPY, BECAUSE THE LINE BREAKING BELOW WRITES INTO THE STRING (Fallout 2 Realtime 2026-10-24,
+    // the Deck: the game died holding BACK, "Not while you're being shot at.", write 0x1402c875b). It
+    // terminates the text at a space while it measures a line and puts the space back after -- fine for
+    // vanilla's callers, which pass their own buffers, an access violation for a string literal, and the
+    // realtime modules print literals everywhere (display_print). Only a message that has to WRAP reaches
+    // the write, which is why the narrower message window of a 640 bar (a Deck) found it.
+    char copy[1024];
+    strncpy(copy, str, sizeof(copy) - 1);
+    copy[sizeof(copy) - 1] = '\0';
+    str = copy;
 
     // SFALL
     consoleFileAddMessage(str);

@@ -540,6 +540,29 @@ char* perkGetDescription(int perk)
     return gPerkDescriptions[perk].description;
 }
 
+// WHAT A PERK DOES ON TOP OF ITS VANILLA TEXT IN REALTIME (fallout1-ce's perk.cc), or nullptr when
+// nothing changed. The character screen prints it as its own paragraph under the description
+// (character_editor.cc, card_footer_for_perk); perk.msg lives in the DAT, and the vanilla sentences
+// stay true -- these perks only GAINED something.
+//
+// ⚠️ KEEP THEM SHORT: the level-up window has room for about three more lines under the longest
+// description, and a longer note is cut off there, not wrapped past the card.
+//
+// Fallout 1's second note (Awareness: hit points on the to-hit cursor) is NOT here, because that
+// readout has not been ported yet -- a note must never promise what this build does not do.
+const char* perk_realtime_note(int perk)
+{
+    switch (perk) {
+    case PERK_QUICK_POCKETS:
+        // gpui_quick_use (the heal and the item wheel's drugs) and the quick slots' draw.
+        // Since 2026-10-19 (fallout1-ce) everything a pad shortcut takes out of the pack costs what the
+        // inventory costs (gpui_pack_cost: the quick slots and their drugs, items and grenades, the weapon
+        // wheel, armour) -- 4 AP, one less per rank, so the perk reaches all of them.
+        return "Realtime: quick slots, weapon wheel, armour too: 4 AP, 1 less per rank.";
+    }
+    return nullptr;
+}
+
 // 0x496BD8
 int perkGetFrmId(int perk)
 {

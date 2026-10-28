@@ -33,6 +33,9 @@
 #include "tile.h"
 #include "trait.h"
 
+// Realtime (fallout1-ce item.cc).
+#include "rt/game/combat_rt.h"
+
 namespace fallout {
 
 #define ADDICTION_COUNT (9)
@@ -2807,7 +2810,22 @@ int _item_d_take_drug(Object* critter, Object* item)
     _queue_clear_type(EVENT_TYPE_WITHDRAWAL, _item_wd_clear_all);
 
     if (_drug_effect_allowed(critter, item->pid)) {
+        // ⚠️ IN A REALTIME FIGHT A HEAL COMES IN OVER TIME (fallout1-ce 2026-10-19, see rt_heal_left in
+        // combat_rt.cc), the dude's and every fighter's. Here rather than at the quick-use, so every way a
+        // drug reaches a body -- the heal slot, the inventory, a medic -- gets the same rule. Only the
+        // immediate effect: the delayed ones come through the queue as in vanilla. The message ("You
+        // gained 15 hit points.") stays -- they are coming.
+        int hpBefore = critter->data.critter.hp;
         _perform_drug_effect(critter, proto->item.data.drug.stat, proto->item.data.drug.amount, true);
+        int gained = critter->data.critter.hp - hpBefore;
+        if (gained > 0 && combat_rt_active()) {
+            critter->data.critter.hp = hpBefore;
+            if (!combat_rt_heal_over_time(critter, gained, item->pid)) {
+                critter->data.critter.hp += gained; // not in the fight's table: vanilla, at once
+            } else if (critter == gDude) {
+                interfaceRenderHitPoints(true); // re-aim the counter _perform_drug_effect sent to the full value
+            }
+        }
         _insert_drug_effect(critter, item, proto->item.data.drug.duration1, proto->item.data.drug.stat, proto->item.data.drug.amount1);
         _insert_drug_effect(critter, item, proto->item.data.drug.duration2, proto->item.data.drug.stat, proto->item.data.drug.amount2);
     } else {
@@ -3499,22 +3517,26 @@ bool explosiveSetDamage(int pid, int minDamage, int maxDamage)
     return false;
 }
 
+// ⚠️ THE ARMED PID TOO (Fallout 2 Realtime 2026-10-24, the Deck "crash"). Arming swaps the pid to its
+// active one (explosiveActivate) and the queued EXPLOSION / EXPLOSION_FAILURE carries THAT object, so a
+// lookup of the inactive pids only missed every real detonation: _queue_do_explosion_ read two
+// uninitialized ints and a botched timer killed the dude for 9855647 HP (f2_trace_2026-10-24_113000).
 bool explosiveGetDamage(int pid, int* minDamagePtr, int* maxDamagePtr)
 {
-    if (pid == PROTO_ID_DYNAMITE_I) {
+    if (pid == PROTO_ID_DYNAMITE_I || pid == PROTO_ID_DYNAMITE_II) {
         *minDamagePtr = gDynamiteMinDamage;
         *maxDamagePtr = gDynamiteMaxDamage;
         return true;
     }
 
-    if (pid == PROTO_ID_PLASTIC_EXPLOSIVES_I) {
+    if (pid == PROTO_ID_PLASTIC_EXPLOSIVES_I || pid == PROTO_ID_PLASTIC_EXPLOSIVES_II) {
         *minDamagePtr = gPlasticExplosiveMinDamage;
         *maxDamagePtr = gPlasticExplosiveMaxDamage;
         return true;
     }
 
     for (const auto& explosive : gExplosives) {
-        if (explosive.pid == pid) {
+        if (explosive.pid == pid || explosive.activePid == pid) {
             *minDamagePtr = explosive.minDamage;
             *maxDamagePtr = explosive.maxDamage;
             return true;

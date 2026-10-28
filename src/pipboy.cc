@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "art.h"
@@ -41,6 +42,12 @@
 #include "window_manager.h"
 #include "word_wrap.h"
 #include "worldmap.h"
+
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's pipboy.cc changes, ported).
+#include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
 
 namespace fallout {
 
@@ -399,6 +406,430 @@ static bool pipboy_available_at_game_start = false;
 
 static FrmImage _pipboyFrmImages[PIPBOY_FRM_COUNT];
 
+// --- REALTIME / CONTROLLER (fallout1-ce's pipboy.cc changes, ported) ---------------------------------
+
+// One row of the CONTROLS pages in the archives -- see ctrl_lines.
+typedef struct PipboyControl {
+    const char* button;
+    const char* action;
+} PipboyControl;
+
+// The gamepad layout, listed on its own pages of the Pip-Boy archives.
+//
+// Hardcoded rather than added to pipboy.msg: that file lives inside MASTER.DAT, and adding a
+// handful of message ids would mean shipping a loose override of the WHOLE file, which would
+// then fight every localised or patched pipboy.msg the player might install.
+//
+//   button == NULL, action != NULL -> section heading (underlined)
+//   both NULL                      -> blank spacer, dropped first if the page runs long
+//
+// ⚠️ EACH PAGE HAS A HARD 40-LINE BUDGET, and it is not a style preference -- pip_ctrl_line piles
+// every row past `gPipboyLinesCount` onto the bottom line, so an overlong table does not scroll, it
+// smears. The budget is 1 (title) + as many entries as fit; blank spacers are dropped wholesale
+// first (`spacious` in ShowControlsPage), which buys back one line per section boundary.
+// ⚠️ ONE PAGE, "CONTROLS", AND IT IS HIS LIST (fallout1-ce 2026-10-23). He dictated it ("nastavení dej jenom tohle"),
+// then, when the first cut said "X Reload" and kept three more pages: "TY CONTROLS MAJÍ BÝT JEN JEDNY A
+// TO CONTROLS NIC VÍC ... LT+Y JE ZMĚNA MODU A LT+X JE RELOAD". So: one archive entry, his words,
+// LT + X for the reload (X's tap reloads with or without LT; he wants it written as the combo). BACK,
+// START and the quick save hold were his additions or the only way to those screens. No drawn pad, no
+// SCREENS / MENUS / KEYBOARD pages (git history has them). On a Steam Deck the names are spelled the
+// Deck's way on the way out (ctrl_deck_names).
+static const PipboyControl ctrl_lines[] = {
+    { "Left stick", "Walk" },
+    { "Right stick", "Look, aim" },
+    { "D-pad", "Next action, scroll" },
+    { "Hold Up", "Pip-Boy" },
+    { "Hold Down", "Character" },
+    { "Hold Left", "Automap" },
+    { "Hold Right", "End combat" },
+    { NULL, NULL },
+    { "LB / RB", "Quick slots" },
+    { "LT", "Aim" },
+    { "RT", "Shoot" },
+    { "L3", "Skills" },
+    { "R3", "Called shot" },
+    { NULL, NULL },
+    { "A", "Confirm, action" },
+    { "B", "Cancel" },
+    { "B hold", "Drugs, items" },
+    { "X hold", "Run" },
+    { "Y", "Swap hands" },
+    { "Y hold", "Weapons, ammo" },
+    { "LT + X", "Reload" },
+    { "LT + Y", "Firing mode" },
+    { NULL, NULL },
+    { "BACK", "Inventory" },
+    { "START", "Pause" },
+    { "START hold", "Quick save" },
+};
+
+// The CONTROLS page's title, and the archive entry that opens it -- one string so the list and the
+// page it leads to can never drift apart.
+static const char* ctrl_entry = "CONTROLS";
+
+
+// Set while a CONTROLS page is showing, so the video archive routes BACK to the list instead of
+// treating hot-line codes as movies.
+static unsigned char ctrl_flag;
+
+// x of the CONTROLS page's second column, measured from the widest button label.
+static int ctrl_col;
+
+// Whether the page now up registered a BACK button (vanilla never records it: _hot_back_line stays 0),
+// so B knows whether to back out of a sub-page or close the Pip-Boy.
+static bool pip_page_has_back = false;
+
+// GAMEPAD NAVIGATION FOR THE PIP-BOY (fallout1-ce, "chci si přečíst logs, blbě se to ovládá"). Every
+// page is a list of HOT LINES -- buttons 350 px wide reporting 505 + index -- and the pad reached one
+// only by leaving the cursor on it. Start on the FIRST entry, the D-pad walks them, A opens the one you
+// are on; the selection is shown by PARKING THE CURSOR on it, plus a frame drawn round it.
+static int pip_pad_sel = 0;
+
+// SELECTION FRAME, with a save-under: the page under it was painted by whichever handler drew it and
+// there is no clean copy to erase against. Strictly ERASE -> input (may repaint) -> DRAW.
+#define PIP_HL_MAX_W 380
+#define PIP_HL_MAX_H 32
+
+static unsigned char pip_hl_top[PIP_HL_MAX_W];
+static unsigned char pip_hl_bottom[PIP_HL_MAX_W];
+static unsigned char pip_hl_left[PIP_HL_MAX_H];
+static unsigned char pip_hl_right[PIP_HL_MAX_H];
+static int pip_hl_x = -1;
+static int pip_hl_y;
+static int pip_hl_w;
+static int pip_hl_h;
+
+static void pip_hl_erase()
+{
+    if (pip_hl_x < 0) {
+        return;
+    }
+
+    memcpy(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * pip_hl_y + pip_hl_x, pip_hl_top, pip_hl_w);
+    memcpy(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * (pip_hl_y + pip_hl_h - 1) + pip_hl_x, pip_hl_bottom, pip_hl_w);
+    for (int i = 0; i < pip_hl_h; i++) {
+        unsigned char* row = gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * (pip_hl_y + i);
+        row[pip_hl_x] = pip_hl_left[i];
+        row[pip_hl_x + pip_hl_w - 1] = pip_hl_right[i];
+    }
+
+    pip_hl_x = -1;
+}
+
+static void pip_hl_draw(int k)
+{
+    if (gPipboyWindowButtonCount <= 0 || k < 0 || k >= gPipboyWindowButtonCount) {
+        return;
+    }
+
+    fontSetCurrent(101);
+    int height = fontGetLineHeight();
+
+    // The hot line's own rectangle (x 254, 350 wide, one text line tall), two pixels of air.
+    int x = 252;
+    int y = PIPBOY_WINDOW_CONTENT_VIEW_Y + (gPipboyWindowButtonStart + 2 * k) * height - 2;
+    int w = 354;
+    int h = height + 4;
+
+    if (x < 0 || y < 0 || x + w > PIPBOY_WINDOW_WIDTH || y + h > PIPBOY_WINDOW_HEIGHT) {
+        return;
+    }
+    if (w < 3 || h < 3 || w > PIP_HL_MAX_W || h > PIP_HL_MAX_H) {
+        return;
+    }
+
+    // Save the whole footprint BEFORE drawing any of it, or the corners come back coloured.
+    memcpy(pip_hl_top, gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * y + x, w);
+    memcpy(pip_hl_bottom, gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * (y + h - 1) + x, w);
+    for (int i = 0; i < h; i++) {
+        const unsigned char* row = gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * (y + i);
+        pip_hl_left[i] = row[x];
+        pip_hl_right[i] = row[x + w - 1];
+    }
+
+    // The Pip-Boy's own green.
+    unsigned char color = _colorTable[992];
+    memset(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * y + x, color, w);
+    memset(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * (y + h - 1) + x, color, w);
+    for (int i = 0; i < h; i++) {
+        unsigned char* row = gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * (y + i);
+        row[x] = color;
+        row[x + w - 1] = color;
+    }
+
+    pip_hl_x = x;
+    pip_hl_y = y;
+    pip_hl_w = w;
+    pip_hl_h = h;
+}
+
+// Where hot line k sits: x 254, first at gPipboyWindowButtonStart * height, then every SECOND line.
+static void pip_pad_point(int k)
+{
+    if (gPipboyWindowButtonCount <= 0) {
+        return;
+    }
+
+    Rect winRect;
+    if (windowGetRect(gPipboyWindow, &winRect) != 0) {
+        return;
+    }
+
+    fontSetCurrent(101);
+    int height = fontGetLineHeight();
+
+    _mouse_set_position(winRect.left + 254 + 8,
+        winRect.top + PIPBOY_WINDOW_CONTENT_VIEW_Y + (gPipboyWindowButtonStart + 2 * k) * height + height / 2);
+}
+
+// The pad in the Pip-Boy's loop: the D-pad / left stick PARK THE CURSOR on entries (A then clicks
+// them as it always did), LB / RB step the tabs, B backs out of a sub-page or closes. ⚠️ No self_nav:
+// the screen was already playable with the stick cursor, and self_nav would take that away.
+// `armedA` / `armedB` are the caller's LOCALS (each visit starts disarmed).
+static int pip_pad_keycode(bool* armedA, bool* armedB)
+{
+    static bool pipPrevUp = false;
+    static bool pipPrevDown = false;
+    static bool pipPrevA = false;
+    static bool pipPrevB = false;
+    static bool pipPrevLB = false;
+    static bool pipPrevRB = false;
+    static unsigned int pipLastStep = 0;
+
+    SDL_GameController* pipPad = gamepad_ui_get_controller();
+    if (pipPad == nullptr) {
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool upNow = SDL_GameControllerGetButton(pipPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+    bool downNow = SDL_GameControllerGetButton(pipPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+    bool aNow = SDL_GameControllerGetButton(pipPad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool bNow = SDL_GameControllerGetButton(pipPad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool lbNow = SDL_GameControllerGetButton(pipPad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+    bool rbNow = SDL_GameControllerGetButton(pipPad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
+
+    if (!aNow) {
+        *armedA = true;
+    }
+    if (!bNow) {
+        *armedB = true;
+    }
+
+    bool repeat = (upNow || downNow) && getTicksSince(pipLastStep) >= 220;
+
+    int step = 0;
+    if ((upNow && !pipPrevUp) || (upNow && repeat)) {
+        step = -1;
+    } else if ((downNow && !pipPrevDown) || (downNow && repeat)) {
+        step = 1;
+    } else {
+        // The left stick does it too -- it is the thing your thumb is already on.
+        step = gamepad_ui_menu_stick_step();
+    }
+
+    if (step != 0 && gPipboyWindowButtonCount > 0) {
+        pipLastStep = getTicks();
+        int next = pip_pad_sel + step;
+        if (next >= 0 && next < gPipboyWindowButtonCount) {
+            pip_pad_sel = next;
+        } else if (pip_pad_sel >= gPipboyWindowButtonCount) {
+            pip_pad_sel = gPipboyWindowButtonCount - 1;
+        }
+        // ⚠️ AT EITHER END THE PRESS STILL PARKS THE POINTER (2026-10-23). A new Fallout 2 game's archives
+        // hold ONE entry -- CONTROLS, no movie seen yet -- so the D-pad had nowhere to step, the pointer
+        // stayed wherever the page change left it, and A clicked nothing: CONTROLS could not be opened.
+        pip_pad_point(pip_pad_sel);
+    }
+
+    int keyCode = -1;
+
+    // LB / RB step between the PAGES. 503 is CLOSE and deliberately not in the ring -- you leave with B.
+    static const int pipTabs[] = { 500, 501, 502, 504 };
+    int tabStep = 0;
+    if (rbNow && !pipPrevRB) {
+        tabStep = 1;
+    } else if (lbNow && !pipPrevLB) {
+        tabStep = -1;
+    }
+
+    if (tabStep != 0) {
+        int here = 0;
+        for (int i = 0; i < 4; i++) {
+            if (pipTabs[i] - 500 == gPipboyTab) {
+                here = i;
+                break;
+            }
+        }
+        keyCode = pipTabs[(here + tabStep + 4) % 4];
+    } else if (*armedB && bNow && !pipPrevB) {
+        // Back out of a sub-page if there is one, otherwise close. A is NOT injected: the cursor is
+        // already parked on the entry, so the ordinary A-click lands on it.
+        keyCode = pip_page_has_back ? 528 : KEY_ESCAPE;
+    }
+
+    pipPrevUp = upNow;
+    pipPrevDown = downNow;
+    pipPrevA = aNow;
+    pipPrevB = bNow;
+    pipPrevLB = lbNow;
+    pipPrevRB = rbNow;
+    return keyCode;
+}
+
+// One row of a CONTROLS page: the pad button on the left, what it does on the right (the column split
+// measured from the widest label, ctrl_col).
+static void pip_ctrl_line(const char* button, const char* action, int color)
+{
+    int top = gPipboyCurrentLine * fontGetLineHeight() + PIPBOY_WINDOW_CONTENT_VIEW_Y;
+
+    if (button != nullptr) {
+        fontDrawText(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * top + PIPBOY_WINDOW_CONTENT_VIEW_X + 8,
+            button,
+            PIPBOY_WINDOW_WIDTH,
+            PIPBOY_WINDOW_WIDTH,
+            color);
+    }
+
+    if (action != nullptr) {
+        fontDrawText(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * top + PIPBOY_WINDOW_CONTENT_VIEW_X + ctrl_col,
+            action,
+            PIPBOY_WINDOW_WIDTH,
+            PIPBOY_WINDOW_WIDTH,
+            color);
+    }
+
+    if (gPipboyCurrentLine < gPipboyLinesCount) {
+        gPipboyCurrentLine += 1;
+    }
+}
+
+// A Steam Deck: Steam sets SteamDeck=1 in every game's environment there (Proton passes it on), and
+// under Steam Input the pad may also introduce itself by name.
+static bool ctrl_on_deck()
+{
+    const char* deck = getenv("SteamDeck");
+    if (deck != nullptr && strcmp(deck, "1") == 0) {
+        return true;
+    }
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    const char* name = pad != nullptr ? SDL_GameControllerName(pad) : nullptr;
+    return name != nullptr && strstr(name, "Steam Deck") != nullptr;
+}
+
+// The pad's button names as the Deck spells them: LB/RB = L1/R1, LT/RT = L2/R2, BACK/START = VIEW/MENU.
+// Whole words only ("BACK (hold)" changes, "Backpack" would not).
+static const char* ctrl_deck_names(const char* text, char* out, size_t size)
+{
+    static const char* from[] = { "LB", "RB", "LT", "RT", "BACK", "START" };
+    static const char* to[] = { "L1", "R1", "L2", "R2", "VIEW", "MENU" };
+    size_t n = 0;
+    const char* p = text;
+    while (*p != '\0' && n + 1 < size) {
+        bool replaced = false;
+        if (p == text || !isalnum((unsigned char)p[-1])) {
+            for (int index = 0; index < 6; index++) {
+                size_t len = strlen(from[index]);
+                if (strncmp(p, from[index], len) == 0 && !isalnum((unsigned char)p[len])) {
+                    size_t rlen = strlen(to[index]);
+                    if (n + rlen < size) {
+                        memcpy(out + n, to[index], rlen);
+                        n += rlen;
+                    }
+                    p += len;
+                    replaced = true;
+                    break;
+                }
+            }
+        }
+        if (!replaced) {
+            out[n++] = *p++;
+        }
+    }
+    out[n] = '\0';
+    return out;
+}
+
+// The CONTROLS page's layout: the title, then button | action rows.
+static void ShowControlsPage(const char* title, const PipboyControl* lines, int count)
+{
+    blitBufferToBuffer(_pipboyFrmImages[PIPBOY_FRM_BACKGROUND].getData() + PIPBOY_WINDOW_WIDTH * PIPBOY_WINDOW_CONTENT_VIEW_Y + PIPBOY_WINDOW_CONTENT_VIEW_X,
+        PIPBOY_WINDOW_CONTENT_VIEW_WIDTH,
+        PIPBOY_WINDOW_CONTENT_VIEW_HEIGHT,
+        PIPBOY_WINDOW_WIDTH,
+        gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * PIPBOY_WINDOW_CONTENT_VIEW_Y + PIPBOY_WINDOW_CONTENT_VIEW_X,
+        PIPBOY_WINDOW_WIDTH);
+
+    ctrl_col = 0;
+    for (int index = 0; index < count; index++) {
+        if (lines[index].button != nullptr) {
+            int width = fontGetStringWidth(lines[index].button);
+            if (width > ctrl_col) {
+                ctrl_col = width;
+            }
+        }
+    }
+    ctrl_col += 8 + 12;
+    if (ctrl_col > 160) {
+        ctrl_col = 160;
+    }
+
+    // The blank separator lines are the first thing to go if the page does not fit.
+    int needed = 1 + count;
+    bool spacious = needed <= gPipboyLinesCount;
+
+    if (gPipboyLinesCount >= 0) {
+        gPipboyCurrentLine = 0;
+    }
+
+    pipboyDrawText(title, PIPBOY_TEXT_ALIGNMENT_CENTER | PIPBOY_TEXT_STYLE_UNDERLINE, _colorTable[992]);
+
+    bool deck = ctrl_on_deck();
+    for (int index = 0; index < count; index++) {
+        const PipboyControl* entry = &(lines[index]);
+
+        if (entry->button == nullptr && entry->action == nullptr) {
+            if (spacious) {
+                pip_ctrl_line(nullptr, nullptr, _colorTable[992]);
+            }
+        } else if (entry->button == nullptr) {
+            pipboyDrawText(entry->action, PIPBOY_TEXT_STYLE_UNDERLINE, _colorTable[32747]);
+        } else if (deck) {
+            char button[64];
+            char action[96];
+            pip_ctrl_line(ctrl_deck_names(entry->button, button, sizeof(button)),
+                ctrl_deck_names(entry->action, action, sizeof(action)),
+                _colorTable[992]);
+        } else {
+            pip_ctrl_line(entry->button, entry->action, _colorTable[992]);
+        }
+    }
+
+    pipboyDrawBackButton(_colorTable[992]);
+
+    windowRefreshRect(gPipboyWindow, &gPipboyWindowContentRect);
+}
+
+// Realtime build (fallout1-ce): an FNV-1a hash of every quest's global variable. The quest autosave in
+// the main loop polls it and saves when it changes -- any step of any quest -- with no per-quest
+// thresholds to know. 0 before a game is loaded.
+unsigned int pipboy_quest_state_hash()
+{
+    if (gGameGlobalVars == nullptr || gGameGlobalVarsLength <= 0 || gQuestDescriptions == nullptr) {
+        return 0;
+    }
+
+    unsigned int h = 2166136261u;
+    for (int index = 0; index < gQuestsCount; index++) {
+        int gvar = gQuestDescriptions[index].gvar;
+        if (gvar <= 0 || gvar >= gGameGlobalVarsLength) {
+            continue;
+        }
+        h = (h ^ (unsigned int)gGameGlobalVars[gvar]) * 16777619u;
+    }
+    return h;
+}
+
 // 0x497004
 int pipboyOpen(int intent)
 {
@@ -419,10 +850,25 @@ int pipboyOpen(int intent)
     mouseGetPositionInWindow(gPipboyWindow, &gPipboyPreviousMouseX, &gPipboyPreviousMouseY);
     gPipboyLastEventTimestamp = getTicks();
 
+    // ⚠️ Every button must be seen RELEASED once before it acts in here -- LOCALS, so every visit
+    // starts disarmed (a screen opened with a button down reads it as a fresh press otherwise).
+    bool pipArmedA = false;
+    bool pipArmedB = false;
+
     while (true) {
         sharedFpsLimiter.mark();
 
+        // ⚠️ The frame comes down before anything can draw -- input below may repaint the whole
+        // content area, and the save-under is only valid until it does.
+        pip_hl_erase();
+
         int keyCode = inputGetInput();
+
+        // The pad: injects the very same event codes the mouse buttons report.
+        int padKey = pip_pad_keycode(&pipArmedA, &pipArmedB);
+        if (padKey != -1) {
+            keyCode = padKey;
+        }
 
         if (intent == PIPBOY_OPEN_INTENT_REST) {
             keyCode = 504;
@@ -477,9 +923,17 @@ int pipboyOpen(int intent)
             break;
         }
 
+        // ...and the frame back up at the bottom, over whatever the page looks like now.
+        if (gamepad_ui_get_controller() != nullptr) {
+            pip_hl_draw(pip_pad_sel);
+            windowRefresh(gPipboyWindow);
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    pip_hl_erase();
 
     pipboyWindowFree();
 
@@ -512,6 +966,7 @@ static int pipboyWindowInit(int intent)
     gPipboyLinesCount = PIPBOY_WINDOW_CONTENT_VIEW_HEIGHT / fontGetLineHeight() - 1;
     gPipboyWindowButtonStart = 0;
     _hot_back_line = 0;
+    ctrl_flag = 0;
 
     if (holodiskInit() == -1) {
         return -1;
@@ -1673,13 +2128,42 @@ static int _PrintAMList(int a1)
 static void pipboyHandleVideoArchive(int a1)
 {
     if (a1 == 1024) {
+        ctrl_flag = 0;
         pipboyWindowDestroyButtons();
         _view_page = pipboyRenderVideoArchive(-1);
         pipboyWindowCreateButtons(2, _view_page, false);
-    } else if (a1 >= 0 && a1 <= _view_page) {
+        return;
+    }
+
+    // A CONTROLS page is up: only its BACK button (528 -> 1025) does anything, back to the list.
+    if (ctrl_flag) {
+        if (a1 == 1025) {
+            soundPlayFile("ib1p1xx1");
+            pipboyDrawBackButton(_colorTable[32747]);
+            windowRefreshRect(gPipboyWindow, &gPipboyWindowContentRect);
+            inputPauseForTocks(200);
+            pipboyHandleVideoArchive(1024);
+        }
+        return;
+    }
+
+    if (a1 >= 0 && a1 <= _view_page) {
         soundPlayFile("ib1p1xx1");
 
         pipboyRenderVideoArchive(a1);
+
+        // CONTROLS is the last entry of the list and not a movie: _view_page is the line count the
+        // list returned, so it sits at _view_page.
+        if (a1 == _view_page) {
+            inputPauseForTocks(200);
+            pipboyWindowDestroyButtons();
+            ShowControlsPage(ctrl_entry, ctrl_lines, (int)(sizeof(ctrl_lines) / sizeof(ctrl_lines[0])));
+            pipboyWindowCreateButtons(0, 0, true);
+            // Vanilla never sets this, so its BACK buttons leak; ours is claimed and taken down again.
+            _hot_back_line = 1;
+            ctrl_flag = 1;
+            return;
+        }
 
         int movie;
         for (movie = 2; movie < 16; movie++) {
@@ -1759,6 +2243,12 @@ static int pipboyRenderVideoArchive(int a1)
 
         msg_num++;
     }
+
+    // CONTROLS -- the pad layout, always the LAST entry (the archive fills up as the game is played,
+    // and it must not shuffle around). pipboyHandleVideoArchive finds it at _view_page.
+    v8 = v5++;
+    pipboyDrawText(ctrl_entry, 0, v8 == v12 ? _colorTable[32747] : _colorTable[992]);
+    gPipboyCurrentLine++;
 
     windowRefreshRect(gPipboyWindow, &gPipboyWindowContentRect);
 
@@ -1916,6 +2406,10 @@ static void pipboyWindowCreateButtons(int start, int count, bool a3)
     gPipboyWindowButtonStart = start;
     gPipboyWindowButtonCount = count;
 
+    // A new list always starts on its first entry -- open a page, the selection is on the first thing.
+    pip_pad_sel = 0;
+    pip_page_has_back = a3;
+
     if (count != 0) {
         int y = start * height + PIPBOY_WINDOW_CONTENT_VIEW_Y;
         int eventCode = start + 505;
@@ -1962,6 +2456,7 @@ static void pipboyWindowDestroyButtons()
 
     gPipboyWindowButtonCount = 0;
     _hot_back_line = 0;
+    pip_page_has_back = false;
 }
 
 // 0x499A24

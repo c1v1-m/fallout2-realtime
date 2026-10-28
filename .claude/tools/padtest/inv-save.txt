@@ -1,0 +1,25 @@
+# New game straight to the temple, then the inventory and the save / load screens on the pad.
+# main menu: the highlight starts on NEW GAME
+8.0 tap A
+# selector: the frame starts on TAKE
+11.0 tap A
+# the intro movie
+15.0 tap A
+17.0 tap A
+# world: BACK opens the inventory, D-pad down a row, BACK closes it
+24.0 tap BACK
+26.0 tap DOWN
+28.0 tap BACK
+# START: the pause menu, SAVE GAME is highlighted; A opens the save screen
+31.0 tap START
+33.0 tap A
+# save screen: down two slots (wraps), B leaves without saving
+35.5 tap DOWN
+36.0 tap DOWN
+37.5 tap B
+# pause menu again: down -> LOAD GAME, A; up wraps to slot 10; B; B closes the pause menu
+39.5 tap DOWN
+40.0 tap A
+42.5 tap UP
+44.0 tap B
+46.0 tap B

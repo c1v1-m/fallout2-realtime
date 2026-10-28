@@ -1,0 +1,20 @@
+# F2 play-through: super mutants -- a minigun and a rocket launcher.
+name c-mutants
+map DESERT1.MAP
+seed 1
+duration 45
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude stat EN 8
+dude hp 400
+dude skill small_guns 150
+dude armor 17
+dude wield 23
+dude item 35 4
+dude item 40 4
+
+spawn 16777335 23100 rot 5 wield 12 item 35 4 hostile
+spawn 16777336 23500 rot 5 wield 13 item 14 4 hostile
+
+at 0 fight

@@ -35,6 +35,11 @@
 #include "text_object.h"
 #include "tile.h"
 
+// Realtime (fallout1-ce's combatai.cc changes, ported).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define AI_PACKET_CHEM_PRIMARY_DESIRE_COUNT (3)
@@ -1216,6 +1221,118 @@ static void _ai_run_away(Object* a1, Object* a2)
     }
 }
 
+// How willing this critter's AI packet is to fight, straight out of AI.TXT. Exported so realtime
+// combat can tell a GUARD from a shopkeeper without a table of its own (see rt_guard_danger_source).
+int combatai_aggression(Object* critter)
+{
+    if (critter == nullptr || FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER) {
+        return 0;
+    }
+
+    return aiGetPacket(critter)->aggression;
+}
+
+// REALTIME (combat_rt, rt_flee_step): vanilla's flee, split out of _combat_ai and _ai_run_away so the
+// realtime AI makes the SAME decisions without running a turn -- _ai_run_away ends in
+// _combat_turn_run(), which pumps the game loop and must never be entered from combat_rt_update.
+
+// Why _combat_ai would run this critter away at the start of its turn (its very first test): 0 = it
+// would not, 1 = already FLEEING, 2 = hurt the way its AI packet cannot stand (hurt_too_much),
+// 3 = below its packet's min_hp.
+int combatai_flee_reason(Object* critter)
+{
+    AiPacket* ai = aiGetPacket(critter);
+    CritterCombatData* combatData = &(critter->data.critter.combat);
+
+    if ((combatData->maneuver & CRITTER_MANUEVER_FLEEING) != 0) {
+        return 1;
+    }
+
+    if ((combatData->results & ai->hurt_too_much) != 0) {
+        return 2;
+    }
+
+    if (critterGetStat(critter, STAT_CURRENT_HIT_POINTS) < ai->min_hp) {
+        return 3;
+    }
+
+    return 0;
+}
+
+// _ai_run_away's choice without the run: the tile to flee to with `actionPoints` to spend -- straight
+// away from the dude first, then 60 degrees either side, from the full distance down -- or -1 when
+// there is none (cornered), or -2 when it is already max_dist from the dude, where vanilla stops
+// running and leaves the fight. Sets FLEEING / DISENGAGING exactly as _ai_run_away does.
+//
+// The candidates are tested with VANILLA'S 2000-node search (make_path_capped): asking with this
+// build's 12000 would turn every walled-off candidate into a full-budget failure.
+// ⚠️ NEVER OUT ONTO THE BLACK (fallout1-ce 2026-10-06): a candidate on the map's background is no
+// refuge; a runner backed up to the edge of the map is CORNERED (-1), as against a wall.
+int combatai_flee_tile(Object* critter, int actionPoints)
+{
+    CritterCombatData* combatData = &(critter->data.critter.combat);
+    AiPacket* ai = aiGetPacket(critter);
+
+    if (objectGetDistanceBetween(critter, gDude) >= ai->max_dist) {
+        combatData->maneuver |= CRITTER_MANEUVER_DISENGAGING;
+        return -2;
+    }
+
+    combatData->maneuver |= CRITTER_MANUEVER_FLEEING;
+
+    int rotation = tileGetRotationTo(gDude->tile, critter->tile);
+    int candidates[3];
+    for (int ap = actionPoints; ap > 0; ap--) {
+        candidates[0] = tileGetTileInDirection(critter->tile, rotation, ap);
+        candidates[1] = tileGetTileInDirection(critter->tile, (rotation + 1) % ROTATION_COUNT, ap);
+        candidates[2] = tileGetTileInDirection(critter->tile, (rotation + 5) % ROTATION_COUNT, ap);
+
+        for (int index = 0; index < 3; index++) {
+            int destination = candidates[index];
+            if (map_tile_is_background(destination, critter->elevation)) {
+                continue;
+            }
+            if (make_path_capped(critter, critter->tile, destination, nullptr, 1, 2000) > 0) {
+                return destination;
+            }
+        }
+    }
+
+    return -1;
+}
+
+// The AI packet's max_dist -- how far from the dude a fleeing critter runs before it stops (trace).
+int combatai_max_dist(Object* critter)
+{
+    return aiGetPacket(critter)->max_dist;
+}
+
+// REALTIME (combat_rt): the per-attack choices _ai_try_attack makes, exported so realtime makes the
+// SAME ones without running a turn. min_to_hit gates the shot, _ai_pick_hit_mode picks the mode,
+// _ai_called_shot its called_freq. _ai_called_shot tests the ENGINE AP field for the aimed cost --
+// the caller tops it up first and checks its own pool.
+int combatai_min_to_hit(Object* critter)
+{
+    return aiGetPacket(critter)->min_to_hit;
+}
+
+// Fallout 2: _ai_pick_hit_mode weighs the target too (area_attack_mode "be sure" / "be careful" test
+// the secondary mode's chance against it), so the hook takes it -- the one signature that differs
+// from fallout1-ce's (see the call in combat_rt.cc's rt_plan_attack).
+int combatai_pick_hit_mode(Object* critter, Object* weapon, Object* defender)
+{
+    if (defender == nullptr) {
+        return HIT_MODE_RIGHT_WEAPON_PRIMARY;
+    }
+
+    return _ai_pick_hit_mode(critter, weapon, defender);
+}
+
+int combatai_called_shot(Object* critter, Object* target, int hitMode)
+{
+    return _ai_called_shot(critter, target, hitMode);
+}
+
 // 0x42899C
 static int _ai_move_away(Object* a1, Object* a2, int a3)
 {
@@ -1753,6 +1870,33 @@ int _caiTeamCombatInit(Object** crittersList, int crittersListLength)
     return 0;
 }
 
+// ⚠️ REALTIME: THE TWO GROUPS OF AN ENCOUNTER FIGHT EACH OTHER (Fallout 2 Realtime 2026-10-24). An encounter
+// of exactly two groups ("Highwaymen FIGHTING Spore_Plants", any two -- the engine never reads the
+// AND / FIGHTING word itself) is set up by wmSetupRandomEncounter: _caiSetupTeamCombat names the two teams
+// and the combat it requests reaches _combat_begin, whose _caiTeamCombatInit gives EVERY critter of
+// each team the nearest critter of the other as whoHitMe. Realtime never runs _combat_begin, so only the
+// one pair named in the request ever fought and the rest stood about. _combat calls this instead, with
+// every critter on the floor; it does nothing unless a team fight was set up.
+int aiTeamCombatInitAtElevation(int elevation)
+{
+    if (_attackerTeamObj == nullptr || _targetTeamObj == nullptr) {
+        return 0;
+    }
+
+    int attackerTeam = _attackerTeamObj->data.critter.combat.team;
+    int defenderTeam = _targetTeamObj->data.critter.combat.team;
+
+    Object** critters = nullptr;
+    int count = objectListCreate(-1, elevation, OBJ_TYPE_CRITTER, &critters);
+    _caiTeamCombatInit(critters, count);
+    if (critters != nullptr) {
+        objectListFree(critters);
+    }
+
+    trace_event(TRACE_FLOW, "team-combat", "atkTeam=%d defTeam=%d critters=%d elev=%d", attackerTeam, defenderTeam, count, elevation);
+    return count;
+}
+
 // 0x4292C0
 void _caiTeamCombatExit()
 {
@@ -1810,6 +1954,55 @@ static bool _caiHasWeapPrefType(AiPacket* ai, int attackType)
     }
 
     return false;
+}
+
+// Exported under fallout1-ce's name so realtime combat can ask vanilla's own question -- "is this
+// weapon an upgrade on the one in the hand?". Fallout 2 ranks by the owner's AI packet (best_weapon
+// preference), so the owner is read off the weapons; there is no target to weigh.
+Object* ai_best_weapon(Object* weapon1, Object* weapon2)
+{
+    Object* owner = weapon1 != nullptr ? objectGetOwner(weapon1) : nullptr;
+    if (owner == nullptr && weapon2 != nullptr) {
+        owner = objectGetOwner(weapon2);
+    }
+    if (owner == nullptr || FID_TYPE(owner->fid) != OBJ_TYPE_CRITTER) {
+        return weapon1 != nullptr ? weapon1 : weapon2;
+    }
+
+    return _ai_best_weapon(owner, weapon1, weapon2, nullptr);
+}
+
+// ⚠️ A CRITTER REACHES FOR THE WEAPON IT IS GOOD WITH (fallout1-ce, 2026-10-22, his "ať NPC vytáhne nejlepší
+// zbraň, s kterou umí nejlépe ... přeci NPC co má lepší small guns nebude vytahovat rotačák, když má heavy
+// guns 30 %"). _ai_best_weapon looks only at the weapons, so a rifleman with a minigun in his pack swaps to
+// it however badly he handles big guns. In realtime the skill comes first: a weapon whose skill is more
+// than AI_WEAPON_SKILL_MARGIN points above the other's wins outright, and only near-equal skills fall back
+// to vanilla's order. Turn-based keeps vanilla's choice.
+#define AI_WEAPON_SKILL_MARGIN 10
+
+static Object* _ai_best_weapon(Object* attacker, Object* weapon1, Object* weapon2, Object* defender);
+
+static Object* ai_best_weapon_for(Object* critter, Object* weapon1, Object* weapon2, Object* defender)
+{
+    if (weapon1 != nullptr && weapon2 != nullptr && combat_rt_enabled()) {
+        int skill1 = skillGetValue(critter, weaponGetSkillForHitMode(weapon1, HIT_MODE_RIGHT_WEAPON_PRIMARY));
+        int skill2 = skillGetValue(critter, weaponGetSkillForHitMode(weapon2, HIT_MODE_RIGHT_WEAPON_PRIMARY));
+        if (skill1 - skill2 > AI_WEAPON_SKILL_MARGIN) {
+            return weapon1;
+        }
+        if (skill2 - skill1 > AI_WEAPON_SKILL_MARGIN) {
+            return weapon2;
+        }
+    }
+
+    return _ai_best_weapon(critter, weapon1, weapon2, defender);
+}
+
+// The shared realtime layer asks the same question with no defender (fallout1-ce signature): does the
+// pack hold something this critter is better with than what is in its hand?
+Object* ai_best_weapon_for(Object* critter, Object* weapon1, Object* weapon2)
+{
+    return ai_best_weapon_for(critter, weapon1, weapon2, nullptr);
 }
 
 // 0x4293BC
@@ -2038,7 +2231,7 @@ Object* _ai_search_inven_weap(Object* critter, bool checkRequiredActionPoints, O
             }
         }
 
-        bestWeapon = _ai_best_weapon(critter, bestWeapon, weapon, defender);
+        bestWeapon = ai_best_weapon_for(critter, bestWeapon, weapon, defender);
     }
 
     return bestWeapon;
@@ -3300,6 +3493,26 @@ int critterSetAiPacket(Object* object, int aiPacket)
 // 0x42B634
 int _combatai_msg(Object* critter, Attack* attack, int type, int delay)
 {
+    return combatai_msg_at(critter, type == AI_MESSAGE_TYPE_HIT ? attack->defenderHitLocation : 0, type, delay);
+}
+
+// The same with the hit location given instead of an Attack, for a bark registered after the attack
+// struct is gone (a realtime projectile flight, actions.cc).
+// CE: the text of one line of combatai.msg, by number (fallout1-ce combatai_msg_text) -- for a line the
+// realtime layer wants said for sure, where combatai_msg_at would roll the packet's taunt chance.
+bool combatai_msg_text(int num, char* out, size_t size)
+{
+    MessageListItem messageListItem;
+    messageListItem.num = num;
+    if (out == nullptr || size == 0 || !messageListGetItem(&gCombatAiMessageList, &messageListItem)) {
+        return false;
+    }
+    snprintf(out, size, "%s", messageListItem.text);
+    return true;
+}
+
+int combatai_msg_at(Object* critter, int hitLocation, int type, int delay)
+{
     if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return -1;
     }
@@ -3350,8 +3563,8 @@ int _combatai_msg(Object* critter, Attack* attack, int type, int delay)
         string = _target_str;
         break;
     case AI_MESSAGE_TYPE_HIT:
-        start = ai->hit[attack->defenderHitLocation].start;
-        end = ai->hit[attack->defenderHitLocation].end;
+        start = ai->hit[hitLocation].start;
+        end = ai->hit[hitLocation].end;
         string = _target_str;
         break;
     default:
@@ -3372,6 +3585,11 @@ int _combatai_msg(Object* critter, Attack* attack, int type, int delay)
     debugPrint("%s said message %d\n", objectGetName(critter), messageListItem.num);
     snprintf(string, AI_MESSAGE_SIZE, "%s", messageListItem.text);
 
+    // The taunts were never traced, so "they don't say intruder any more, they just start shooting"
+    // could not be checked. Chosen here; shown or dropped in _ai_print_msg.
+    trace_event(TRACE_COMBAT, "taunt", "pid=%d id=%d type=%d msg=%d text=%s",
+        critter->pid, critter->id, type, messageListItem.num, messageListItem.text);
+
     // TODO: Get rid of casts.
     return animationRegisterCallback(critter, (void*)type, (AnimationCallback*)_ai_print_msg, delay);
 }
@@ -3380,6 +3598,9 @@ int _combatai_msg(Object* critter, Attack* attack, int type, int delay)
 static int _ai_print_msg(Object* critter, int type)
 {
     if (textObjectsGetCount() > 0) {
+        // Vanilla shows one floating line at a time: a taunt is DROPPED while anything else floats.
+        trace_event(TRACE_COMBAT, "taunt-skip", "pid=%d id=%d why=text-on-screen count=%d",
+            critter->pid, critter->id, textObjectsGetCount());
         return 0;
     }
 
@@ -3401,6 +3622,24 @@ static int _ai_print_msg(Object* critter, int type)
         tileWindowRefreshRect(&rect, critter->elevation);
     }
 
+    return 0;
+}
+
+// CE: a script's line floated over the speaker in the same font and colours as that critter's combat
+// taunts (its AI packet). ⚠️ NOT SUBJECT TO THE ONE-AT-A-TIME RULE THAT DROPS TAUNTS: this line is the
+// script speaking, so it is always shown.
+int combatai_float_line(Object* critter, const char* text)
+{
+    if (critter == nullptr || text == nullptr || text[0] == '\0') {
+        return -1;
+    }
+
+    AiPacket* ai = aiGetPacket(critter);
+    Rect rect;
+    if (textObjectAdd(critter, (char*)text, ai->font, ai->color, ai->outline_color, &rect) != 0) {
+        return -1;
+    }
+    tileWindowRefreshRect(&rect, critter->elevation);
     return 0;
 }
 
@@ -3495,7 +3734,22 @@ void _combatai_check_retaliation(Object* a1, Object* a2)
 }
 
 // 0x42BA04
+static bool isWithinPerceptionImpl(Object* critter, Object* target, bool honorSneak);
+
 bool isWithinPerception(Object* critter, Object* target)
+{
+    return isWithinPerceptionImpl(critter, target, true);
+}
+
+// CE: the same test with the player's Sneak left out -- for a critter that is ALREADY fighting him
+// (rt_wants_to_stop, combat_rt.cc): sneaking hides you from those who have not found you, it does not
+// make you vanish in front of the one shooting at you.
+bool is_within_perception_unsneaked(Object* critter1, Object* critter2)
+{
+    return isWithinPerceptionImpl(critter1, critter2, false);
+}
+
+static bool isWithinPerceptionImpl(Object* critter, Object* target, bool honorSneak)
 {
     if (target == nullptr) {
         return false;
@@ -3510,7 +3764,7 @@ bool isWithinPerception(Object* critter, Object* target)
             maxDistance /= 2;
         }
 
-        if (target == gDude) {
+        if (honorSneak && target == gDude) {
             if (dudeIsSneaking()) {
                 maxDistance /= 4;
                 if (sneak > 120) {
@@ -3533,7 +3787,7 @@ bool isWithinPerception(Object* critter, Object* target)
         maxDistance = perception;
     }
 
-    if (target == gDude) {
+    if (honorSneak && target == gDude) {
         if (dudeIsSneaking()) {
             maxDistance /= 4;
             if (sneak > 120) {

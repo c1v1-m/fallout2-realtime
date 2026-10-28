@@ -414,6 +414,38 @@ static inline Object* obj_blocking_at(Object* a1, int tile_num, int elev) { retu
 static inline void dude_stand(Object* obj, int rotation, int fid) { _dude_stand(obj, rotation, fid); }
 // db_freadInt (plib/db/db.h)
 static inline int db_freadInt(DB_FILE* stream, int* i) { return fileReadInt32(stream, i); }
+// flush_input_buffer (plib/gnw/input.h)
+static inline void flush_input_buffer() { inputEventQueueReset(); }
+// obj_erase_object (game/object.h)
+static inline int obj_erase_object(Object* a1, Rect* a2) { return objectDestroy(a1, a2); }
+// set_game_time (game/scripts.h)
+static inline void set_game_time(int time) { gameTimeSetTime(time); }
+// game_time (game/scripts.h)
+static inline int game_time() { return gameTimeGetTime(); }
+// game_set_global_var (game/game.h)
+static inline int game_set_global_var(int var, int value) { return gameSetGlobalVar(var, value); }
+// map_set_global_var (game/map.h)
+static inline int map_set_global_var(int var, ProgramValue& value) { return mapSetGlobalVar(var, value); }
+// map_get_global_var (game/map.h)
+static inline int map_get_global_var(int var, ProgramValue& value) { return mapGetGlobalVar(var, value); }
+// map_load (game/map.h)
+static inline int map_load(char* fileName) { return mapLoadByName(fileName); }
+// pc_flag_on (game/critter.h)
+static inline void pc_flag_on(int pc_flag) { dudeEnableState(pc_flag); }
+// is_pc_flag (game/critter.h)
+static inline bool is_pc_flag(int pc_flag) { return dudeHasState(pc_flag); }
+// is_pc_sneak_working (game/critter.h)
+static inline bool is_pc_sneak_working() { return dudeIsSneaking(); }
+// item_w_skill (game/item.h)
+static inline int item_w_skill(Object* a1, int a2) { return weaponGetSkillForHitMode(a1, a2); }
+// isLoadingGame (game/loadsave.h)
+static inline int isLoadingGame() { return _isLoadingGame(); }
+// getSystemPalette (plib/color/color.h)
+static inline unsigned char* getSystemPalette() { return _getSystemPalette(); }
+// palette_set_entries (game/palette.h)
+static inline void palette_set_entries(unsigned char* palette, int start, int end) { paletteSetEntriesInRange(palette, start, end); }
+// critter_name (game/critter.h)
+static inline char* critter_name(Object* critter) { return critterGetName(critter); }
 // combat_is_shot_blocked (game/combat.h)
 static inline bool combat_is_shot_blocked(Object* a1, int from, int to, Object* a4, int* a5) { return _combat_is_shot_blocked(a1, from, to, a4, a5); }
 // combatai_msg (game/combatai.h)
@@ -446,3 +478,13 @@ static inline int action_use_an_object(Object* a1, Object* a2) { return _action_
 static inline int obj_examine(Object* a1, Object* a2) { return _obj_examine(a1, a2); }
 // obj_look_at (game/protinst.h)
 static inline int obj_look_at(Object* a1, Object* a2) { return _obj_look_at(a1, a2); }
+// item_w_caliber (game/item.h)
+static inline int item_w_caliber(Object* ammoOrWeapon) { return ammoGetCaliber(ammoOrWeapon); }
+// map_set_elevation (game/map.h)
+static inline int map_set_elevation(int elevation) { return mapSetElevation(elevation); }
+// dump_screen (plib/gnw/input.h)
+static inline void dump_screen() { takeScreenshot(); }
+// make_straight_path_func (game/anim.h)
+static inline int make_straight_path_func(Object* a1, int from, int to, StraightPathNode* pathNodes, Object** a5, int a6, PathBuilderCallback* callback) { return _make_straight_path_func(a1, from, to, pathNodes, a5, a6, callback); }
+// tile_num (game/tile.h)
+static inline int tile_num(int x, int y, int elevation, bool ignoreBounds = false) { return tileFromScreenXY(x, y, elevation, false); }

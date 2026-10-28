@@ -18,6 +18,12 @@
 #include "version.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's mainmenu.cc changes, ported).
+#include "game_mouse.h"
+#include "rt/game/gamepad_ui.h"
+
 namespace fallout {
 
 #define MAIN_MENU_WINDOW_WIDTH 640
@@ -25,6 +31,7 @@ namespace fallout {
 
 typedef enum MainMenuButton {
     MAIN_MENU_BUTTON_INTRO,
+    MAIN_MENU_BUTTON_CONTINUE, // Realtime build (fallout1-ce): the newest save
     MAIN_MENU_BUTTON_NEW_GAME,
     MAIN_MENU_BUTTON_LOAD_GAME,
     MAIN_MENU_BUTTON_OPTIONS,
@@ -35,6 +42,15 @@ typedef enum MainMenuButton {
 
 static int main_menu_fatal_error();
 static void main_menu_play_sound(const char* fileName);
+static void main_menu_draw_option(int index, int color);
+static void main_menu_gamepad_highlight(int sel);
+static void main_menu_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned int* lastMove);
+
+// Where the labels were drawn and in what colour (sfall can move the buttons and recolour the font),
+// kept so the controller highlight can redraw one label in place.
+static int gMainMenuLabelOffsetX = 0;
+static int gMainMenuLabelOffsetY = 0;
+static int gMainMenuLabelColor = 0;
 
 // 0x5194F0
 static int gMainMenuWindow = -1;
@@ -55,6 +71,7 @@ static unsigned int gMainMenuScreensaverDelay = 120000;
 // 0x519510
 static const int gMainMenuButtonKeyBindings[MAIN_MENU_BUTTON_COUNT] = {
     KEY_LOWERCASE_I, // intro
+    KEY_LOWERCASE_T, // continue (c is credits, o options: conTinue)
     KEY_LOWERCASE_N, // new game
     KEY_LOWERCASE_L, // load game
     KEY_LOWERCASE_O, // options
@@ -65,12 +82,60 @@ static const int gMainMenuButtonKeyBindings[MAIN_MENU_BUTTON_COUNT] = {
 // 0x519528
 static const int _return_values[MAIN_MENU_BUTTON_COUNT] = {
     MAIN_MENU_INTRO,
+    MAIN_MENU_CONTINUE,
     MAIN_MENU_NEW_GAME,
     MAIN_MENU_LOAD_GAME,
     MAIN_MENU_OPTIONS,
     MAIN_MENU_CREDITS,
     MAIN_MENU_EXIT,
 };
+
+// Realtime build (fallout1-ce): THE LABEL IS NO LONGER `9 + index` -- misc.msg 9..14 are INTRO / NEW GAME /
+// LOAD GAME / OPTIONS / CREDITS / EXIT in that order, and CONTINUE sits second. CONTINUE's text is
+// written here rather than given a msg id: misc.msg lives in MASTER.DAT, and a new id would mean a loose
+// copy of the whole file fighting every localisation.
+static const int gMainMenuLabelMsg[MAIN_MENU_BUTTON_COUNT] = { 9, -1, 10, 11, 12, 13, 14 };
+static const char* gMainMenuLabelLiteral[MAIN_MENU_BUTTON_COUNT] = { nullptr, "CONTINUE", nullptr, nullptr, nullptr, nullptr, nullptr };
+
+static const char* main_menu_label(int index)
+{
+    if (index < 0 || index >= MAIN_MENU_BUTTON_COUNT) {
+        return nullptr;
+    }
+    if (gMainMenuLabelLiteral[index] != nullptr) {
+        return gMainMenuLabelLiteral[index];
+    }
+    MessageListItem msg;
+    msg.num = gMainMenuLabelMsg[index];
+    if (messageListGetItem(&gMiscMessageList, &msg)) {
+        return msg.text;
+    }
+    return nullptr;
+}
+
+// Realtime build: SIX PLATES IN THE ART, SEVEN BUTTONS. mainmenu.frm paints one riveted plate per button
+// down the left, 41 px apart (tops at 13, 54 ... 218, each 37 rows by 191 columns from x 16), with the
+// sky and the Chosen One's shoulder below the sixth. The seventh is a copy of the second plate, laid
+// in the WINDOW buffer (never the cached art) at the next step down.
+#define MAIN_MENU_PLATE_X 16
+#define MAIN_MENU_PLATE_WIDTH 191
+#define MAIN_MENU_PLATE_TOP 13
+#define MAIN_MENU_PLATE_HEIGHT 37
+#define MAIN_MENU_PLATE_STEP 41
+#define MAIN_MENU_PLATE_ART_COUNT 6
+
+static void main_menu_extend_plates()
+{
+    int sourceTop = MAIN_MENU_PLATE_TOP + MAIN_MENU_PLATE_STEP; // the second plate
+    for (int plate = MAIN_MENU_PLATE_ART_COUNT; plate < MAIN_MENU_BUTTON_COUNT; plate++) {
+        int destTop = MAIN_MENU_PLATE_TOP + plate * MAIN_MENU_PLATE_STEP;
+        for (int y = 0; y < MAIN_MENU_PLATE_HEIGHT; y++) {
+            memcpy(gMainMenuWindowBuffer + MAIN_MENU_WINDOW_WIDTH * (destTop + y) + MAIN_MENU_PLATE_X,
+                gMainMenuWindowBuffer + MAIN_MENU_WINDOW_WIDTH * (sourceTop + y) + MAIN_MENU_PLATE_X,
+                MAIN_MENU_PLATE_WIDTH);
+        }
+    }
+}
 
 // 0x614840
 static int gMainMenuButtons[MAIN_MENU_BUTTON_COUNT];
@@ -119,6 +184,7 @@ int mainMenuWindowInit()
 
     blitBufferToBuffer(_mainMenuBackgroundFrmImage.getData(), 640, 480, 640, gMainMenuWindowBuffer, 640);
     _mainMenuBackgroundFrmImage.unlock();
+    main_menu_extend_plates();
 
     int oldFont = fontGetCurrent();
     fontSetCurrent(100);
@@ -209,11 +275,15 @@ int mainMenuWindowInit()
     if (fontSettingsSFall)
         fontSettings = fontSettingsSFall & 0xFF;
 
+    gMainMenuLabelOffsetX = offsetX;
+    gMainMenuLabelOffsetY = offsetY;
+    gMainMenuLabelColor = fontSettings;
+
     for (int index = 0; index < MAIN_MENU_BUTTON_COUNT; index++) {
-        msg.num = 9 + index;
-        if (messageListGetItem(&gMiscMessageList, &msg)) {
-            len = fontGetStringWidth(msg.text);
-            fontDrawText(gMainMenuWindowBuffer + offsetX + 640 * (offsetY + 42 * index - index + 20) + 126 - (len / 2), msg.text, 640 - (126 - (len / 2)) - 1, 640, fontSettings);
+        const char* label = main_menu_label(index);
+        if (label != nullptr) {
+            len = fontGetStringWidth(label);
+            fontDrawText(gMainMenuWindowBuffer + offsetX + 640 * (offsetY + 42 * index - index + 20) + 126 - (len / 2), label, 640 - (126 - (len / 2)) - 1, 640, fontSettings);
         }
     }
 
@@ -304,10 +374,40 @@ int mainMenuWindowHandleEvents()
 {
     _in_main_menu = true;
 
+    // Suppress the shared gamepad LEFT-STICK cursor snapping for the WHOLE title menu, right now --
+    // before the first inputGetInput() pumps the mouse hook. This menu drives its own D-pad / stick
+    // highlight below, so the snap (which moves the cursor to buttons and plays the hover sound) must
+    // never run here. Unconditional; harmless with no controller, cleared at the end.
+    gamepad_ui_set_self_nav(true);
+
     bool oldCursorIsHidden = cursorIsHidden();
     if (oldCursorIsHidden) {
         mouseShowCursor();
     }
+
+    // Gamepad menu navigation: highlight the selected option and move it with the D-pad / left stick,
+    // confirm with A. Only when a controller is present, so keyboard/mouse keeps the vanilla look.
+    SDL_GameController* pad = gamepad_ui_get_controller();
+
+    // ⚠️ THE HIGHLIGHT SURVIVES A SUB-SCREEN: this loop is re-entered every time something it
+    // launched comes back, and resetting to NEW GAME put the highlight one press away from throwing
+    // the session away ("vyskočím z options, kliknu A, skočí mi to na new game").
+    static int selection = MAIN_MENU_BUTTON_NEW_GAME;
+    if (selection < 0 || selection >= MAIN_MENU_BUTTON_COUNT) {
+        selection = MAIN_MENU_BUTTON_NEW_GAME;
+    }
+
+    bool padPrevUp = false;
+    bool padPrevDown = false;
+    bool padPrevA = false;
+    bool padEdgesSeeded = false;
+    bool cursorShown = true;
+    int cursorX = 0;
+    int cursorY = 0;
+    unsigned int cursorMove = getTicks();
+    // The controller "view" (highlight + hidden cursor) is set up LAZILY, the first frame a pad is
+    // actually present -- a wireless pad still waking would otherwise leave the menu dead.
+    bool padViewInit = false;
 
     unsigned int tick = getTicks();
 
@@ -316,6 +416,68 @@ int mainMenuWindowHandleEvents()
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        pad = gamepad_ui_get_controller();
+
+        if (pad != nullptr) {
+            // Re-assert every frame: keeps the shared hook's snap + A-as-click off for the whole menu.
+            gamepad_ui_set_self_nav(true);
+
+            if (!padViewInit) {
+                padViewInit = true;
+                main_menu_gamepad_highlight(selection);
+                windowRefresh(gMainMenuWindow);
+                // Hide the pointer (blank shape, not mouseHideCursor -- that gates the input hook),
+                // and do NOT teleport it: that left a ghost arrow behind.
+                mouseGetPosition(&cursorX, &cursorY);
+                gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                cursorShown = false;
+            }
+
+            SDL_GameControllerUpdate();
+
+            bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+                || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+            bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+                || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+            bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+
+            // ⚠️ SEED THE EDGES FROM THE LIVE STATE, ONCE: the A that just closed the preferences
+            // screen is still down, and it confirmed whatever the highlight sat on ("A stistknutí je
+            // new game").
+            if (!padEdgesSeeded) {
+                padEdgesSeeded = true;
+                padPrevUp = upNow;
+                padPrevDown = downNow;
+                padPrevA = aNow;
+            }
+
+            if (upNow && !padPrevUp) {
+                selection = (selection + MAIN_MENU_BUTTON_COUNT - 1) % MAIN_MENU_BUTTON_COUNT;
+                main_menu_gamepad_highlight(selection);
+                windowRefresh(gMainMenuWindow);
+                // NOTE: Uninline.
+                main_menu_play_sound("nmselec0");
+            } else if (downNow && !padPrevDown) {
+                selection = (selection + 1) % MAIN_MENU_BUTTON_COUNT;
+                main_menu_gamepad_highlight(selection);
+                windowRefresh(gMainMenuWindow);
+                // NOTE: Uninline.
+                main_menu_play_sound("nmselec0");
+            }
+
+            if (aNow && !padPrevA && keyCode == -1) {
+                // The very key the highlighted button sends, so the loop below handles it exactly
+                // like a click (credits + shift = quotes included).
+                keyCode = gMainMenuButtonKeyBindings[selection];
+            }
+
+            padPrevUp = upNow;
+            padPrevDown = downNow;
+            padPrevA = aNow;
+
+            main_menu_tick_cursor(&cursorShown, &cursorX, &cursorY, &cursorMove);
+        }
 
         for (int buttonIndex = 0; buttonIndex < MAIN_MENU_BUTTON_COUNT; buttonIndex++) {
             if (keyCode == gMainMenuButtonKeyBindings[buttonIndex] || keyCode == toupper(gMainMenuButtonKeyBindings[buttonIndex])) {
@@ -370,6 +532,13 @@ int mainMenuWindowHandleEvents()
         sharedFpsLimiter.throttle();
     }
 
+    // Always clear self-nav (set unconditionally at entry) so it never leaks into gameplay. The
+    // cursor restore only matters if we hid it (pad path).
+    gamepad_ui_set_self_nav(false);
+    if (pad != nullptr) {
+        gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+    }
+
     if (oldCursorIsHidden) {
         mouseHideCursor();
     }
@@ -395,6 +564,67 @@ static int main_menu_fatal_error()
 static void main_menu_play_sound(const char* fileName)
 {
     soundPlayFile(fileName);
+}
+
+// Redraw a single menu option's label in the given colour. The labels are solid glyph text at fixed
+// positions, so redrawing the same string at the same spot in a new colour cleanly overwrites the
+// old glyphs -- the highlight moves without touching the background.
+static void main_menu_draw_option(int index, int color)
+{
+    const char* label = main_menu_label(index);
+    if (label != nullptr) {
+        int oldFont = fontGetCurrent();
+        fontSetCurrent(104);
+        int len = fontGetStringWidth(label);
+        fontDrawText(gMainMenuWindowBuffer + gMainMenuLabelOffsetX + 640 * (gMainMenuLabelOffsetY + 42 * index - index + 20) + 126 - (len / 2),
+            label,
+            640 - (126 - (len / 2)) - 1,
+            640,
+            color);
+        fontSetCurrent(oldFont);
+    }
+}
+
+// Move the controller selection highlight to `sel`. Two cues, because the recolour alone did not
+// show reliably: (1) every label recoloured, the chosen one red; (2) the chosen row's button in its
+// PRESSED (menudown) image, the rest un-pressed -- through the button system's own draw.
+static void main_menu_gamepad_highlight(int sel)
+{
+    for (int index = 0; index < MAIN_MENU_BUTTON_COUNT; index++) {
+        main_menu_draw_option(index, index == sel ? _colorTable[32074] : gMainMenuLabelColor);
+        if (gMainMenuButtons[index] != -1) {
+            _win_register_button_image(gMainMenuButtons[index],
+                index == sel ? _mainMenuButtonPressedFrmImage.getData() : _mainMenuButtonNormalFrmImage.getData(),
+                _mainMenuButtonPressedFrmImage.getData(),
+                nullptr,
+                true);
+        }
+    }
+}
+
+// Auto-hide the menu cursor (controller only): hidden by default, revealed while the right stick or
+// the real mouse moves it, re-hidden after MAIN_MENU_CURSOR_IDLE_MS of no motion.
+#define MAIN_MENU_CURSOR_IDLE_MS 2000
+
+static void main_menu_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned int* lastMove)
+{
+    int x;
+    int y;
+    mouseGetPosition(&x, &y);
+
+    if (x != *lastX || y != *lastY) {
+        *lastMove = getTicks();
+        if (!*shown) {
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            *shown = true;
+        }
+    } else if (*shown && getTicksSince(*lastMove) >= MAIN_MENU_CURSOR_IDLE_MS) {
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        *shown = false;
+    }
+
+    *lastX = x;
+    *lastY = y;
 }
 
 } // namespace fallout

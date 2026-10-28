@@ -46,6 +46,15 @@
 #include "tile.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's inventry.cc changes, ported).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/game/interact_prompt.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define INVENTORY_WINDOW_X 80
@@ -232,7 +241,7 @@ static void inventoryRenderSummary();
 static int _inven_from_button(int keyCode, Object** outItem, Object*** outItemSlot, Object** outOwner);
 static void inventoryExamineItem(Object* critter, Object* item);
 static void inventoryWindowOpenContextMenu(int eventCode, int inventoryWindowType);
-static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* targetObj, bool isPlanting);
+static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* targetObj, bool isPlanting, int gpQuantity = 0);
 static int _barter_compute_value(Object* dude, Object* npc);
 static int _barter_attempt_transaction(Object* dude, Object* offerTable, Object* npc, Object* barterTable);
 static void _barter_move_inventory(Object* item, int quantity, int slotIndex, int indexOffset, Object* npc, Object* sourceTable, bool fromDude);
@@ -246,6 +255,43 @@ static void _draw_amount(int value, int inventoryWindowType);
 static int inventoryQuantitySelect(int inventoryWindowType, Object* item, int maximum);
 static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item);
 static int inventoryQuantityWindowFree(int inventoryWindowType);
+
+// --- REALTIME / CONTROLLER (fallout1-ce's inventry.cc changes, ported) ------------------------------
+//
+// ⚠️ FALLOUT 2 LISTS ARE SHOWN NEWEST FIRST: visible row r of a list is items[length - (r + offset + 1)],
+// where fallout1-ce's is items[r + offset]. Every helper below that turns a row into an item uses the
+// Fallout 2 mapping (the same one _inven_from_button uses).
+
+// How long A must be held on a barter slot before it describes the item instead of moving it.
+// Same 220 ms the pad wheels use, so every tap-vs-hold on the controller feels identical.
+#define BARTER_LOOK_HOLD_MS 220
+
+// How long a D-pad direction must be held before the inventory list starts auto-scrolling, and how
+// fast it steps once it does.
+#define INVEN_PAD_REPEAT_DELAY_MS 350
+#define INVEN_PAD_REPEAT_RATE_MS 70
+
+// ⚠️ THE TIMER WINDOW CAN PUT THE EXPLOSIVE DOWN TOO (fallout1-ce 2026-10-16, "nebo do artu přidat
+// tlačítko nastavit čas a položit?"). The window's PLACE (the plate under the clock, X on the pad)
+// sets the timer exactly as DONE does and also asks for the explosive to go on the ground; the one who
+// armed it reads the request back (inven_set_timer_place_requested) and drops it. The plate is the ALL
+// button's art from the move-items mode of this same window, with the label drawn into a COPY.
+#define MT_KEY_PLACE 5001
+#define MT_PLACE_W 94
+#define MT_PLACE_H 33
+static bool mt_place_requested = false;
+static unsigned char mt_place_up[MT_PLACE_W * MT_PLACE_H];
+static unsigned char mt_place_down[MT_PLACE_W * MT_PLACE_H];
+
+// True only while the normal inventory screen (inventoryOpen) is up: the controller's equip/close
+// shortcuts must not misfire inside loot, trade, or use-on screens that reuse the same window statics.
+static bool normal_inventory_open = false;
+
+static void inven_place_if_requested(Object* item, Object* owner, Object** handSlot);
+static void barter_warp_cursor(int sx, int sy);
+static void barter_draw_deal();
+void inven_explosive_dropped_notice();
+
 
 // 0x46E6D0
 static const int gSummaryStats[7] = {
@@ -518,10 +564,107 @@ static int inventoryMessageListFree()
     return 0;
 }
 
+// True if the mouse cursor is over either loot item panel (the player's or the
+// container's). The gamepad layer uses this so that tap-A over a panel does a
+// quick-take, while tap-A elsewhere (Done and other GNW buttons) does a normal
+// click instead.
+bool inven_loot_cursor_over_panel()
+{
+    if (gInventoryWindow == -1) {
+        return false;
+    }
+
+    if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_LEFT_SCROLLER_X, INVENTORY_LOOT_LEFT_SCROLLER_Y, INVENTORY_LOOT_LEFT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_LEFT_SCROLLER_Y)) {
+        return true;
+    }
+
+    if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_RIGHT_SCROLLER_X, INVENTORY_LOOT_RIGHT_SCROLLER_Y, INVENTORY_LOOT_RIGHT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_RIGHT_SCROLLER_Y)) {
+        return true;
+    }
+
+    return false;
+}
+
+// True if the cursor is over the normal/use-on inventory item list. The gamepad
+// layer uses this so tap-A over the list does a quick equip/use, while tap-A
+// elsewhere (Done and other GNW buttons) does a normal click instead.
+bool inven_normal_cursor_over_list()
+{
+    if (gInventoryWindow == -1) {
+        return false;
+    }
+
+    return mouseHitTestInWindow(gInventoryWindow, INVENTORY_SCROLLER_X, INVENTORY_SCROLLER_Y, INVENTORY_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_SCROLLER_Y);
+}
+
+// True if the cursor is over the body-armor slot of the normal inventory. The gamepad layer routes a
+// tap of A there to inven_gamepad_quick_normal, which takes the armor off (2026-10-10).
+bool inven_normal_cursor_over_armor()
+{
+    if (gInventoryWindow == -1) {
+        return false;
+    }
+
+    return mouseHitTestInWindow(gInventoryWindow, INVENTORY_ARMOR_SLOT_X, INVENTORY_ARMOR_SLOT_Y, INVENTORY_ARMOR_SLOT_MAX_X, INVENTORY_ARMOR_SLOT_MAX_Y);
+}
+
+// Gamepad D-pad up/down -> inventory list scroll. One step on the press, then HOLD TO REPEAT;
+// returns KEY_ARROW_UP / KEY_ARROW_DOWN (which the inventory loop already handles as scroll) or -1.
+// D-pad ONLY on purpose: the LEFT STICK already drives the cursor (gpui_menu_snap) in this modal
+// window, so using it here too would fight that. Read directly because gamepad_ui_tick doesn't run
+// inside this modal loop (same pattern as the load/save slot list).
+static int inven_gamepad_scroll_key()
+{
+    static bool prevUp = false;
+    static bool prevDown = false;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == NULL) {
+        prevUp = false;
+        prevDown = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+    bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+
+    // HOLD TO REPEAT. It used to be edge-only, so a long inventory meant one press per row --
+    // "zatÃ­m jde pouze klikat". Now a held direction keeps stepping: one row on the press, then a
+    // pause, then a steady stream, which is how every list on a controller behaves.
+    static unsigned int heldSince = 0;
+    static unsigned int lastRepeat = 0;
+
+    int keyCode = -1;
+    bool edge = (upNow && !prevUp) || (downNow && !prevDown);
+    unsigned int now = getTicks();
+
+    if (edge) {
+        heldSince = now;
+        lastRepeat = now;
+        keyCode = upNow && !prevUp ? KEY_ARROW_UP : KEY_ARROW_DOWN;
+    } else if (upNow || downNow) {
+        // Delay before the stream starts, so a deliberate single step never runs away, then a fixed
+        // interval between repeats.
+        if (now - heldSince >= INVEN_PAD_REPEAT_DELAY_MS
+            && now - lastRepeat >= INVEN_PAD_REPEAT_RATE_MS) {
+            lastRepeat = now;
+            keyCode = upNow ? KEY_ARROW_UP : KEY_ARROW_DOWN;
+        }
+    }
+
+    prevUp = upNow;
+    prevDown = downNow;
+    return keyCode;
+}
+
 // 0x46E7B0
 void inventoryOpen()
 {
-    if (isInCombat()) {
+    // In realtime there is no turn scheduler (the combat "warm" bit is set but _combat_whose_turn()
+    // never becomes the dude), so the vanilla turn-owner gate would refuse the inventory for the whole
+    // fight. Realtime is always "the dude's turn"; the AP gate below still applies.
+    if (isInCombat() && !combat_rt_enabled()) {
         if (_combat_whose_turn() != _inven_dude) {
             return;
         }
@@ -536,7 +679,17 @@ void inventoryOpen()
     if (isInCombat()) {
         if (_inven_dude == gDude) {
             int actionPointsRequired = 4 - 2 * perkGetRank(_inven_dude, PERK_QUICK_POCKETS);
-            if (actionPointsRequired > 0 && actionPointsRequired > gDude->data.critter.combat.ap) {
+
+            // Realtime keeps the engine combat.ap maxed (movement is free), so charge combat_rt's own
+            // pool instead: opening the inventory mid-fight costs AP just like vanilla.
+            bool affordable;
+            if (combat_rt_enabled()) {
+                affordable = actionPointsRequired <= 0 || combat_rt_spend_ap(actionPointsRequired);
+            } else {
+                affordable = actionPointsRequired <= 0 || actionPointsRequired <= gDude->data.critter.combat.ap;
+            }
+
+            if (!affordable) {
                 // You don't have enough action points to use inventory
                 MessageListItem messageListItem;
                 messageListItem.num = 19;
@@ -550,7 +703,7 @@ void inventoryOpen()
                 return;
             }
 
-            if (actionPointsRequired > 0) {
+            if (!combat_rt_enabled() && actionPointsRequired > 0) {
                 if (actionPointsRequired > gDude->data.critter.combat.ap) {
                     gDude->data.critter.combat.ap = 0;
                 } else {
@@ -568,10 +721,20 @@ void inventoryOpen()
     _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
     inventorySetCursor(INVENTORY_WINDOW_CURSOR_HAND);
 
+    normal_inventory_open = true;
+
     for (;;) {
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        // The pad's D-pad scrolls the item list (arrow keys the loop below already handles).
+        if (keyCode == -1) {
+            int padKey = inven_gamepad_scroll_key();
+            if (padKey != -1) {
+                keyCode = padKey;
+            }
+        }
 
         // SFALL: Close with 'I'.
         if (keyCode == KEY_ESCAPE || keyCode == KEY_UPPERCASE_I || keyCode == KEY_LOWERCASE_I) {
@@ -581,6 +744,13 @@ void inventoryOpen()
         if (_game_user_wants_to_quit != 0) {
             break;
         }
+
+        // Controller tap-A quick action: the gamepad layer sets a pending request from the input hook;
+        // it runs here (outside the hook) where the use/equip pipeline's redraws are safe.
+        if (gamepad_ui_take_quick_normal()) {
+            inven_gamepad_quick_normal();
+        }
+        gamepad_ui_inventory_tick(); // the LB / RB quick slots, kept in step
 
         _display_body(-1, INVENTORY_WINDOW_TYPE_NORMAL);
 
@@ -670,6 +840,8 @@ void inventoryOpen()
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    normal_inventory_open = false;
 
     _inven_dude = _stack[0];
     _adjust_fid();
@@ -1528,43 +1700,57 @@ static void _exit_inventory(bool shouldEnableIso)
     _gmouse_enable();
 
     if (_dropped_explosive) {
-        Attack attack;
-        attackInit(&attack, gDude, nullptr, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
-        attack.attackerFlags = DAM_HIT;
-        attack.tile = gDude->tile;
-        _compute_explosion_on_extras(&attack, 0, 0, 1);
-
-        Object* watcher = nullptr;
-        for (int index = 0; index < attack.extrasLength; index++) {
-            Object* critter = attack.extras[index];
-            if (critter != gDude
-                && critter->data.critter.combat.team != gDude->data.critter.combat.team
-                && statRoll(critter, STAT_PERCEPTION, 0, nullptr) >= ROLL_SUCCESS) {
-                _critter_set_who_hit_me(critter, gDude);
-
-                if (watcher == nullptr) {
-                    watcher = critter;
-                }
-            }
-        }
-
-        if (watcher != nullptr) {
-            if (!isInCombat()) {
-                CombatStartData combat;
-                combat.attacker = watcher;
-                combat.defender = gDude;
-                combat.actionPointsBonus = 0;
-                combat.accuracyBonus = 0;
-                combat.damageBonus = 0;
-                combat.minDamage = 0;
-                combat.maxDamage = INT_MAX;
-                combat.overrideAttackResults = 0;
-                scriptsRequestCombat(&combat);
-            }
-        }
-
+        inven_explosive_dropped_notice();
         _dropped_explosive = false;
     }
+
+    // ⚠️ THE BUMP LIVES HERE, NOT AT THE CALL SITES (fallout1-ce). Every inventory-family modal screen
+    // runs its own input loop while the pad's button edges sit in statics, so the button that closed
+    // the screen is still DOWN when gameplay resumes and its edge fires there (closing loot with B
+    // cycled the firing mode). Every inventory screen passes through here exactly once on the way out.
+    gamepad_ui_bump_input_epoch();
+}
+
+// Vanilla's answer to an armed explosive put down in front of people -- it runs as the inventory
+// closes after one was dropped: everyone of another team inside the blast who notices it takes it as
+// an attack by the dude. Out here so the pad's quick menu "put it down" answers the same way.
+void inven_explosive_dropped_notice()
+{
+    Attack attack;
+    attackInit(&attack, gDude, nullptr, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
+    attack.attackerFlags = DAM_HIT;
+    attack.tile = gDude->tile;
+    _compute_explosion_on_extras(&attack, 0, 0, 1);
+
+    Object* watcher = nullptr;
+    for (int index = 0; index < attack.extrasLength; index++) {
+        Object* critter = attack.extras[index];
+        if (critter != gDude
+            && critter->data.critter.combat.team != gDude->data.critter.combat.team
+            && statRoll(critter, STAT_PERCEPTION, 0, nullptr) >= ROLL_SUCCESS) {
+            _critter_set_who_hit_me(critter, gDude);
+
+            if (watcher == nullptr) {
+                watcher = critter;
+            }
+        }
+    }
+
+    if (watcher != nullptr) {
+        if (!isInCombat()) {
+            CombatStartData combat;
+            combat.attacker = watcher;
+            combat.defender = gDude;
+            combat.actionPointsBonus = 0;
+            combat.accuracyBonus = 0;
+            combat.damageBonus = 0;
+            combat.minDamage = 0;
+            combat.maxDamage = INT_MAX;
+            combat.overrideAttackResults = 0;
+            scriptsRequestCombat(&combat);
+        }
+    }
+
 }
 
 // 0x46FDF4
@@ -1721,6 +1907,22 @@ static void _display_inventory(int stackOffset, int dragSlotIndex, int inventory
         if (gInventoryArmor != nullptr) {
             int inventoryFid = itemGetInventoryFid(gInventoryArmor);
             artRender(inventoryFid, windowBuffer + INVENTORY_WINDOW_WIDTH * INVENTORY_ARMOR_SLOT_Y + INVENTORY_ARMOR_SLOT_X, INVENTORY_LARGE_SLOT_WIDTH, INVENTORY_LARGE_SLOT_HEIGHT, INVENTORY_WINDOW_WIDTH);
+        }
+
+        // CE: the pad's button hints in each hand box -- A into the LEFT hand, B into the RIGHT.
+        // ⚠️ These letters are a PROMISE: inven_gamepad_quick_normal must put an A-tapped item in the A box.
+        if (gamepad_ui_get_controller() != nullptr) {
+            int oldFont = fontGetCurrent();
+            fontSetCurrent(101);
+
+            int hintY = INVENTORY_LEFT_HAND_SLOT_Y + INVENTORY_LARGE_SLOT_HEIGHT - fontGetLineHeight() - 2;
+
+            fontDrawText(windowBuffer + INVENTORY_WINDOW_WIDTH * hintY + (INVENTORY_LEFT_HAND_SLOT_X + 3),
+                "A", INVENTORY_LARGE_SLOT_WIDTH, INVENTORY_WINDOW_WIDTH, _colorTable[32747]);
+            fontDrawText(windowBuffer + INVENTORY_WINDOW_WIDTH * hintY + (INVENTORY_RIGHT_HAND_SLOT_X + 3),
+                "B", INVENTORY_LARGE_SLOT_WIDTH, INVENTORY_WINDOW_WIDTH, _colorTable[32747]);
+
+            fontSetCurrent(oldFont);
         }
     }
 
@@ -1945,11 +2147,16 @@ static void _display_inventory_info(Object* item, int quantity, unsigned char* d
 }
 
 // 0x470650
+// CE: set to draw the next _display_body at once, past its rotation throttle -- the loot window's
+// switch to another body must show that body even when the last one was drawn a moment ago.
+static bool display_body_force = false;
+
 static void _display_body(int fid, int inventoryWindowType)
 {
-    if (getTicksSince(gInventoryWindowDudeRotationTimestamp) < INVENTORY_NORMAL_WINDOW_PC_ROTATION_DELAY) {
+    if (!display_body_force && getTicksSince(gInventoryWindowDudeRotationTimestamp) < INVENTORY_NORMAL_WINDOW_PC_ROTATION_DELAY) {
         return;
     }
+    display_body_force = false;
 
     gInventoryWindowDudeRotation += 1;
 
@@ -2450,6 +2657,377 @@ static void _inven_pickup(int buttonCode, int indexOffset)
             _inven_update_lighting(item);
         }
     }
+}
+
+// Controller shortcut: equip the inventory-list item under the cursor into a
+// hand slot (hand == HAND_LEFT or HAND_RIGHT). Mirrors the list-item -> hand-slot
+// drop in _inven_pickup, but is driven by a button press instead of a mouse drag.
+// Returns false (no-op) unless the normal inventory is open and the cursor is
+// over a populated list slot.
+bool inven_equip_under_cursor(int hand)
+{
+    if (!normal_inventory_open || gInventoryWindow == -1) {
+        return false;
+    }
+
+    // OVER A HAND SLOT = TAKE THAT HAND'S ITEM BACK OUT, rather than equip. Without this there was
+    // no way to empty a hand from the inventory at all: X/B only ever worked over the item LIST, so
+    // the slots were write-only and you could swap weapons forever but never end up empty-handed
+    // ("v inventory mi nejdou odebrat itemy z A a B"). Which hand is decided by the SLOT under the
+    // cursor, not by which button was pressed -- pointing at a thing and pressing either button
+    // should do what you are pointing at.
+    bool overLeft = mouseHitTestInWindow(gInventoryWindow, INVENTORY_LEFT_HAND_SLOT_X, INVENTORY_LEFT_HAND_SLOT_Y,
+        INVENTORY_LEFT_HAND_SLOT_MAX_X, INVENTORY_LEFT_HAND_SLOT_MAX_Y);
+    bool overRight = mouseHitTestInWindow(gInventoryWindow, INVENTORY_RIGHT_HAND_SLOT_X, INVENTORY_RIGHT_HAND_SLOT_Y,
+        INVENTORY_RIGHT_HAND_SLOT_MAX_X, INVENTORY_RIGHT_HAND_SLOT_MAX_Y);
+
+    if (overLeft || overRight) {
+        Object** handSlot = overLeft ? &gInventoryLeftHandItem : &gInventoryRightHandItem;
+        if (*handSlot == NULL) {
+            return false; // already empty -- let the caller refuse audibly
+        }
+
+        // Back into the inventory working copy, then clear the slot. itemAdd is what
+        // _switch_hand uses to return a displaced hand item, so the bookkeeping matches the
+        // engine's own path and the OK button commits it normally.
+        if (itemAdd(_inven_dude, *handSlot, 1) != 0) {
+            return false;
+        }
+        *handSlot = NULL;
+
+        _adjust_fid();
+        inventoryRenderSummary();
+        _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+        windowRefresh(gInventoryWindow);
+        soundPlayFile("iputdown");
+        return true;
+    }
+
+    // Same list region _inven_pickup uses to decide a drop targets the list.
+    if (!mouseHitTestInWindow(gInventoryWindow, INVENTORY_SCROLLER_X, INVENTORY_SCROLLER_Y, INVENTORY_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_SCROLLER_Y)) {
+        return false;
+    }
+
+    int x;
+    int y;
+    mouseGetPositionInWindow(gInventoryWindow, &x, &y);
+
+    // Row under the cursor (matches _inven_pickup's (y - 39) / 48 mapping).
+    int displayIndex = (y - 39) / INVENTORY_SLOT_HEIGHT;
+    if (displayIndex < 0 || displayIndex >= gInventorySlotsCount) {
+        return false;
+    }
+
+    int itemIndex = _stack_offset[_curr_stack] + displayIndex;
+    if (itemIndex >= _pud->length) {
+        return false;
+    }
+
+    Object* item = _pud->items[_pud->length - (itemIndex + 1)].item;
+    if (item == NULL) {
+        return false;
+    }
+
+    // a3 (source slot) is NULL for a list item; a4 != -1 makes _switch_hand pull
+    // the item out of the inventory and return any displaced hand item to it.
+    Object** handSlot = (hand == HAND_RIGHT) ? &gInventoryRightHandItem : &gInventoryLeftHandItem;
+    _switch_hand(item, handSlot, NULL, 1000 + displayIndex);
+
+    _adjust_fid();
+    inventoryRenderSummary();
+    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+    windowRefresh(gInventoryWindow);
+    soundPlayFile("iputdown");
+    return true;
+}
+
+// Controller shortcut: WEAR the inventory-list armor under the cursor (into the body
+// armor slot), instead of dropping it into a hand. Mirrors the list-item -> armor-slot
+// drop in _inven_pickup (the ITEM_TYPE_ARMOR branch over INVENTORY_ARMOR_SLOT), driven
+// by a button press rather than a mouse drag: pull the item from the list, return any
+// currently-worn armor to the list, run _adjust_ac, and set it as worn. If the displaced
+// armor can't fit back in the inventory the swap is rolled back (item stays in the list).
+// Returns false (no-op) unless the normal inventory is open and ARMOR is under the cursor.
+Object* inven_list_item_under_cursor()
+{
+    if (!normal_inventory_open || gInventoryWindow == -1) {
+        return NULL;
+    }
+    // Same list region and row mapping as inven_equip_under_cursor.
+    if (!mouseHitTestInWindow(gInventoryWindow, INVENTORY_SCROLLER_X, INVENTORY_SCROLLER_Y, INVENTORY_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_SCROLLER_Y)) {
+        return NULL;
+    }
+    int x;
+    int y;
+    mouseGetPositionInWindow(gInventoryWindow, &x, &y);
+    int displayIndex = (y - 39) / INVENTORY_SLOT_HEIGHT;
+    if (displayIndex < 0 || displayIndex >= gInventorySlotsCount) {
+        return NULL;
+    }
+    int itemIndex = _stack_offset[_curr_stack] + displayIndex;
+    if (itemIndex >= _pud->length) {
+        return NULL;
+    }
+    return _pud->items[_pud->length - (itemIndex + 1)].item;
+}
+
+// A DRUG TAKEN INSIDE THE INVENTORY IS FREE, AS IN VANILLA (fallout1-ce 2026-10-19). For a few minutes it
+// cost 2 AP (1 with Quick Pockets) -- the screen stops the world, and opening it for 4 AP bought any
+// number of stimpaks -- and then he took it back ("tak asi to nemusí stát už 2 AP", pick "Zdarma, jako
+// ve vanille"): a stimpak heals over time in a fight now (combat_rt_heal_over_time), and while the
+// screen is open nothing comes in at all. What you pay is the opening.
+
+bool inven_wear_under_cursor()
+{
+    if (!normal_inventory_open || gInventoryWindow == -1) {
+        return false;
+    }
+
+    if (!mouseHitTestInWindow(gInventoryWindow, INVENTORY_SCROLLER_X, INVENTORY_SCROLLER_Y, INVENTORY_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_SCROLLER_Y)) {
+        return false;
+    }
+
+    int x;
+    int y;
+    mouseGetPositionInWindow(gInventoryWindow, &x, &y);
+
+    int displayIndex = (y - 39) / INVENTORY_SLOT_HEIGHT;
+    if (displayIndex < 0 || displayIndex >= gInventorySlotsCount) {
+        return false;
+    }
+
+    int itemIndex = _stack_offset[_curr_stack] + displayIndex;
+    if (itemIndex >= _pud->length) {
+        return false;
+    }
+
+    Object* item = _pud->items[_pud->length - (itemIndex + 1)].item;
+    if (item == NULL || itemGetType(item) != ITEM_TYPE_ARMOR) {
+        return false;
+    }
+
+    // Already worn (cursor over the same object) -- nothing to do.
+    if (item == gInventoryArmor) {
+        return false;
+    }
+
+    Object* oldArmor = gInventoryArmor;
+
+    // Pull the to-wear item out of the inventory list.
+    itemRemove(_inven_dude, item, 1);
+
+    // Return any currently-worn armor to the inventory list. If it won't fit, roll back.
+    int addFailed = 0;
+    if (oldArmor != NULL) {
+        gInventoryArmor = NULL;
+        addFailed = itemAdd(_inven_dude, oldArmor, 1);
+    }
+
+    if (addFailed != 0) {
+        gInventoryArmor = oldArmor;
+        itemAdd(_inven_dude, item, 1);
+        return false;
+    }
+
+    _adjust_ac(_stack[0], oldArmor, item);
+    gInventoryArmor = item;
+
+    _adjust_fid();
+    inventoryRenderSummary();
+    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+    windowRefresh(gInventoryWindow);
+    soundPlayFile("iputdown");
+    return true;
+}
+
+// Controller quick-action for the player's own (normal) inventory list: a tap of
+// A on a list item does the most useful one-shot action without any popup --
+// drugs and use-on-self items are used, everything else is equipped into the
+// hand box labelled "A" (the left hand). Mirrors inventoryWindowOpenContextMenu's NORMAL-window
+// USE branch for the use case and inven_equip_under_cursor for the equip case,
+// so it respects the inventory screen's working-copy bookkeeping. Hold A / RB->A
+// still opens the full Use/Drop/Look popup. Returns true if it acted.
+bool inven_gamepad_quick_normal()
+{
+    if (!normal_inventory_open || gInventoryWindow == -1) {
+        return false;
+    }
+
+    // ⚠️ A ON THE ARMOR SLOT TAKES THE ARMOR OFF (2026-10-10): *"body armour mi nejde sundat"*. Vanilla
+    // only undresses by DRAGGING the armor from its slot onto the list, and the pad's A is one click --
+    // the drag ended on the slot it started from, so the armor went straight back on and the pad had
+    // no way to take it off at all (A on the list already PUTS it on: inven_wear_under_cursor). This
+    // mirrors the drag's drop-onto-list branch in _inven_pickup: back into the bag, _adjust_ac, and if
+    // the bag cannot take it the armor stays worn.
+    if (inven_normal_cursor_over_armor()) {
+        if (gInventoryArmor == NULL) {
+            return false;
+        }
+
+        Object* armor = gInventoryArmor;
+        gInventoryArmor = NULL;
+        if (itemAdd(_inven_dude, armor, 1) != 0) {
+            gInventoryArmor = armor;
+            soundPlayFile("iisxxxx1");
+            return true;
+        }
+
+        _adjust_ac(_stack[0], armor, NULL);
+        _adjust_fid();
+        inventoryRenderSummary();
+        _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+        windowRefresh(gInventoryWindow);
+        soundPlayFile("iputdown");
+        return true;
+    }
+
+    // Same list region _inven_pickup/inven_equip_under_cursor use.
+    if (!mouseHitTestInWindow(gInventoryWindow, INVENTORY_SCROLLER_X, INVENTORY_SCROLLER_Y, INVENTORY_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_SCROLLER_Y)) {
+        return false;
+    }
+
+    int x;
+    int y;
+    mouseGetPositionInWindow(gInventoryWindow, &x, &y);
+
+    int displayIndex = (y - 39) / INVENTORY_SLOT_HEIGHT;
+    if (displayIndex < 0 || displayIndex >= gInventorySlotsCount) {
+        return false;
+    }
+
+    int itemIndex = _stack_offset[_curr_stack] + displayIndex;
+    if (itemIndex >= _pud->length) {
+        return false;
+    }
+
+    int keyCode = 1000 + displayIndex;
+    Object* item;
+    Object** v43;
+    Object* v41;
+    if (_inven_from_button(keyCode, &item, &v43, &v41) == 0) {
+        return false;
+    }
+
+    int itemType = itemGetType(item);
+
+    // Ammo loads into a compatible equipped weapon (right hand preferred) rather
+    // than going to a hand slot, reusing the engine's drag-ammo-onto-weapon path
+    // (loads one ammo object, no quantity prompt). weaponCanBeReloadedWith also rejects
+    // a weapon already holding a DIFFERENT ammo type (it must be unloaded first
+    // via the popup), in which case no weapon matches and this is a no-op.
+    if (itemType == ITEM_TYPE_AMMO) {
+        // Same "active hand first" rule as the equip fallback below: reload the weapon the
+        // interface bar is showing, and only fall back to the other hand when that one cannot
+        // take this ammo. Only reachable with a reloadable weapon in BOTH hands, but the old
+        // hardcoded right-hand preference would then load the gun you are not holding.
+        int ammoActive = interfaceGetCurrentHand() != 0 ? HAND_RIGHT : HAND_LEFT;
+        Object* first = ammoActive == HAND_RIGHT ? gInventoryRightHandItem : gInventoryLeftHandItem;
+        Object* second = ammoActive == HAND_RIGHT ? gInventoryLeftHandItem : gInventoryRightHandItem;
+
+        Object* weapon = NULL;
+        if (first != NULL && weaponCanBeReloadedWith(first, item)) {
+            weapon = first;
+        } else if (second != NULL && weaponCanBeReloadedWith(second, item)) {
+            weapon = second;
+        }
+
+        if (weapon != NULL) {
+            _drop_ammo_into_weapon(weapon, item, v43, 1, keyCode);
+            _adjust_fid();
+            inventoryRenderSummary();
+            _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+            windowRefresh(gInventoryWindow);
+        }
+        return true;
+    }
+
+    // Armor is WORN (body slot), not dropped into a hand -- a tap of A on armor should
+    // put it on. (The hand-equip fallback below is for weapons/everything else.)
+    if (itemType == ITEM_TYPE_ARMOR) {
+        return inven_wear_under_cursor();
+    }
+
+    // Drugs and items you can use ON YOURSELF get used; weapons (and anything else) are equipped
+    // into a free hand.
+    //
+    // ⚠️ proto_action_can_use_ON is deliberately NOT part of this test, though it used to be. A
+    // use-ON item -- the rope, a lockpick, a doctor's bag -- cannot do anything from an inventory
+    // slot: it needs a TARGET, and the only way to give it one is to hold it and aim the engine's
+    // targeting cursor at something. Treating it as "use" meant A on the rope tried to use it on
+    // nothing instead of putting it in hand, so there was no way to arm it at all ("provaz se
+    // nechce dÃ¡t do Ã¡Äka, protoÅ¾e to bere jako pouÅ¾Ã­t"). can_use (use on SELF) still gets used --
+    // that one genuinely works from the list.
+    bool useIt = itemType == ITEM_TYPE_DRUG
+        || (itemType != ITEM_TYPE_WEAPON && _proto_action_can_use(item->pid));
+
+    // HISTORY (report 1 below). A's target used to be "right if it is free, else left", so with
+    // BOTH hands empty the item always landed in the right one -- the slot B equips -- no matter
+    // which hand the interface bar was actually showing ("mÃ¡m prÃ¡zdnÃ© ruce a kdyÅ¾ kliknu Ã¡Äkem na
+    // item, tak se dÃ¡ do BÄka slotu"). It only showed up with empty hands because with one hand
+    // occupied the fallback happened to pick the free one, which is what you wanted anyway.
+    //
+    // ⚠️ WHICH HAND A FILLS: THE ONE WITH "A" PRINTED ON IT. The two hand boxes carry the pad's own
+    // hints -- "A" on the LEFT hand, "B" on the RIGHT (_display_inventory, the CE hint block) -- and
+    // B already equips into the B box. A has to do the same with its box, always, replacing what is
+    // in it (that item goes back to the list).
+    //
+    // Every one of his three reports about this was the same thing, and it took three rounds to see
+    // it because the second one was misread:
+    //   1. empty hands, A on an item -> it landed in B: the rule was "right if free" (the paragraph
+    //      above, kept for its quote);
+    //   2. "mám zbraň v A a kliknu na jinou zbraň A a hodí se B! ať nahradí A" -- which I took to mean
+    //      "the hand the interface bar shows", and A was made to fill the ACTIVE hand;
+    //   3. 2026-10-04, with the bar showing the right hand: "kliknu na zbraň áčkem a dá se mi do
+    //      Béčka a to nemám v áčku žádné zbraně".
+    // A = the A box. Which hand is ACTIVE is Y's business on the interface bar, not A's.
+    if (!useIt) {
+        return inven_equip_under_cursor(HAND_LEFT);
+    }
+
+    if (itemType == ITEM_TYPE_DRUG) {
+        if (_item_d_take_drug(_stack[0], item)) {
+            if (v43 != NULL) {
+                *v43 = NULL;
+            } else {
+                itemRemove(v41, item, 1);
+            }
+
+            _obj_connect(item, gDude->tile, gDude->elevation, NULL);
+            _obj_destroy(item);
+        }
+        interfaceRenderHitPoints(true);
+    } else {
+        if (v43 == NULL) {
+            itemRemove(v41, item, 1);
+        }
+
+        int rc;
+        if (_proto_action_can_use(item->pid)) {
+            rc = _protinst_use_item(_stack[0], item);
+        } else {
+            rc = _protinst_use_item_on(_stack[0], _stack[0], item);
+        }
+
+        if (rc == 1) {
+            if (v43 != NULL) {
+                *v43 = NULL;
+            }
+
+            _obj_connect(item, gDude->tile, gDude->elevation, NULL);
+            _obj_destroy(item);
+        } else {
+            if (v43 == NULL) {
+                itemAdd(v41, item, 1);
+            }
+            inven_place_if_requested(item, v41, v43);
+        }
+    }
+
+    _adjust_fid();
+    inventoryRenderSummary();
+    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+    windowRefresh(gInventoryWindow);
+    return true;
 }
 
 // 0x4714E0
@@ -3523,6 +4101,15 @@ static int _inven_from_button(int keyCode, Object** outItem, Object*** outItemSl
 // 0x472D24
 void inventoryRenderItemDescription(char* string)
 {
+    // Realtime: a copy -- the word wrapping below writes into the text, and the realtime modules pass
+    // string literals (inven_display_msg). See displayMonitorAddMessage, the same crash on the Deck.
+    char copy[1024];
+    if (string != nullptr) {
+        strncpy(copy, string, sizeof(copy) - 1);
+        copy[sizeof(copy) - 1] = '\0';
+        string = copy;
+    }
+
     int oldFont = fontGetCurrent();
     fontSetCurrent(101);
 
@@ -3814,6 +4401,8 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
 
     int menuItemIndex = 0;
     int previousMouseY = y;
+    // The gamepad layer feeds this hold-drag popup (the left stick moves mouse Y).
+    gamepad_ui_set_action_popup_active(true);
     while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) == 0) {
         sharedFpsLimiter.mark();
 
@@ -3821,6 +4410,18 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
 
         if (inventoryWindowType == INVENTORY_WINDOW_TYPE_NORMAL) {
             _display_body(-1, INVENTORY_WINDOW_TYPE_NORMAL);
+        }
+
+        // D-pad up/down steps the highlighted option directly; A (left-button up) confirms.
+        int dpad = gamepad_ui_action_popup_dpad();
+        if (dpad < 0 && menuItemIndex > 0) {
+            menuItemIndex--;
+            gameMouseHighlightActionMenuItemAtIndex(menuItemIndex);
+            windowRefreshRect(gInventoryWindow, &rect);
+        } else if (dpad > 0 && menuItemIndex < actionMenuItemsLength - 1) {
+            menuItemIndex++;
+            gameMouseHighlightActionMenuItemAtIndex(menuItemIndex);
+            windowRefreshRect(gInventoryWindow, &rect);
         }
 
         int x;
@@ -3842,6 +4443,7 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+    gamepad_ui_set_action_popup_active(false);
 
     buttonDestroy(btn);
 
@@ -3972,6 +4574,7 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
                 if (itemSlot == nullptr) {
                     itemAdd(owner, item, 1);
                 }
+                inven_place_if_requested(item, owner, itemSlot);
             }
         }
         break;
@@ -4019,7 +4622,162 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
     _adjust_fid();
 }
 
+// CE: loot-window panel jump. Pushing the left stick / D-pad LEFT snaps the pointer to the
+// first (top) slot of YOUR inventory (left panel); RIGHT snaps it to the first slot of the
+// container/corpse (right panel). Up/down within a panel is still the shared cursor snap
+// (gpui_menu_snap); this only overrides the left/right cross-panel jump so entering a side
+// always lands on its first item instead of whatever row was nearest. Read SDL directly --
+// gamepad_ui_tick doesn't run inside inventoryOpenLooting's modal loop. Runs after inputGetInput, so its
+// warp wins over gpui's same-frame horizontal snap.
+static void loot_gamepad_panel_jump(int gInventoryWindow)
+{
+    static bool prevL = false;
+    static bool prevR = false;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == NULL) {
+        prevL = false;
+        prevR = false;
+        return;
+    }
+
+    SDL_GameControllerUpdate();
+    Sint16 lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+    bool lNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0 || lx < -16000;
+    bool rNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0 || lx > 16000;
+
+    Rect winRect;
+    windowGetRect(gInventoryWindow, &winRect);
+
+    if (lNow && !prevL) {
+        barter_warp_cursor(winRect.left + INVENTORY_LOOT_LEFT_SCROLLER_X + INVENTORY_SLOT_WIDTH / 2,
+            winRect.top + INVENTORY_LOOT_LEFT_SCROLLER_Y + INVENTORY_SLOT_HEIGHT / 2);
+    } else if (rNow && !prevR) {
+        barter_warp_cursor(winRect.left + INVENTORY_LOOT_RIGHT_SCROLLER_X + INVENTORY_SLOT_WIDTH / 2,
+            winRect.top + INVENTORY_LOOT_RIGHT_SCROLLER_Y + INVENTORY_SLOT_HEIGHT / 2);
+    }
+
+    prevL = lNow;
+    prevR = rNow;
+}
+
 // 0x473904
+// CE: A PILE OF BODIES IS LOOTED FROM ONE WINDOW (fallout1-ce 2026-10-22, "jak vymyslíme lootování mnoho
+// mrtvých postav na jednom místě?" -> his pick "vzít vše + další mrtvola"). Vanilla's arrows beside the
+// body (KEY_PAGE_UP / KEY_PAGE_DOWN, LB / RB on the pad) only stepped through critters dead or out cold
+// on the SAME TILE as the one opened. They now also reach every dead body that still carries something
+// within INVENTORY_LOOT_NEARBY_TILES of the dude and in his sight (interact_prompt_sees: nothing behind a
+// wall), nearest first, and skip the ones already emptied. Under the body, "2/5" says where you are.
+// Each body is still its own inventory, as in vanilla.
+#define INVENTORY_LOOT_NEARBY_TILES 3
+#define INVENTORY_LOOT_BODIES_MAX 16
+static int loot_body_index = 0;
+static int loot_body_count = 0; // under 2: no counter
+
+// The body opened first, then vanilla's same-tile ones and the nearby ones, nearest first.
+static int loot_collect_bodies(Object* first, Object** out, int max)
+{
+    int count = 0;
+    out[count++] = first;
+
+    for (Object* obj = objectFindFirstAtElevation(first->elevation); obj != nullptr && count < max; obj = objectFindNextAtElevation()) {
+        if (obj == first || PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER || (obj->flags & OBJECT_HIDDEN) != 0) {
+            continue;
+        }
+        int results = obj->data.critter.combat.results;
+        bool sameTile = obj->tile == first->tile && (results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0;
+        bool nearby = (results & DAM_DEAD) != 0
+            && obj->data.inventory.length > 0
+            && objectGetDistanceBetween(_inven_dude, obj) <= INVENTORY_LOOT_NEARBY_TILES
+            && interact_prompt_sees(obj);
+        if (sameTile || nearby) {
+            out[count++] = obj;
+        }
+    }
+
+    for (int i = 2; i < count; i++) {
+        Object* body = out[i];
+        int dist = objectGetDistanceBetween(_inven_dude, body);
+        int j = i;
+        while (j > 1 && objectGetDistanceBetween(_inven_dude, out[j - 1]) > dist) {
+            out[j] = out[j - 1];
+            j--;
+        }
+        out[j] = body;
+    }
+
+    return count;
+}
+
+// From `from` toward `dir`, the next body that still carries something. The first time a body is met
+// its pickup procedure runs, as opening it would have run it, and one whose script overrides that is
+// passed over from then on (state 2). Returns `from` when there is no other.
+static int loot_next_body(Object** bodies, signed char* state, int count, int from, int dir)
+{
+    for (int step = 1; step < count; step++) {
+        int index = ((from + dir * step) % count + count) % count;
+        Object* body = bodies[index];
+        if (state[index] == 0) {
+            state[index] = 1;
+            int sid;
+            if (_obj_sid(body, &sid) != -1) {
+                scriptSetObjects(sid, _inven_dude, nullptr);
+                scriptExecProc(sid, SCRIPT_PROC_PICKUP);
+                Script* script;
+                if (scriptGetScript(sid, &script) != -1 && script->scriptOverrides) {
+                    state[index] = 2;
+                }
+            }
+        }
+        if (state[index] == 1 && body->data.inventory.length > 0) {
+            return index;
+        }
+    }
+    return from;
+}
+
+// "2/5" along the bottom of the body's picture (where a lying body never reaches). Fallout 2 draws the
+// looted body at 426,39 (_display_body).
+static void loot_draw_body_counter()
+{
+    if (loot_body_count < 2) {
+        return;
+    }
+
+    unsigned char* windowBuffer = windowGetBuffer(gInventoryWindow);
+    int pitch = windowGetWidth(gInventoryWindow);
+
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+
+    int x = 426;
+    int y = 39 + INVENTORY_BODY_VIEW_HEIGHT - fontGetLineHeight() - 1;
+
+    FrmImage backgroundFrmImage;
+    if (backgroundFrmImage.lock(buildFid(OBJ_TYPE_INTERFACE, 114, 0, 0, 0))) {
+        blitBufferToBuffer(backgroundFrmImage.getData() + INVENTORY_LOOT_WINDOW_WIDTH * y + x,
+            INVENTORY_BODY_VIEW_WIDTH,
+            fontGetLineHeight(),
+            INVENTORY_LOOT_WINDOW_WIDTH,
+            windowBuffer + pitch * y + x,
+            pitch);
+    }
+
+    char text[16];
+    snprintf(text, sizeof(text), "%d/%d", loot_body_index + 1, loot_body_count);
+    int width = fontGetStringWidth(text);
+    fontDrawText(windowBuffer + pitch * y + x + (INVENTORY_BODY_VIEW_WIDTH - width) / 2, text, width, pitch, _colorTable[992]);
+
+    Rect rect;
+    rect.left = x;
+    rect.top = y;
+    rect.right = x + INVENTORY_BODY_VIEW_WIDTH - 1;
+    rect.bottom = y + fontGetLineHeight() - 1;
+    windowRefreshRect(gInventoryWindow, &rect);
+
+    fontSetCurrent(oldFont);
+}
+
 int inventoryOpenLooting(Object* looter, Object* target)
 {
     int arrowFrmIds[INVENTORY_ARROW_FRM_COUNT];
@@ -4115,28 +4873,19 @@ int inventoryOpenLooting(Object* looter, Object* target)
 
     bool isoWasEnabled = _setup_inventory(INVENTORY_WINDOW_TYPE_LOOT);
 
-    Object** critters = nullptr;
+    // CE: the bodies the arrows step through -- see loot_collect_bodies. The one opened is first.
+    Object* critters[INVENTORY_LOOT_BODIES_MAX];
+    signed char critterState[INVENTORY_LOOT_BODIES_MAX]; // see loot_next_body
     int critterCount = 0;
     int critterIndex = 0;
     if (!_gIsSteal) {
         if (FID_TYPE(target->fid) == OBJ_TYPE_CRITTER) {
-            critterCount = objectListCreate(target->tile, target->elevation, OBJ_TYPE_CRITTER, &critters);
-            int endIndex = critterCount - 1;
+            critterCount = loot_collect_bodies(target, critters, INVENTORY_LOOT_BODIES_MAX);
             for (int index = 0; index < critterCount; index++) {
-                Object* critter = critters[index];
-                if ((critter->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) == 0) {
-                    critters[index] = critters[endIndex];
-                    critters[endIndex] = critter;
-                    critterCount--;
-                    index--;
-                    endIndex--;
-                } else {
-                    critterIndex++;
-                }
+                critterState[index] = index == 0 ? 1 : 0; // its pickup procedure ran above
             }
 
             if (critterCount == 1) {
-                objectListFree(critters);
                 critterCount = 0;
             }
 
@@ -4196,19 +4945,28 @@ int inventoryOpenLooting(Object* looter, Object* target)
                     }
                 }
 
-                for (int index = 0; index < critterCount; index++) {
-                    if (target == critters[index]) {
-                        critterIndex = index;
-                    }
-                }
             }
         }
     }
 
     _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
     _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+    display_body_force = true;
     _display_body(target->fid, INVENTORY_WINDOW_TYPE_LOOT);
+    loot_body_index = 0;
+    loot_body_count = critterCount;
+    loot_draw_body_counter();
+    trace_event(TRACE_ACTION, "loot-open", "id=%d pid=%d bodies=%d items=%d", target->id, target->pid, critterCount, _target_pud->length);
     inventorySetCursor(INVENTORY_WINDOW_CURSOR_HAND);
+
+    // CE: ON A CONTROLLER, START ON THE LOOT ITSELF -- the first slot of the CONTAINER side is the only
+    // thing anyone opens this window for. Never under a mouse player's hand.
+    if (gamepad_ui_get_controller() != nullptr) {
+        Rect lootRect;
+        windowGetRect(gInventoryWindow, &lootRect);
+        barter_warp_cursor(lootRect.left + INVENTORY_LOOT_RIGHT_SCROLLER_X + INVENTORY_SLOT_WIDTH / 2,
+            lootRect.top + INVENTORY_LOOT_RIGHT_SCROLLER_Y + INVENTORY_SLOT_HEIGHT / 2);
+    }
 
     bool isCaughtStealing = false;
     int stealingXp = 0;
@@ -4226,12 +4984,111 @@ int inventoryOpenLooting(Object* looter, Object* target)
 
         int keyCode = inputGetInput();
 
+        // The pad's D-pad in the LOOT window: it STEPS THE ITEMS of the panel the cursor is over first,
+        // and scrolls only at the ends ("začne se na prvním, a pak postupně druhý třetí čtvrtý, a pak
+        // d-pad posouvá na další"). The cursor IS the selection here, so stepping parks it one slot on.
+        if (keyCode == -1) {
+            int padKey = inven_gamepad_scroll_key();
+            if (padKey != -1) {
+                bool overTarget = mouseHitTestInWindow(gInventoryWindow,
+                    INVENTORY_LOOT_RIGHT_SCROLLER_X, INVENTORY_LOOT_RIGHT_SCROLLER_Y,
+                    INVENTORY_LOOT_RIGHT_SCROLLER_MAX_X,
+                    INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_RIGHT_SCROLLER_Y);
+
+                int panelX = overTarget ? INVENTORY_LOOT_RIGHT_SCROLLER_X : INVENTORY_LOOT_LEFT_SCROLLER_X;
+                int panelY = overTarget ? INVENTORY_LOOT_RIGHT_SCROLLER_Y : INVENTORY_LOOT_LEFT_SCROLLER_Y;
+
+                int listLength = overTarget ? _target_pud->length : _pud->length;
+                int listOffset = overTarget ? _target_stack_offset[_target_curr_stack] : _stack_offset[_curr_stack];
+
+                int shown = listLength - listOffset;
+                if (shown > gInventorySlotsCount) {
+                    shown = gInventorySlotsCount;
+                }
+
+                int mx;
+                int my;
+                mouseGetPositionInWindow(gInventoryWindow, &mx, &my);
+
+                int sel = (my - panelY) / INVENTORY_SLOT_HEIGHT;
+                if (sel < 0) {
+                    sel = 0;
+                } else if (sel > gInventorySlotsCount - 1) {
+                    sel = gInventorySlotsCount - 1;
+                }
+
+                int next = sel + (padKey == KEY_ARROW_UP ? -1 : 1);
+
+                if (next >= 0 && next < shown) {
+                    Rect lootRect;
+                    windowGetRect(gInventoryWindow, &lootRect);
+                    barter_warp_cursor(lootRect.left + panelX + INVENTORY_SLOT_WIDTH / 2,
+                        lootRect.top + panelY + next * INVENTORY_SLOT_HEIGHT + INVENTORY_SLOT_HEIGHT / 2);
+                } else if (overTarget) {
+                    keyCode = padKey == KEY_ARROW_UP ? KEY_CTRL_ARROW_UP : KEY_CTRL_ARROW_DOWN;
+                } else {
+                    keyCode = padKey;
+                }
+            }
+        }
+
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
             showQuitConfirmationDialog();
         }
 
         if (_game_user_wants_to_quit != 0) {
             break;
+        }
+
+        // Controller: left/right jumps the pointer to the first item of your / the container's panel.
+        loot_gamepad_panel_jump(gInventoryWindow);
+
+        // Controller quick-take: the gamepad layer signals 1 (A = one unit) or 2 (Y = whole stack) for
+        // the item under the cursor, moved in _move_inventory's quick (no-drag) mode, steal bookkeeping
+        // exactly as the mouse path.
+        int lootQuick = gamepad_ui_take_loot_quick();
+        if (lootQuick != 0) {
+            int mx;
+            int my;
+            mouseGetPositionInWindow(gInventoryWindow, &mx, &my);
+
+            if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_LEFT_SCROLLER_X, INVENTORY_LOOT_LEFT_SCROLLER_Y, INVENTORY_LOOT_LEFT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_LEFT_SCROLLER_Y)) {
+                int slotIndex = (my - INVENTORY_LOOT_LEFT_SCROLLER_Y) / INVENTORY_SLOT_HEIGHT;
+                if (slotIndex >= 0 && slotIndex + _stack_offset[_curr_stack] < _pud->length) {
+                    InventoryItem* inventoryItem = &(_pud->items[_pud->length - (slotIndex + _stack_offset[_curr_stack] + 1)]);
+                    int amount = lootQuick == 2 ? inventoryItem->quantity : 1;
+                    _gStealCount += 1;
+                    _gStealSize += itemGetSize(inventoryItem->item);
+                    InventoryMoveResult rc = _move_inventory(inventoryItem->item, slotIndex, _target_stack[_target_curr_stack], true, amount);
+                    if (rc == INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
+                        isCaughtStealing = true;
+                    } else if (rc == INVENTORY_MOVE_RESULT_SUCCESS) {
+                        stealingXp += stealingXpBonus;
+                        stealingXpBonus += 10;
+                    }
+                    _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
+                    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+                }
+            } else if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_RIGHT_SCROLLER_X, INVENTORY_LOOT_RIGHT_SCROLLER_Y, INVENTORY_LOOT_RIGHT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_RIGHT_SCROLLER_Y)) {
+                int slotIndex = (my - INVENTORY_LOOT_RIGHT_SCROLLER_Y) / INVENTORY_SLOT_HEIGHT;
+                if (slotIndex >= 0 && slotIndex + _target_stack_offset[_target_curr_stack] < _target_pud->length) {
+                    InventoryItem* inventoryItem = &(_target_pud->items[_target_pud->length - (slotIndex + _target_stack_offset[_target_curr_stack] + 1)]);
+                    int amount = lootQuick == 2 ? inventoryItem->quantity : 1;
+                    _gStealCount += 1;
+                    _gStealSize += itemGetSize(inventoryItem->item);
+                    InventoryMoveResult rc = _move_inventory(inventoryItem->item, slotIndex, _target_stack[_target_curr_stack], false, amount);
+                    if (rc == INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
+                        isCaughtStealing = true;
+                    } else if (rc == INVENTORY_MOVE_RESULT_SUCCESS) {
+                        stealingXp += stealingXpBonus;
+                        stealingXpBonus += 10;
+                    }
+                    _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
+                    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+                }
+            }
+
+            keyCode = -1;
         }
 
         if (keyCode == KEY_UPPERCASE_A) {
@@ -4244,25 +5101,53 @@ int inventoryOpenLooting(Object* looter, Object* target)
                     _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
                     _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
                 } else {
+                    // CE: TAKE WHAT FITS (X on the pad, see loot_collect_bodies). Vanilla took all or
+                    // nothing, so one heavy gun left the caps and the stimpaks behind as well. Down the
+                    // list, as many of each as the weight left allows; then the same message.
+                    int room = maxCarryWeight - currentWeight;
+                    int index = 0;
+                    while (index < _target_pud->length) {
+                        InventoryItem* inventoryItem = &(_target_pud->items[index]);
+                        int unitWeight = itemGetWeight(inventoryItem->item);
+                        int quantity = inventoryItem->quantity;
+                        if (unitWeight > 0 && quantity > room / unitWeight) {
+                            quantity = room / unitWeight;
+                        }
+                        int lengthBefore = _target_pud->length;
+                        if (quantity <= 0 || itemMove(target, looter, inventoryItem->item, quantity) != 0) {
+                            index++;
+                            continue;
+                        }
+                        room -= unitWeight * quantity;
+                        if (_target_pud->length == lengthBefore) {
+                            index++; // part of a stack stayed where it was
+                        }
+                    }
+                    _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
+                    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+
                     // Sorry, you cannot carry that much.
                     messageListItem.num = 31;
                     if (messageListGetItem(&gInventoryMessageList, &messageListItem)) {
                         showDialogBox(messageListItem.text, nullptr, 0, 169, 117, _colorTable[32328], nullptr, _colorTable[32328], 0);
                     }
                 }
+                trace_event(TRACE_ACTION, "loot-take-all", "id=%d left=%d weight=%d/%d",
+                    target->id, _target_pud->length, objectGetInventoryWeight(looter), maxCarryWeight);
             }
         } else if (keyCode == KEY_ARROW_UP) {
             if (_stack_offset[_curr_stack] > 0) {
                 _stack_offset[_curr_stack] -= 1;
                 _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
             }
-        } else if (keyCode == KEY_PAGE_UP) {
-            if (critterCount != 0) {
-                if (critterIndex > 0) {
-                    critterIndex -= 1;
-                } else {
-                    critterIndex = critterCount - 1;
-                }
+        } else if (keyCode == KEY_PAGE_UP || keyCode == KEY_PAGE_DOWN) {
+            // CE: vanilla stepped to the next index whatever it held; now to the next body with
+            // something on it (loot_next_body), and the counter follows.
+            int next = critterCount != 0
+                ? loot_next_body(critters, critterState, critterCount, critterIndex, keyCode == KEY_PAGE_UP ? -1 : 1)
+                : critterIndex;
+            if (next != critterIndex) {
+                critterIndex = next;
 
                 target = critters[critterIndex];
                 _target_pud = &(target->data.inventory);
@@ -4271,29 +5156,17 @@ int inventoryOpenLooting(Object* looter, Object* target)
                 _target_stack_offset[0] = 0;
                 _display_target_inventory(0, -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
                 _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+                display_body_force = true;
                 _display_body(target->fid, INVENTORY_WINDOW_TYPE_LOOT);
+                loot_body_index = critterIndex;
+                loot_draw_body_counter();
+                trace_event(TRACE_ACTION, "loot-body", "id=%d pid=%d index=%d of=%d items=%d",
+                    target->id, target->pid, critterIndex + 1, critterCount, _target_pud->length);
             }
         } else if (keyCode == KEY_ARROW_DOWN) {
             if (_stack_offset[_curr_stack] + gInventorySlotsCount < _pud->length) {
                 _stack_offset[_curr_stack] += 1;
                 _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
-            }
-        } else if (keyCode == KEY_PAGE_DOWN) {
-            if (critterCount != 0) {
-                if (critterIndex < critterCount - 1) {
-                    critterIndex += 1;
-                } else {
-                    critterIndex = 0;
-                }
-
-                target = critters[critterIndex];
-                _target_pud = &(target->data.inventory);
-                _target_stack[0] = target;
-                _target_curr_stack = 0;
-                _target_stack_offset[0] = 0;
-                _display_target_inventory(0, -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
-                _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
-                _display_body(target->fid, INVENTORY_WINDOW_TYPE_LOOT);
             }
         } else if (keyCode == KEY_CTRL_ARROW_UP) {
             if (_target_stack_offset[_target_curr_stack] > 0) {
@@ -4409,9 +5282,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
         sharedFpsLimiter.throttle();
     }
 
-    if (critterCount != 0) {
-        objectListFree(critters);
-    }
+    loot_body_count = 0;
 
     if (_gIsSteal) {
         if (item1 != nullptr) {
@@ -4488,8 +5359,11 @@ int inventoryOpenStealing(Object* thief, Object* target)
 }
 
 // 0x474708
-static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* targetObj, bool isPlanting)
+// gpQuantity: 0 = the mouse drag-and-drop transfer. > 0 = the controller's quick transfer of exactly
+// that many units to the opposite panel, with no drag gesture (the pad's loot quick-take).
+static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* targetObj, bool isPlanting, int gpQuantity)
 {
+    bool gp = gpQuantity != 0;
     bool needRefresh = true;
 
     Rect rect;
@@ -4518,7 +5392,7 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
         }
     }
 
-    if (needRefresh) {
+    if (needRefresh && !gp) {
         unsigned char* windowBuffer = windowGetBuffer(gInventoryWindow);
 
         FrmImage backgroundFrmImage;
@@ -4538,26 +5412,30 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
     }
 
     FrmImage itemInventoryFrmImage;
-    int itemInventoryFid = itemGetInventoryFid(item);
-    if (itemInventoryFrmImage.lock(itemInventoryFid)) {
-        int width = itemInventoryFrmImage.getWidth();
-        int height = itemInventoryFrmImage.getHeight();
-        unsigned char* data = itemInventoryFrmImage.getData();
-        mouseSetFrame(data, width, height, width, width / 2, height / 2, 0);
-        soundPlayFile("ipickup1");
-    }
+    if (!gp) {
+        int itemInventoryFid = itemGetInventoryFid(item);
+        if (itemInventoryFrmImage.lock(itemInventoryFid)) {
+            int width = itemInventoryFrmImage.getWidth();
+            int height = itemInventoryFrmImage.getHeight();
+            unsigned char* data = itemInventoryFrmImage.getData();
+            mouseSetFrame(data, width, height, width, width / 2, height / 2, 0);
+            soundPlayFile("ipickup1");
+        }
 
-    do {
-        sharedFpsLimiter.mark();
+        do {
+            sharedFpsLimiter.mark();
 
-        inputGetInput();
+            inputGetInput();
 
-        renderPresent();
-        sharedFpsLimiter.throttle();
-    } while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_REPEAT) != 0);
+            renderPresent();
+            sharedFpsLimiter.throttle();
+        } while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_REPEAT) != 0);
 
-    if (itemInventoryFrmImage.isLocked()) {
-        itemInventoryFrmImage.unlock();
+        if (itemInventoryFrmImage.isLocked()) {
+            itemInventoryFrmImage.unlock();
+            soundPlayFile("iputdown");
+        }
+    } else {
         soundPlayFile("iputdown");
     }
 
@@ -4565,9 +5443,11 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
     MessageListItem messageListItem;
 
     if (isPlanting) {
-        if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_RIGHT_SCROLLER_X, INVENTORY_LOOT_RIGHT_SCROLLER_Y, INVENTORY_LOOT_RIGHT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_RIGHT_SCROLLER_Y)) {
+        if (gp || mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_RIGHT_SCROLLER_X, INVENTORY_LOOT_RIGHT_SCROLLER_Y, INVENTORY_LOOT_RIGHT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_RIGHT_SCROLLER_Y)) {
             int quantityToMove;
-            if (quantity > 1) {
+            if (gp) {
+                quantityToMove = gpQuantity;
+            } else if (quantity > 1) {
                 quantityToMove = inventoryQuantitySelect(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, quantity);
             } else {
                 quantityToMove = 1;
@@ -4594,9 +5474,11 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
             }
         }
     } else {
-        if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_LEFT_SCROLLER_X, INVENTORY_LOOT_LEFT_SCROLLER_Y, INVENTORY_LOOT_LEFT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_LEFT_SCROLLER_Y)) {
+        if (gp || mouseHitTestInWindow(gInventoryWindow, INVENTORY_LOOT_LEFT_SCROLLER_X, INVENTORY_LOOT_LEFT_SCROLLER_Y, INVENTORY_LOOT_LEFT_SCROLLER_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_LOOT_LEFT_SCROLLER_Y)) {
             int quantityToMove;
-            if (quantity > 1) {
+            if (gp) {
+                quantityToMove = gpQuantity;
+            } else if (quantity > 1) {
                 quantityToMove = inventoryQuantitySelect(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, quantity);
             } else {
                 quantityToMove = 1;
@@ -4991,6 +5873,901 @@ static void inventoryWindowRenderInnerInventories(int win, Object* leftTable, Ob
     }
 
     fontSetCurrent(oldFont);
+
+    // The deal readout rides along with every table repaint (more than twenty call sites -- hooking
+    // here means none is missed). Self-guarding: it returns at once when no barter is in progress.
+    barter_draw_deal();
+}
+
+// One occupied, visible barter slot: its screen rect + which list (0..3) and visible row it maps to.
+struct BarterSlot {
+    int x0; // screen top-left
+    int y0;
+    int listId; // 0 player inv, 1 player offer, 2 NPC offer, 3 NPC inv
+    int row; // visible row within the list
+};
+
+// How much of the stack under the cursor one press moves.
+enum BarterAmount {
+    BARTER_AMOUNT_ONE, // A
+    BARTER_AMOUNT_ALL, // LT + A
+    BARTER_AMOUNT_PICK, // RT -- the quantity picker
+};
+
+// Stick deflection that counts as a direction, and how fast a held direction repeats.
+#define BARTER_STICK_THRESHOLD 0.5f
+#define BARTER_NAV_REPEAT_MS 160
+
+// Rebuilds the flat left-to-right list of the four trade lists' occupied visible slots
+// (player inventory -> player offer -> NPC offer -> NPC inventory). Returns the count;
+// fills slots[] (cap 4*gInventorySlotsCount) and the trade window's screen rect.
+static int barter_collect_slots(BarterSlot* slots, int cap, Rect* winRect)
+{
+    if (windowGetRect(gInventoryWindow, winRect) != 0) {
+        return 0;
+    }
+
+    struct {
+        int x;
+        int y0;
+        int count;
+    } cols[4] = {
+        { INVENTORY_TRADE_LEFT_SCROLLER_X, INVENTORY_TRADE_SCROLLER_Y, _pud->length - _stack_offset[_curr_stack] },
+        { INVENTORY_TRADE_INNER_LEFT_SCROLLER_X, INVENTORY_TRADE_INNER_SCROLLER_Y, _ptable_pud->length - _ptable_offset },
+        { INVENTORY_TRADE_INNER_RIGHT_SCROLLER_X, INVENTORY_TRADE_INNER_SCROLLER_Y, _btable_pud->length - _btable_offset },
+        { INVENTORY_TRADE_RIGHT_SCROLLER_X, INVENTORY_TRADE_SCROLLER_Y, _target_pud->length - _target_stack_offset[_target_curr_stack] },
+    };
+
+    int n = 0;
+    for (int c = 0; c < 4; c++) {
+        int count = cols[c].count;
+        if (count > gInventorySlotsCount) {
+            count = gInventorySlotsCount;
+        }
+        for (int i = 0; i < count && n < cap; i++) {
+            slots[n].x0 = winRect->left + cols[c].x;
+            slots[n].y0 = winRect->top + cols[c].y0 + i * INVENTORY_SLOT_HEIGHT;
+            slots[n].listId = c;
+            slots[n].row = i;
+            n++;
+        }
+    }
+    return n;
+}
+
+// Moves the mouse cursor to (sx, sy) AND redraws it: _mouse_set_position alone only
+// updates coordinates (mouse.cc:744) -- it does NOT erase the old cursor sprite or
+// blit the new one, which leaves a ghost trail. Replicate what mouse_simulate_input
+// does on a real move: refresh the window under the old rect, then re-show at the new.
+static void barter_warp_cursor(int sx, int sy)
+{
+    int curX;
+    int curY;
+    mouseGetPosition(&curX, &curY);
+    if (sx == curX && sy == curY) {
+        return;
+    }
+
+    Rect oldRect;
+    mouseGetRect(&oldRect);
+    _mouse_set_position(sx, sy);
+    windowRefreshAll(&oldRect);
+    mouseShowCursor();
+}
+
+// Transfers the item in (listId, row): player inventory / NPC inventory slots move the
+// item into that side's offer table; an offer-table slot moves it back.
+//
+// This calls itemMoveForce DIRECTLY rather than the mouse handlers
+// _barter_move_inventory / _barter_move_from_table_inventory: those are DRAG-and-DROP
+// (they pick the item up, wait for the mouse button to release, then require the cursor
+// to be over the DESTINATION offer-table drop zone). Driven from a controller the cursor
+// stays on the SOURCE slot, so that drop-zone hit-test failed and nothing moved -- the
+// "A does nothing" bug. Moving the WHOLE stack in one press also kills the "click caps 60
+// times" grind for stacked items. The src/dst pairs mirror those handlers' final
+// itemMoveForce calls exactly.
+static void barter_redraw_tables()
+{
+    _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_TRADE);
+    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_TRADE);
+    inventoryWindowRenderInnerInventories(_barter_back_win, _ptable, _btable, -1);
+}
+
+// The item shown in (listId, visible row), or NULL if that slot is empty. Same four-list mapping
+// barter_transfer_slot uses -- kept beside it so the two can never drift about which list is which.
+static Object* barter_slot_item(int listId, int row)
+{
+    switch (listId) {
+    case 0: { // player inventory
+        int idx = row + _stack_offset[_curr_stack];
+        return idx < _pud->length ? _pud->items[_pud->length - (idx + 1)].item : NULL;
+    }
+    case 1: { // player's offer table
+        int idx = row + _ptable_offset;
+        return idx < _ptable_pud->length ? _ptable_pud->items[_ptable_pud->length - (idx + 1)].item : NULL;
+    }
+    case 2: { // NPC's offer table
+        int idx = row + _btable_offset;
+        return idx < _btable_pud->length ? _btable_pud->items[_btable_pud->length - (idx + 1)].item : NULL;
+    }
+    case 3: { // NPC inventory
+        int idx = row + _target_stack_offset[_target_curr_stack];
+        return idx < _target_pud->length ? _target_pud->items[_target_pud->length - (idx + 1)].item : NULL;
+    }
+    default:
+        return NULL;
+    }
+}
+
+// Put the cursor back on the nearest occupied slot after an item has moved lists, so repeated
+// A / LB / RB keep flowing instead of stranding it on a slot that is now empty.
+static void barter_reanchor_cursor(int mouseX, int mouseY)
+{
+    Rect winRect;
+    BarterSlot after[4 * 3];
+    int nAfter = barter_collect_slots(after, 4 * 3, &winRect);
+    if (nAfter <= 0) {
+        return;
+    }
+
+    int nearest = 0;
+    long bestDist = LONG_MAX;
+    for (int i = 0; i < nAfter; i++) {
+        long dx = after[i].x0 + INVENTORY_SLOT_WIDTH / 2 - mouseX;
+        long dy = after[i].y0 + INVENTORY_SLOT_HEIGHT / 2 - mouseY;
+        long d = dx * dx + dy * dy;
+        if (d < bestDist) {
+            bestDist = d;
+            nearest = i;
+        }
+    }
+
+    barter_warp_cursor(after[nearest].x0 + INVENTORY_SLOT_WIDTH / 2,
+        after[nearest].y0 + INVENTORY_SLOT_HEIGHT / 2);
+}
+
+static void barter_transfer_slot(int listId, int row, BarterAmount amount)
+{
+    Object* npc = _target_stack[0]; // the NPC we are trading with
+
+    Object* item = NULL;
+    int qty = 0;
+    Object* src = NULL;
+    Object* dst = NULL;
+
+    switch (listId) {
+    case 0: { // player inventory -> player's offer
+        int idx = row + _stack_offset[_curr_stack];
+        if (idx >= _pud->length) {
+            return;
+        }
+        item = _pud->items[_pud->length - (idx + 1)].item;
+        qty = _pud->items[_pud->length - (idx + 1)].quantity;
+        src = _inven_dude;
+        dst = _ptable;
+        break;
+    }
+    case 1: { // player's offer -> back to player inventory
+        int idx = row + _ptable_offset;
+        if (idx >= _ptable_pud->length) {
+            return;
+        }
+        item = _ptable_pud->items[_ptable_pud->length - (idx + 1)].item;
+        qty = _ptable_pud->items[_ptable_pud->length - (idx + 1)].quantity;
+        src = _ptable;
+        dst = _inven_dude;
+        break;
+    }
+    case 2: { // NPC's offer -> back to NPC inventory
+        int idx = row + _btable_offset;
+        if (idx >= _btable_pud->length) {
+            return;
+        }
+        item = _btable_pud->items[_btable_pud->length - (idx + 1)].item;
+        qty = _btable_pud->items[_btable_pud->length - (idx + 1)].quantity;
+        src = _btable;
+        dst = npc;
+        break;
+    }
+    case 3: { // NPC inventory -> NPC's offer
+        int idx = row + _target_stack_offset[_target_curr_stack];
+        if (idx >= _target_pud->length) {
+            return;
+        }
+        item = _target_pud->items[_target_pud->length - (idx + 1)].item;
+        qty = _target_pud->items[_target_pud->length - (idx + 1)].quantity;
+        src = npc;
+        dst = _btable;
+        break;
+    }
+    default:
+        return;
+    }
+
+    if (item == NULL || qty <= 0) {
+        return;
+    }
+
+    // ⚠️ A MOVES ONE, LT+A MOVES THE LOT, LT+A HELD ASKS. His call: "Ačko přidá jeden item a LT
+    // všechny", then "a jak přidám some, třeba kdybych chtěl přidat 3 stimpacks?".
+    //
+    // Three stimpaks are three taps, which is fewer presses than the picker used to cost to open,
+    // fill in and confirm -- and that is why the picker is no longer on the tap. But thirty out of
+    // fifty is not thirty taps, so it did not simply go away either: it moved onto the HOLD, where
+    // it is there when you ask for it and never in the way when you do not. ⚠️ The same shape the
+    // rest of this screen uses: LT decides how much, tap versus hold decides how you say it.
+    if (qty > 1) {
+        if (amount == BARTER_AMOUNT_ONE) {
+            qty = 1;
+        } else if (amount == BARTER_AMOUNT_PICK) {
+            int chosen = inventoryQuantitySelect(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, qty);
+            if (chosen < 1) {
+                return; // cancelled
+            }
+            qty = chosen;
+        }
+    }
+
+    if (itemMoveForce(src, dst, item, qty) == -1) {
+        MessageListItem messageListItem;
+        messageListItem.num = 25; // at maximum weight / no space
+        if (messageListGetItem(&gInventoryMessageList, &messageListItem)) {
+            displayMonitorAddMessage(messageListItem.text);
+        }
+        return;
+    }
+
+    soundPlayFile("iputdown");
+    barter_redraw_tables();
+}
+
+// CE: "Auto-match offer" (gamepad X). Tops up the PLAYER's offer table with exactly
+// enough caps to meet the NPC's current asking price for whatever is on their offer
+// table -- so buying an item priced at 60 is one button, not 60 cap clicks. The price
+// is _barter_compute_value (the same value _barter_attempt_transaction checks, so after
+// this the trade will be accepted); the shortfall is filled from the player's spare
+// caps (capped at what they actually carry).
+// Finds the top-level caps (money) stack in obj's inventory. Returns the item (or NULL) and
+// its quantity via *qtyOut.
+static Object* barter_find_money(Object* obj, int* qtyOut)
+{
+    Inventory* inv = &(obj->data.inventory);
+    for (int i = 0; i < inv->length; i++) {
+        if (inv->items[i].item->pid == PROTO_ID_MONEY) {
+            *qtyOut = inv->items[i].quantity;
+            return inv->items[i].item;
+        }
+    }
+    *qtyOut = 0;
+    return NULL;
+}
+
+// X in the barter window: even the deal out with caps, so a single press finishes it instead of
+// clicking caps one by one. Bidirectional (see barter_auto_offer for the scale it measures on):
+//   SHORT    -- the player owes for the NPC's offer -> the trader's caps come off ITS table first,
+//               then the DUDE's caps go onto the player's table.
+//   OVERPAY  -- the player's offer is worth more than the trader's -> the player's own caps come
+//               back off the player's table first, then the TRADER's caps go onto its table.
+// Each side is capped at the caps that side actually carries.
+// THE DEAL READOUT -- the number the game decides on, finally on screen.
+//
+// ⚠️ VANILLA SHOWS YOU TWO NUMBERS AND JUDGES YOU ON A THIRD. The $N under each table is the RAW
+// objectGetCost of that table, but _barter_attempt_transaction refuses unless
+// _barter_compute_value(...) <= objectGetCost(ptable) -- and _barter_compute_value applies the
+// Barter-skill / Master Trader / reputation modifier to the NPC's side. So two piles reading $100
+// and $100 are routinely rejected, because what the trader actually wants is $130, and nothing
+// anywhere told you that. That is the whole "trading is bad" experience: not a control problem, an
+// information problem.
+//
+// This draws what the check really compares -- what you are GIVING against what they WANT after the
+// markup -- plus the exact shortfall, which is also precisely the number X (barter_auto_offer)
+// covers with caps. The two features finally describe the same transaction.
+static void barter_draw_deal()
+{
+    if (_ptable == NULL || _btable == NULL || _target_stack[0] == NULL) {
+        return;
+    }
+
+    unsigned char* windowBuffer = windowGetBuffer(gInventoryWindow);
+    if (windowBuffer == NULL) {
+        return;
+    }
+
+    int give = objectGetCost(_ptable);                           // raw value of the player's pile
+    int want = _barter_compute_value(_inven_dude, _target_stack[0]);  // adjusted price of the NPC's pile
+    int shortBy = want - give;
+
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+    int th = fontGetLineHeight();
+
+    // ⚠️ THE LAYOUT IS DICTATED BY FOUR 64px COLUMNS AT x 29 / 165 / 250 / 388. The first attempt
+    // put this in the gap between the two inner columns, which measures 250 - (165+64) = 17 PIXELS --
+    // enough for nothing. The usable space is the strip to the RIGHT of the NPC's $total (drawn at
+    // x 254) and before the NPC's inventory column starts at 388.
+    const int dealX = 300;
+    const int dealW = INVENTORY_TRADE_RIGHT_SCROLLER_X - dealX - 2;
+    const int dealY = INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + 24;
+
+    // Both strips are FILLED first: this is background art underneath, not a flat panel, so text
+    // drawn straight onto it would sit on whatever the frame happens to show there.
+    if (dealW > 8) {
+        bufferFill(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * dealY + dealX,
+            dealW, th + 2, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[0]);
+
+        // OVERPAY is a deal the trader accepts but you are losing on -- exactly what X evens out, so
+        // it is shown rather than hidden under "DEAL OK" (which is how a lopsided trade looked fine).
+        char text[32];
+        int color;
+        if (shortBy > 0) {
+            snprintf(text, sizeof(text), "SHORT %d", shortBy);
+            color = _colorTable[31744];
+        } else if (shortBy < 0) {
+            snprintf(text, sizeof(text), "OVERPAY %d", -shortBy);
+            color = _colorTable[32747];
+        } else {
+            snprintf(text, sizeof(text), "DEAL OK");
+            color = _colorTable[992];
+        }
+
+        int tw = fontGetStringWidth(text);
+        int tx = dealX + (dealW - tw) / 2;
+        if (tx < dealX) {
+            tx = dealX;
+        }
+        fontDrawText(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * (dealY + 1) + tx,
+            text, dealW, INVENTORY_TRADE_WINDOW_WIDTH, color);
+    }
+
+    // THE CONTROL LEGEND, on screen where the controls are actually used. The Pip-Boy CONTROLS page
+    // lists these too, but a page you have to go looking for is how "even out with caps" and the
+    // split-stack picker sat unused for weeks -- if a control is not visible where it applies, it
+    // does not exist. The top strip is free: the inner item columns start at y 20 and the outer at
+    // y 30, so nothing is drawn across this band.
+    // Full window width, not just the gap between the outer columns: at y 4 NOTHING is drawn
+    // yet -- the outer item columns start at y 30 and the inner ones at y 20 -- so the whole
+    // 480px strip is free, and the legend needs it once the navigation keys are in there too.
+    const int legX = 6;
+    const int legW = INVENTORY_TRADE_WINDOW_WIDTH - 12;
+    const int legY = 4;
+
+    if (legW > 40) {
+        bufferFill(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * legY + legX,
+            legW, th + 2, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[0]);
+
+        // ⚠️ THE LEGEND MUST NAME THE ACTUAL AXES. It read "LB/RB item" back when the shoulders
+        // walked the flat left-to-right list of every occupied slot; they now step COLUMN (empty
+        // ones skipped) and the D-pad steps ITEM within one column. Wording and binding change
+        // together -- a legend promising a jump the buttons do not make is worse than none.
+        const char* legend = "LB/RB column   D-pad item   A move   LT+A some   X even   Y offer   B exit";
+        int lw = fontGetStringWidth(legend);
+        int lx = legX + (legW - lw) / 2;
+        if (lx < legX) {
+            lx = legX;
+        }
+        fontDrawText(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * (legY + 1) + lx,
+            legend, legW, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[32767]);
+    }
+
+    fontSetCurrent(oldFont);
+
+    Rect r;
+    r.left = legX < dealX ? legX : dealX;
+    r.top = legY;
+    r.right = (legX + legW) > (dealX + dealW) ? (legX + legW) : (dealX + dealW);
+    r.bottom = dealY + th + 2;
+    windowRefreshRect(gInventoryWindow, &r);
+}
+
+// ⚠️ "EVEN" IS MEASURED ON THE SCALE THE TRADER JUDGES WITH, AND THAT SCALE IS NOT THE PRICE TAG.
+//
+// The deal check is want <= give, where want = _barter_compute_value (the trader's pile with the
+// Barter-skill markup -- or markdown: a good trader pays well under the tag) and give = the RAW value
+// of the player's pile. The SELL side used to balance against the trader's RAW total instead, which
+// only agrees with `want` while the trader's pile is nothing but caps. Put a few items on BOTH sides
+// and the two scales part: measured in trace_2026-10-04_153226, want 2131 against give 5022 -- the
+// player overpaying by 2891 -- was "evened" with 822 caps, and every X after that refused as
+// "already even" while the deal was still 2065 in the trader's favour ("even nefunguje správně s
+// více itemy").
+//
+// Caps are the one thing BOTH scales count 1:1 (_barter_compute_value takes them out before the
+// modifier), so moving N caps moves the gap by exactly N. Each direction first takes back caps
+// from the side that is ahead -- the player's own caps off the player's table, or the trader's off
+// the trader's -- and only then adds new ones, so a press never shuffles caps both ways at once.
+static void barter_auto_offer()
+{
+    Object* npc = _target_stack[0];
+
+    int want = _barter_compute_value(_inven_dude, npc); // what the trader asks for its pile
+    int give = objectGetCost(_ptable);               // what the player's pile is worth to it
+    int gap = want - give;                            // > 0 player is short, < 0 player overpays
+
+    int dudeCaps = 0;
+    barter_find_money(_inven_dude, &dudeCaps);
+    int npcCaps = 0;
+    barter_find_money(npc, &npcCaps);
+    int ptableCaps = 0;
+    barter_find_money(_ptable, &ptableCaps);
+    int btableCaps = 0;
+    barter_find_money(_btable, &btableCaps);
+
+    // TEMP DIAG (strip after diagnosing barter auto-caps): flight-recorder ONLY.
+    // NOTE: displayMonitorAddMessage CRASHES inside the barter/dialog modal (message monitor buffer
+    // invalid), so diagnostics MUST go to the trace, never the screen.
+    trace_event(TRACE_FLOW, "barter-auto",
+        "want=%d give=%d gap=%d dudeCaps=%d npcCaps=%d ptableCaps=%d btableCaps=%d",
+        want, give, gap, dudeCaps, npcCaps, ptableCaps, btableCaps);
+
+    // Move up to `amount` caps from `from` to `to`; returns how many actually went. The money object
+    // is looked up again for every move -- a move can merge or empty a stack, and a pointer fetched
+    // before it may no longer be the stack it was.
+    auto moveCaps = [](Object* from, Object* to, int amount) -> int {
+        int have = 0;
+        Object* money = barter_find_money(from, &have);
+        if (money == NULL || have <= 0 || amount <= 0) {
+            return 0;
+        }
+        int n = amount < have ? amount : have;
+        return itemMoveForce(from, to, money, n) == 0 ? n : 0;
+    };
+
+    const char* why = NULL;
+    int moved = 0;
+
+    if (gap > 0) {
+        // SHORT: the trader's own caps off its table first (each one off its pile is one off the
+        // price), then the rest out of the player's pocket.
+        int left = gap;
+        int n = moveCaps(_btable, npc, left);
+        moved += n;
+        left -= n;
+        if (left > 0) {
+            n = moveCaps(_inven_dude, _ptable, left);
+            moved += n;
+            left -= n;
+        }
+        if (moved == 0) {
+            why = dudeCaps <= 0 ? "no-caps-dude" : "move-failed";
+        }
+    } else if (gap < 0) {
+        // OVERPAYING: the player's own caps back off the player's table first, then the trader pays
+        // the rest into its offer.
+        int left = -gap;
+        int n = moveCaps(_ptable, _inven_dude, left);
+        moved += n;
+        left -= n;
+        if (left > 0) {
+            n = moveCaps(npc, _btable, left);
+            moved += n;
+            left -= n;
+        }
+        if (moved == 0) {
+            why = npcCaps <= 0 ? "no-caps-npc" : "move-failed";
+        }
+    } else {
+        why = "already-even";
+    }
+
+    if (moved > 0) {
+        soundPlayFile("iputdown");
+        barter_redraw_tables();
+        trace_event(TRACE_INPUT, "barter-auto-moved", "caps=%d gap=%d", moved, gap);
+        return;
+    }
+
+    // ⚠️ IT MUST NEVER REFUSE IN SILENCE. "even xko mi někdy nefungovalo" -- and it had not failed,
+    // it had DECLINED, three different ways, with no sound and no message: nobody is short of
+    // anything (the deal is already even), the buyer has no caps, the seller has no caps. A button
+    // that does nothing and says nothing reads as broken every time. The refusal buzzer is the same
+    // one the reload and every other refused action on this pad uses.
+    //
+    // ⚠️ And it has to be a SOUND, not text: displayMonitorAddMessage crashes inside the barter/dialog modal
+    // (invalid message-monitor buffer), which is why the reason goes to the trace instead.
+    soundPlayFile("iisxxxx1");
+    trace_event(TRACE_INPUT, "barter-auto-refused", "why=%s gap=%d dudeCaps=%d npcCaps=%d",
+        why != NULL ? why : "?", gap, dudeCaps, npcCaps);
+}
+
+// Total item count and current scroll offset of trade column c (0 player inv, 1 player
+// offer, 2 NPC offer, 3 NPC inv). Used by the D-pad navigation to know how many items are
+// below/above the visible window so it can scroll only at the edge.
+static void barter_col_range(int c, int* length, int* offset)
+{
+    switch (c) {
+    case 0:
+        *length = _pud->length;
+        *offset = _stack_offset[_curr_stack];
+        break;
+    case 1:
+        *length = _ptable_pud->length;
+        *offset = _ptable_offset;
+        break;
+    case 2:
+        *length = _btable_pud->length;
+        *offset = _btable_offset;
+        break;
+    default:
+        *length = _target_pud->length;
+        *offset = _target_stack_offset[_target_curr_stack];
+        break;
+    }
+}
+
+// Which of the four lists is the cursor nearest, by x alone? Used when the cursor is not over
+// an occupied slot, so the shoulders and the D-pad anchor onto the same column.
+static int barter_nearest_column(int rx)
+{
+    static const int colsX[4] = {
+        INVENTORY_TRADE_LEFT_SCROLLER_X, INVENTORY_TRADE_INNER_LEFT_SCROLLER_X,
+        INVENTORY_TRADE_INNER_RIGHT_SCROLLER_X, INVENTORY_TRADE_RIGHT_SCROLLER_X
+    };
+
+    int c = 0;
+    int bestDx = INT_MAX;
+    for (int i = 0; i < 4; i++) {
+        int cx = colsX[i] + INVENTORY_SLOT_WIDTH / 2;
+        int dx = rx < cx ? cx - rx : rx - cx;
+        if (dx < bestDx) {
+            bestDx = dx;
+            c = i;
+        }
+    }
+    return c;
+}
+
+// How many occupied visible rows does column c have in slots[]? barter_collect_slots fills each
+// column top-down from row 0, so this doubles as "the row past the last one".
+static int barter_col_rows(const BarterSlot* slots, int nSlots, int c)
+{
+    int rows = 0;
+    for (int i = 0; i < nSlots; i++) {
+        if (slots[i].listId == c) {
+            rows++;
+        }
+    }
+    return rows;
+}
+
+// Warp the cursor onto column c's visible row `row`, if that slot is present in slots[].
+static void barter_warp_to_slot(const BarterSlot* slots, int nSlots, int c, int row)
+{
+    for (int i = 0; i < nSlots; i++) {
+        if (slots[i].listId == c && slots[i].row == row) {
+            barter_warp_cursor(slots[i].x0 + INVENTORY_SLOT_WIDTH / 2,
+                slots[i].y0 + INVENTORY_SLOT_HEIGHT / 2);
+            return;
+        }
+    }
+}
+
+static int barter_gamepad_input()
+{
+    static bool prevLB = false;
+    static bool prevRB = false;
+    static bool prevRT = false;
+    static bool prevA = false;
+    static bool prevX = false;
+    static bool prevY = false;
+    static bool prevB = false;
+    static bool prevBack = false;
+    static bool prevUp = false;
+    static bool prevDown = false;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == NULL) {
+        prevLB = prevRB = prevRT = prevA = prevX = prevY = prevB = prevBack = prevUp = prevDown = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+
+    bool lbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+    bool rbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool xNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
+    bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool backNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) != 0;
+    // RT asks how many. ⚠️ Read through gamepad_ui_split_trigger_held's sibling rule -- a held
+    // trigger intermittently reports a hard 0 (measured: 14 of 33 readings), so a bare threshold
+    // drops presses. Here it is only an EDGE on a press, so the Schmitt low bound is enough.
+    bool rtNow = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 12000;
+    bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+    bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+
+    // ⚠️ SAMPLED EVERY FRAME, AND THAT IS NOT OPTIONAL. The split modifier is filtered by agreement
+    // across readings (gamepad_ui_split_trigger_held), because this axis reports garbage in both
+    // directions; asking it once, at the moment A is released, hands the filter a single sample and
+    // it can then neither confirm a real pull nor out-vote a spurious one. This loop runs every
+    // frame, so it is what feeds it.
+    bool splitNow = gamepad_ui_split_trigger_held();
+
+    // ⚠️ THE LEFT STICK STEPS TOO, AND EVERYTHING REPEATS WHEN HELD. His two asks in one breath:
+    // *"Proč nepoužíváme i joystick? Můžu držet dpad aby se rychleji posouvalo?"*. The left stick is
+    // free on this screen -- inventoryOpenTrade suppresses the cursor snap for its whole length -- so
+    // it drives exactly the same four steps the D-pad does, and both of them now act on the first
+    // frame and then repeat while held. The right stick stays the free pointer it always was.
+    float navX = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
+    float navY = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+    float navAbsX = navX < 0.0f ? -navX : navX;
+    float navAbsY = navY < 0.0f ? -navY : navY;
+
+    // The dominant axis wins outright: a diagonal must not step a row AND a column at once.
+    bool stickUp = navAbsY >= navAbsX && navY < -BARTER_STICK_THRESHOLD;
+    bool stickDown = navAbsY >= navAbsX && navY > BARTER_STICK_THRESHOLD;
+    bool stickLeft = navAbsX > navAbsY && navX < -BARTER_STICK_THRESHOLD;
+    bool stickRight = navAbsX > navAbsY && navX > BARTER_STICK_THRESHOLD;
+
+    upNow = upNow || stickUp;
+    downNow = downNow || stickDown;
+    bool colLeftNow = lbNow || stickLeft;
+    bool colRightNow = rbNow || stickRight;
+
+    // One repeat clock for all four directions: the newest direction owns it, so sliding the stick
+    // from down to left does not inherit the old timer and fire instantly.
+    static int navHeld = 0; // 0 none, 1 up, 2 down, 3 left, 4 right
+    static unsigned int navAt = 0;
+    int navNow = upNow ? 1 : (downNow ? 2 : (colLeftNow ? 3 : (colRightNow ? 4 : 0)));
+    bool navRepeat = false;
+    if (navNow == 0) {
+        navHeld = 0;
+    } else if (navNow != navHeld) {
+        navHeld = navNow;
+        navAt = getTicks();
+    } else if (getTicksSince(navAt) >= BARTER_NAV_REPEAT_MS) {
+        navAt = getTicks();
+        navRepeat = true;
+    }
+
+    bool lbEdge = (colLeftNow && !prevLB) || (navRepeat && navNow == 3);
+    bool rbEdge = (colRightNow && !prevRB) || (navRepeat && navNow == 4);
+    bool aEdge = aNow && !prevA;
+    bool aReleased = !aNow && prevA;
+    bool xEdge = xNow && !prevX;
+    bool yEdge = yNow && !prevY;
+    bool bEdge = bNow && !prevB;
+    bool backEdge = backNow && !prevBack;
+    bool rtEdge = rtNow && !prevRT;
+    bool upEdge = (upNow && !prevUp) || (navRepeat && navNow == 1);
+    bool downEdge = (downNow && !prevDown) || (navRepeat && navNow == 2);
+
+    prevLB = colLeftNow;
+    prevRB = colRightNow;
+    prevRT = rtNow;
+    prevA = aNow;
+    prevX = xNow;
+    prevY = yNow;
+    prevB = bNow;
+    prevBack = backNow;
+    prevUp = upNow;
+    prevDown = downNow;
+
+    // X: auto-fill the player's offer with exactly the caps the NPC is asking for.
+    if (xEdge) {
+        barter_auto_offer();
+        return -1;
+    }
+
+    Rect winRect;
+    BarterSlot slots[4 * 3];
+    int nSlots = barter_collect_slots(slots, 4 * 3, &winRect);
+
+    int mouseX;
+    int mouseY;
+    mouseGetPosition(&mouseX, &mouseY);
+
+    // Index of the occupied slot the cursor is over (fully inside its 64x48 rect), or -1.
+    int over = -1;
+    for (int i = 0; i < nSlots; i++) {
+        if (mouseX >= slots[i].x0 && mouseX < slots[i].x0 + INVENTORY_SLOT_WIDTH
+            && mouseY >= slots[i].y0 && mouseY < slots[i].y0 + INVENTORY_SLOT_HEIGHT) {
+            over = i;
+            break;
+        }
+    }
+
+    // ⚠️ HOLD A TO LOOK AT AN ITEM. A trade screen without a description is guesswork -- you cannot
+    // tell two similar guns apart, and there was no way at all to read one on a controller ("potřebuji
+    // se podívat na item v shopu, nevím jak toho na controlleru dosáhnout"). The mouse reaches it
+    // through the hold-drag action menu; the pad now reaches it the same way the INVENTORY already
+    // does, by holding A, so it is one habit and not two.
+    //
+    // Printed with _obj_examine_func(..., gInventoryPrintItemDescriptionHandler) -- exactly what vanilla's own LOOK does in
+    // this window (see GAME_MOUSE_ACTION_MENU_ITEM_LOOK: every non-NORMAL window uses gInventoryPrintItemDescriptionHandler,
+    // because the inventory's description panel does not exist here).
+    // DIAG (the "I could not get at the items in my own offer" report, 2026-09-25): one line per
+    // navigation press, saying which slot the cursor is on, how many slots were collected at all,
+    // and the length + scroll offset of all four lists. Between them those numbers say whether a
+    // column was never collected, never scrolled, or simply never pointed at -- three different
+    // bugs that I could not tell apart by reading the code. Strip with `move-diag`.
+    if (trace_enabled() && (upEdge || downEdge || lbEdge || rbEdge)) {
+        trace_event(TRACE_INPUT, "barter-nav",
+            "over=%d col=%d row=%d slots=%d mine=%d/%d offer=%d/%d theirs=%d/%d npc=%d/%d m=%d,%d",
+            over, over >= 0 ? slots[over].listId : -1, over >= 0 ? slots[over].row : -1, nSlots,
+            _pud->length, _stack_offset[_curr_stack],
+            _ptable_pud->length, _ptable_offset,
+            _btable_pud->length, _btable_offset,
+            _target_pud->length, _target_stack_offset[_target_curr_stack],
+            mouseX - winRect.left, mouseY - winRect.top);
+    }
+
+    static unsigned int barterADownTime = 0;
+    static bool barterAHandled = false;
+    if (aEdge) {
+        barterADownTime = getTicks();
+        barterAHandled = false;
+    }
+    if (aNow && !barterAHandled && over >= 0
+        && getTicksSince(barterADownTime) >= BARTER_LOOK_HOLD_MS) {
+        barterAHandled = true;
+        Object* looked = barter_slot_item(slots[over].listId, slots[over].row);
+        if (looked != NULL) {
+            _obj_examine_func(_inven_dude, looked, gInventoryPrintItemDescriptionHandler);
+        }
+        return -1;
+    }
+
+    // RT: HOW MANY? Opens the quantity picker for the item under the cursor.
+    //
+    // ⚠️ IT IS ITS OWN BUTTON BECAUSE THE COMBINATION WAS NOT WORTH IT. It lived on LT+A-held for
+    // about ten minutes and he was right about it: "není to zbytečně komplikované? prostě přidej
+    // jiný button". Three amounts on one button meant a tap, a modifier, and a hold length all
+    // carrying meaning at once, and you had to get the order right. RT had no job on this screen at
+    // all, and it sits beside LT, which is the other amount key. A = one, LT+A = all, RT = ask.
+    if (rtEdge && over >= 0) {
+        barter_transfer_slot(slots[over].listId, slots[over].row, BARTER_AMOUNT_PICK);
+        barter_reanchor_cursor(mouseX, mouseY);
+        return -1;
+    }
+
+    // A transfers the item under the cursor: ONE of it, or the WHOLE stack with LT held. On the
+    // RELEASE edge, because the hold above owns the press: a tap moves, a hold describes.
+    //
+    // ⚠️ THE SPLIT STAYS ON LT WHILE EVERY OTHER COMBO MOVED TO LB (2026-08-29). The tempting move
+    // is consistency -- LB is the modifier everywhere else now -- but LB is NOT free on this screen:
+    // lbEdge steps the cursor to the previous column (see the rbEdge || lbEdge branch below).
+    // Holding LB to split would jump the cursor off the item you were pointing at before A was ever
+    // pressed, which breaks the gesture outright. LT has no job in a barter window, so it keeps it.
+    if (aReleased && !barterAHandled && over >= 0) {
+        // ⚠️ NEVER A BARE THRESHOLD ON A TRIGGER. A held trigger intermittently reports a hard 0
+        // (measured: 14 of 33 readings), so `axis > 8000` dropped the split request about four
+        // times in ten and moved the whole stack. gamepad_ui_split_trigger_held is the Schmitt
+        // trigger + 60 ms release debounce every other analog read in this codebase goes through.
+        int listId = slots[over].listId;
+        int row = slots[over].row;
+
+        // DIAG (the "A keeps moving the whole stack" report, 2026-09-24): one line per press,
+        // naming the slot, what the trigger ACTUALLY read, what the filter made of it, and which
+        // amount that chose. Reported three times and never once measured -- this is what tells a
+        // stuck modifier apart from a stuck stack. Strip with `move-diag`.
+        if (trace_enabled()) {
+            int rawLt = 0;
+            int level = 0;
+            gamepad_ui_split_trigger_debug(&rawLt, &level);
+            Object* it = barter_slot_item(listId, row);
+            trace_event(TRACE_INPUT, "barter-a", "list=%d row=%d pid=%d lt=%d lvl=%d amount=%s",
+                listId, row, it != NULL ? it->pid : -1, rawLt, level, splitNow ? "ALL" : "ONE");
+        }
+
+        barter_transfer_slot(listId, row, splitNow ? BARTER_AMOUNT_ALL : BARTER_AMOUNT_ONE);
+
+        barter_reanchor_cursor(mouseX, mouseY);
+        return -1;
+    }
+
+    // LB/RB: step to the previous/next COLUMN. The shoulders are the column axis, the D-pad is
+    // the item axis -- one gesture, one meaning. They used to walk the flat left-to-right list of
+    // every occupied slot, crossing into the next column only once the current one ran out, so
+    // "go to the other pile" cost as many presses as that pile had items.
+    //
+    // Empty columns are SKIPPED, not landed on: with no occupied slot there is nothing to point
+    // at and A would do nothing, so stopping there would just strand the cursor. The row carries
+    // across (clamped to what the target column has), so a sideways step lands level.
+    if ((rbEdge || lbEdge) && nSlots > 0) {
+        int c;
+        int row;
+        if (over >= 0) {
+            c = slots[over].listId;
+            row = slots[over].row;
+        } else {
+            c = barter_nearest_column(mouseX - winRect.left);
+            row = 0;
+        }
+
+        // ⚠️ STEP INTO THE NEXT COLUMN EVEN WHEN IT IS EMPTY. Empty columns used to be skipped --
+        // "there is nothing to point at and A would do nothing there" -- and that reasoning was
+        // wrong in the hand: an offer table is empty exactly at the start of every trade, so the
+        // shoulder button silently jumped PAST the table you were trying to reach and the player
+        // could not tell whether he had pressed it at all ("když nejsou itemy v columnu, tak na to
+        // neskáče LB nebo RB"). A cursor sitting on an empty slot is honest -- it shows where you
+        // are -- and the actions there simply do nothing, which is the same answer the mouse gives.
+        //
+        // One step, one column, always: no searching, no wrapping past anything.
+        int dir = rbEdge ? 1 : -1;
+        int target = (c + dir + 4) % 4;
+        int rows = barter_col_rows(slots, nSlots, target);
+        if (rows > 0) {
+            barter_warp_to_slot(slots, nSlots, target, row < rows ? row : rows - 1);
+        } else {
+            // No slots collected for that column -- it is empty, so put the cursor on where its
+            // first row WOULD be. The geometry is fixed by the window art, not by the contents.
+            static const int colsX[4] = {
+                INVENTORY_TRADE_LEFT_SCROLLER_X, INVENTORY_TRADE_INNER_LEFT_SCROLLER_X,
+                INVENTORY_TRADE_INNER_RIGHT_SCROLLER_X, INVENTORY_TRADE_RIGHT_SCROLLER_X
+            };
+            barter_warp_cursor(winRect.left + colsX[target] + INVENTORY_SLOT_WIDTH / 2,
+                winRect.top + INVENTORY_TRADE_SCROLLER_Y + INVENTORY_SLOT_HEIGHT / 2);
+        }
+        return -1;
+    }
+
+    // Y offers the trade; B / BACK leave.
+    if (yEdge) {
+        return KEY_LOWERCASE_M;
+    }
+    if (bEdge || backEdge) {
+        return KEY_ESCAPE;
+    }
+
+    // D-pad up/down: move the cursor between items in one column. It advances the SELECTION
+    // through the visible slots first and only SCROLLS the list once the cursor is already on
+    // the top/bottom visible slot and there are more items off-screen. This is what lets you
+    // reach the middle and last items -- the old "scroll only" behaviour left the cursor stuck
+    // on the first visible slot, so the 2nd/3rd items were unreachable once scrolling maxed out.
+    if (upEdge || downEdge) {
+        static const int upKeys[4] = { KEY_ARROW_UP, KEY_PAGE_UP, KEY_CTRL_PAGE_UP, KEY_CTRL_ARROW_UP };
+        static const int downKeys[4] = { KEY_ARROW_DOWN, KEY_PAGE_DOWN, KEY_CTRL_PAGE_DOWN, KEY_CTRL_ARROW_DOWN };
+
+        // Which column, and which visible row within it, is the cursor on? If it isn't over a
+        // slot yet, anchor onto the nearest column (first slot on a down press, last on up).
+        int c;
+        int row;
+        if (over >= 0) {
+            c = slots[over].listId;
+            row = slots[over].row;
+        } else {
+            c = barter_nearest_column(mouseX - winRect.left);
+            row = -1;
+        }
+
+        int length;
+        int offset;
+        barter_col_range(c, &length, &offset);
+        int remaining = length - offset;
+        int visible = remaining < gInventorySlotsCount ? remaining : gInventorySlotsCount;
+        if (visible <= 0) {
+            return -1;
+        }
+
+        if (row < 0) {
+            // Not anchored yet: land on the first (down) / last (up) visible item.
+            barter_warp_to_slot(slots, nSlots, c, downEdge ? 0 : visible - 1);
+            return -1;
+        }
+
+        if (downEdge) {
+            if (row + 1 < visible) {
+                barter_warp_to_slot(slots, nSlots, c, row + 1); // next item down
+                return -1;
+            }
+            if (remaining > gInventorySlotsCount) {
+                return downKeys[c]; // at bottom edge, more below -> scroll (cursor stays on last row)
+            }
+            return -1; // already on the last item
+        }
+
+        // upEdge
+        if (row - 1 >= 0) {
+            barter_warp_to_slot(slots, nSlots, c, row - 1); // next item up
+            return -1;
+        }
+        if (offset > 0) {
+            return upKeys[c]; // at top edge, more above -> scroll (cursor stays on first row)
+        }
+        return -1; // already on the first item
+    }
+
+    return -1;
 }
 
 // 0x4757F0
@@ -5070,6 +6847,20 @@ void inventoryOpenTrade(int win, Object* barterer, Object* playerTable, Object* 
         assert(false && "Should be unreachable");
     }
 
+    // CE: while the barter window owns the screen the left-stick item snap stands down (it would grab
+    // the slot buttons and fight the LB/RB stepping). Cleared right after the loop.
+    gamepad_ui_set_suppress_snap(true);
+
+    // CE: START ON YOUR OWN FIRST ITEM, on a controller (never under a mouse player's hand).
+    if (gamepad_ui_get_controller() != nullptr) {
+        Rect bWinRect;
+        BarterSlot bSlots[4 * 3];
+        int bCount = barter_collect_slots(bSlots, 4 * 3, &bWinRect);
+        if (bCount > 0) {
+            barter_warp_to_slot(bSlots, bCount, 0, 0);
+        }
+    }
+
     int keyCode = -1;
     for (;;) {
         sharedFpsLimiter.mark();
@@ -5079,6 +6870,14 @@ void inventoryOpenTrade(int win, Object* barterer, Object* playerTable, Object* 
         }
 
         keyCode = inputGetInput();
+
+        // CE: the pad in the trade window. Runs every frame (LB/RB move the cursor as a side effect);
+        // its injected keyCode only applies when nothing else did.
+        int padKey = barter_gamepad_input();
+        if (keyCode == -1 && padKey != -1) {
+            keyCode = padKey;
+        }
+
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
             showQuitConfirmationDialog();
         }
@@ -5300,6 +7099,8 @@ void inventoryOpenTrade(int win, Object* barterer, Object* playerTable, Object* 
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    gamepad_ui_set_suppress_snap(false);
 
     itemMoveAll(hiddenBox, barterer);
     objectDestroy(hiddenBox, nullptr);
@@ -5547,11 +7348,161 @@ static void _draw_amount(int value, int inventoryWindowType)
 }
 
 // 0x47688C
+static bool mt_pad_arm = true;
+
+// ⚠️ A PRESSES WHAT THE CURSOR IS ON, once the cursor has been moved (fallout1-ce 2026-10-17). With
+// the cursor where it was when the window opened, A is the quick DONE; once it has been moved onto a
+// button, A presses that button -- PLACE, DONE, CANCEL, + or -.
+//
+// ⚠️ ...BY ITS OWN KEY, NOT BY A CLICK (Fallout 2 Realtime 2026-10-24). It used to leave the press to
+// the mouse hook's A-as-left-click, and that click is what leaked: opened from the WORLD (the wheel, a
+// quick slot) the window is no self-nav screen, so the hook's world A router clicked through it, the
+// window closed on its own A edge with the button still down, and the release walked the dude to the
+// cursor -- off the explosive he was putting down (f2_trace_2026-10-24_113000 s=315.91, make-path to
+// the next tile; autotest screen-explosive-place, 4 steps). Now the window owns A
+// (gamepad_ui_set_suppress_a_click for its whole life, a real trackpad click still passes) and
+// answers it with the button's own code; its close bumps the input epoch so the still-held A is
+// nobody's press.
+static int mt_window_type = -1;
+static int mt_open_mx = -1;
+static int mt_open_my = -1;
+
+// The key of the button under the cursor, -1 when it is on none.
+static int mt_button_under_cursor()
+{
+    if (_mt_wid == -1) {
+        return -1;
+    }
+    bool timer = mt_window_type == INVENTORY_WINDOW_TYPE_SET_TIMER;
+    int px = timer ? 194 : 200;
+    int py = timer ? 64 : 46;
+    if (mouseHitTestInWindow(_mt_wid, px, py, px + 16 - 1, py + 12 - 1)) {
+        return 6000; // +
+    }
+    if (mouseHitTestInWindow(_mt_wid, px, py + 12, px + 17 - 1, py + 24 - 1)) {
+        return 7000; // -
+    }
+    if (mouseHitTestInWindow(_mt_wid, 98, 128, 98 + 15 - 1, 128 + 16 - 1)) {
+        return KEY_RETURN; // DONE
+    }
+    if (mouseHitTestInWindow(_mt_wid, 148, 128, 148 + 15 - 1, 128 + 16 - 1)) {
+        return KEY_ESCAPE; // CANCEL
+    }
+    if (timer) {
+        return mouseHitTestInWindow(_mt_wid, 120, 86, 120 + MT_PLACE_W - 1, 86 + MT_PLACE_H - 1) ? MT_KEY_PLACE : -1;
+    }
+    return mouseHitTestInWindow(_mt_wid, 120, 80, 120 + 94 - 1, 80 + 33 - 1) ? 5000 : -1; // ALL
+}
+
+// The window's hold on A, for as long as it is up (see mt_button_under_cursor).
+struct MtPadOwner {
+    bool previous;
+    MtPadOwner()
+        : previous(gamepad_ui_set_suppress_a_click(true))
+    {
+    }
+    ~MtPadOwner()
+    {
+        gamepad_ui_set_suppress_a_click(previous);
+        gamepad_ui_bump_input_epoch();
+    }
+};
+
+// Re-arm the picker's gamepad edge detection so a button still held from whatever opened
+// the picker (e.g. LT+A in barter) doesn't instantly fire on the first frame.
+static void move_timer_gamepad_reset()
+{
+    mt_pad_arm = true;
+}
+
+// CE: Gamepad control for the quantity picker (inventoryQuantitySelect). A = confirm (KEY_RETURN),
+// B = cancel (KEY_ESCAPE), Y = set to max (5000), D-pad Up/Right = +1 (6000), D-pad
+// Down/Left = -1 (7000). The +/- steps auto-repeat while held so you can ramp the count
+// up quickly. Read SDL directly -- gamepad_ui_tick doesn't run in this modal loop.
+static int move_timer_gamepad_keycode()
+{
+    static bool prevA = false;
+    static bool prevB = false;
+    static bool prevY = false;
+    static bool prevX = false;
+    static bool prevInc = false;
+    static bool prevDec = false;
+    static Uint32 lastStep = 0;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == NULL) {
+        prevA = prevB = prevY = prevX = prevInc = prevDec = false;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    bool xNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
+    bool incNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0;
+    bool decNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0;
+
+    // First frame of a picker session: adopt the current button states as the baseline so
+    // a held A/LT (used to OPEN the picker) isn't read as a confirm edge.
+    if (mt_pad_arm) {
+        prevA = aNow;
+        prevB = bNow;
+        prevY = yNow;
+        prevX = xNow;
+        prevInc = incNow;
+        prevDec = decNow;
+        mt_pad_arm = false;
+        mouseGetPosition(&mt_open_mx, &mt_open_my);
+        return -1;
+    }
+
+    int keyCode = -1;
+    Uint32 now = SDL_GetTicks();
+    if (aNow && !prevA) {
+        int mx;
+        int my;
+        mouseGetPosition(&mx, &my);
+        bool moved = mx != mt_open_mx || my != mt_open_my;
+        // On a button A presses it (see mt_open_mx); anywhere else A is DONE.
+        keyCode = moved ? mt_button_under_cursor() : -1;
+        if (keyCode == -1) {
+            keyCode = KEY_RETURN;
+        }
+    } else if (bNow && !prevB) {
+        keyCode = KEY_ESCAPE;
+    } else if (yNow && !prevY) {
+        keyCode = 5000; // set to max
+    } else if (xNow && !prevX) {
+        keyCode = MT_KEY_PLACE; // set the timer and put it down (SET TIMER only)
+    } else if (incNow && (!prevInc || now - lastStep >= 120)) {
+        keyCode = 6000; // +1
+        lastStep = now;
+    } else if (decNow && (!prevDec || now - lastStep >= 120)) {
+        keyCode = 7000; // -1
+        lastStep = now;
+    }
+
+    prevA = aNow;
+    prevB = bNow;
+    prevY = yNow;
+    prevX = xNow;
+    prevInc = incNow;
+    prevDec = decNow;
+    return keyCode;
+}
+
 static int inventoryQuantitySelect(int inventoryWindowType, Object* item, int max)
 {
     ScopedGameMode gm(GameMode::kCounter);
+    MtPadOwner padOwner;
 
+    mt_window_type = inventoryWindowType;
     inventoryQuantityWindowInit(inventoryWindowType, item);
+    move_timer_gamepad_reset();
+    mt_place_requested = false;
 
     int value;
     int min;
@@ -5573,15 +7524,27 @@ static int inventoryQuantitySelect(int inventoryWindowType, Object* item, int ma
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        // CE: the pad (A/B/Y/X + D-pad) when no real key fired.
+        if (keyCode == -1) {
+            keyCode = move_timer_gamepad_keycode();
+        }
+
         if (keyCode == KEY_ESCAPE) {
             inventoryQuantityWindowFree(inventoryWindowType);
             return -1;
         }
 
-        if (keyCode == KEY_RETURN) {
+        // P = PLACE for the keyboard.
+        if (keyCode == KEY_LOWERCASE_P || keyCode == KEY_UPPERCASE_P) {
+            keyCode = MT_KEY_PLACE;
+        }
+        bool place = keyCode == MT_KEY_PLACE && inventoryWindowType == INVENTORY_WINDOW_TYPE_SET_TIMER;
+        if (keyCode == KEY_RETURN || place) {
             if (value >= min && value <= max) {
                 if (inventoryWindowType != INVENTORY_WINDOW_TYPE_SET_TIMER || value % 10 == 0) {
                     soundPlayFile("ib1p1xx1");
+                    mt_place_requested = place;
                     break;
                 }
             }
@@ -5760,6 +7723,26 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
                 105,
                 windowBuffer + 34 * windowDescription->width + 113,
                 windowDescription->width);
+        }
+
+        // PLACE -- the ALL plate, 6 px lower than ALL sits in the move-items mode (the clock reaches
+        // further down than the counter). Its label is drawn into a COPY of the art.
+        FrmImage plateUpFrm;
+        FrmImage plateDownFrm;
+        if (plateUpFrm.lock(buildFid(OBJ_TYPE_INTERFACE, 307, 0, 0, 0)) && plateDownFrm.lock(buildFid(OBJ_TYPE_INTERFACE, 308, 0, 0, 0))) {
+            memcpy(mt_place_up, plateUpFrm.getData(), sizeof(mt_place_up));
+            memcpy(mt_place_down, plateDownFrm.getData(), sizeof(mt_place_down));
+
+            const char* label = "PLACE";
+            int length = fontGetStringWidth(label);
+            fontDrawText(mt_place_up + (MT_PLACE_W - length) / 2 + 4 * MT_PLACE_W, label, 200, MT_PLACE_W, _colorTable[21091]);
+            fontDrawText(mt_place_down + (MT_PLACE_W - length) / 2 + 4 * MT_PLACE_W, label, 200, MT_PLACE_W, _colorTable[18977]);
+
+            int placeBtn = buttonCreate(_mt_wid, 120, 86, MT_PLACE_W, MT_PLACE_H, -1, -1, -1, MT_KEY_PLACE,
+                mt_place_up, mt_place_down, nullptr, BUTTON_FLAG_TRANSPARENT);
+            if (placeBtn != -1) {
+                buttonSetCallbacks(placeBtn, _gsound_red_butt_press, _gsound_red_butt_release);
+            }
         }
     }
 
@@ -5952,6 +7935,33 @@ int _inven_set_timer(Object* item)
     }
 
     return seconds;
+}
+
+// Did the last timer window end on PLACE? Read once -- the answer is cleared.
+bool inven_set_timer_place_requested()
+{
+    bool requested = mt_place_requested;
+    mt_place_requested = false;
+    return requested;
+}
+
+// PLACE from the inventory's own Use (both paths): the freshly armed explosive goes on the ground the
+// way the Drop action puts it there -- back from a hand box into the pack first -- and the screen's
+// close runs vanilla's "they saw that" (_dropped_explosive).
+static void inven_place_if_requested(Object* item, Object* owner, Object** handSlot)
+{
+    if (!inven_set_timer_place_requested()) {
+        return;
+    }
+    if (!explosiveIsActiveExplosive(item->pid)) {
+        return;
+    }
+    if (handSlot != NULL) {
+        itemAdd(owner, item, 1);
+        *handSlot = NULL;
+    }
+    _obj_drop(owner, item);
+    _dropped_explosive = true;
 }
 
 Object* inven_get_current_target_obj()

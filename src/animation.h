@@ -12,6 +12,10 @@ typedef enum AnimationRequestOptions {
     ANIMATION_REQUEST_NO_STAND = 0x04,
     ANIMATION_REQUEST_PING = 0x100,
     ANIMATION_REQUEST_INSIGNIFICANT = 0x200,
+    // Realtime build (from fallout1-ce): a move that is one leg of a longer one (a chase segment, a
+    // flee leg): when it ends, hold the body in its stride for a beat instead of snapping it to
+    // ANIM_STAND, because the next leg is about to be registered. See anim_defer_stand in animation.cc.
+    ANIMATION_REQUEST_DEFER_STAND = 0x400,
 } AnimationRequestOptions;
 
 // Basic animations: 0-19

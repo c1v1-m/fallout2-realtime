@@ -1,0 +1,32 @@
+# F2 repro of his crash (2026-10-24 00:28): the end of the Temple of Trials -- talk Cameron (Warrior,
+# ARCAVES floor 2) out of the fight with his replies, then hold START (quick save) while Cameron's
+# script takes over. His run: a LOAD started, failed in _SlotMap2Game (gameReset), crash 90 s later.
+name m-cameron
+map ARCAVES.MAP
+mapscript on
+seed 1
+duration 45
+dude elevation 2
+dude tile 14525 rot 1
+dude stat IN 8
+dude stat CH 8
+dude skill speech 120
+
+talk 1500 16777490
+shot 3500
+tap 4500 A
+tap 6500 A
+shot 7500
+tap 8500 DOWN
+tap 9500 A
+shot 10500
+tap 11500 A
+shot 12500
+tap 13500 A
+pad 14200 start 1
+shot 15000
+pad 16800 start 0
+shot 18000
+shot 22000
+shot 30000
+note 40000 end

@@ -28,6 +28,12 @@
 #include "tile.h"
 #include "worldmap.h"
 
+// Realtime (fallout1-ce's object.cc changes, ported).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/game/interact_prompt.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 static int objectLoadAllInternal(File* stream);
@@ -1361,6 +1367,18 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
         return -1;
     }
 
+    // DIAG (fallout1-ce, the melee "teleport"): EVERY tile change of the DUDE while realtime combat
+    // runs -- how far it went, what animation was playing. A swing must never move him, so a line
+    // whose anim is an attack, or whose dist is 2+, IS the jump; the backtrace names who asked.
+    if (obj == gDude && tile != obj->tile && trace_enabled() && combat_rt_enabled()) {
+        int moved = tileDistanceBetween(obj->tile, tile);
+        trace_event(TRACE_FLOW, "dude-tile", "from=%d to=%d dist=%d anim=%d frame=%d x=%d y=%d",
+            obj->tile, tile, moved, FID_ANIM_TYPE(obj->fid), obj->frame, obj->x, obj->y);
+        if (moved >= 2) {
+            trace_backtrace("dude-tile-jump");
+        }
+    }
+
     if (!elevationIsValid(elevation)) {
         return -1;
     }
@@ -1488,7 +1506,13 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             mapSetElevation(elevation);
             tileSetCenter(tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
             if (isInCombat()) {
-                _game_user_wants_to_quit = 1;
+                // Realtime: changing elevation (stairs/lift) mid-combat must not boot the player to
+                // the menu -- end combat cleanly instead (see combat_rt_end_for_map_exit).
+                if (combat_rt_enabled()) {
+                    combat_rt_end_for_map_exit();
+                } else {
+                    _game_user_wants_to_quit = 1;
+                }
             }
         }
     } else {
@@ -1857,6 +1881,13 @@ int objectHide(Object* object, Rect* rect)
         return -1;
     }
 
+    // DIAG (vanishing-sprite hunt): a critter being HIDDEN is one way an enemy "just disappears."
+    if (FID_TYPE(object->fid) == OBJ_TYPE_CRITTER) {
+        trace_event(TRACE_FLOW, "obj-hide", "pid=%d id=%d tile=%d fid=%08x dude=%d",
+            object->pid, object->id, object->tile, object->fid, object == gDude ? 1 : 0);
+        trace_backtrace("obj-hide");
+    }
+
     if (_obj_adjust_light(object, 1, rect) == -1) {
         if (rect != nullptr) {
             objectGetRect(object, rect);
@@ -1923,6 +1954,16 @@ int _obj_toggle_flat(Object* object, Rect* rect)
         return -1;
     }
 
+    // DIAG (render-depth hunt): OBJECT_FLAT draws an object with the FLOOR. A critter flagged flat
+    // while still standing / mid-death renders behind the scenery.
+    if (FID_TYPE(object->fid) == OBJ_TYPE_CRITTER) {
+        trace_event(TRACE_FLOW, "obj-flat", "pid=%d id=%d tile=%d fid=%08x -> %s dead=%d x=%d y=%d",
+            object->pid, object->id, object->tile, object->fid,
+            (object->flags & OBJECT_FLAT) == 0 ? "FLAT" : "unflat",
+            (object->data.critter.combat.results & DAM_DEAD) != 0 ? 1 : 0, object->x, object->y);
+        trace_backtrace("obj-flat");
+    }
+
     ObjectListNode* node;
     ObjectListNode* previousNode;
     if (objectGetListNode(object, &node, &previousNode) == -1) {
@@ -1974,6 +2015,21 @@ int objectDestroy(Object* object, Rect* rect)
     if (object == nullptr) {
         return -1;
     }
+
+    // DIAG (vanishing-sprite hunt): a critter being ERASED is the other way an enemy disappears.
+    if (FID_TYPE(object->fid) == OBJ_TYPE_CRITTER) {
+        trace_event(TRACE_FLOW, "obj-erase", "pid=%d id=%d tile=%d fid=%08x dude=%d",
+            object->pid, object->id, object->tile, object->fid, object == gDude ? 1 : 0);
+        trace_backtrace("obj-erase");
+    }
+
+    // Raw pointers to this object, dropped BEFORE it is freed below (fallout1-ce): realtime combat's
+    // actor registry and pending attacks, a projectile flight waiting for its release frame, the
+    // animation tables (a script can erase a critter mid-animation), and the interaction prompt.
+    combat_rt_notify_critter_removed(object);
+    action_notify_object_freed(object);
+    anim_notify_object_freed(object);
+    interact_prompt_notify_object_freed(object);
 
     _gmouse_remove_item_outline(object);
 
@@ -2098,12 +2154,66 @@ Object* objectGetOwner(Object* object)
     return owner;
 }
 
+// True if gDude is standing on a map-exit grid (same test as the exit-grid check in
+// objectSetLocation). The realtime map exit tells an exit grid from a SCRIPTED transition by it.
+bool obj_dude_on_exit_grid()
+{
+    if (gDude == nullptr || !hexGridTileIsValid(gDude->tile)) {
+        return false;
+    }
+
+    for (ObjectListNode* node = gObjectListHeadByTile[gDude->tile]; node != nullptr; node = node->next) {
+        Object* obj = node->obj;
+        if (obj->elevation == gDude->elevation && isExitGridPid(obj->pid)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// A WALL or a CLOSED DOOR on this tile -- what hides the far side of it from the eye. Unlike
+// _obj_sight_blocking_at it ignores furniture and looks at every object on the tile. An open door is
+// LIGHT_THRU and passes. For interact_prompt's "nothing behind a wall".
+Object* obj_wall_blocking_at(Object* a1, int tile, int elevation)
+{
+    if (!hexGridTileIsValid(tile)) {
+        return nullptr;
+    }
+
+    for (ObjectListNode* node = gObjectListHeadByTile[tile]; node != nullptr; node = node->next) {
+        Object* object = node->obj;
+        if (object == a1 || object->elevation != elevation
+            || (object->flags & OBJECT_HIDDEN) != 0 || (object->flags & OBJECT_LIGHT_THRU) != 0) {
+            continue;
+        }
+        int type = FID_TYPE(object->fid);
+        if (type == OBJ_TYPE_WALL) {
+            return object;
+        }
+        if (type == OBJ_TYPE_SCENERY) {
+            Proto* proto;
+            if (protoGetProto(object->pid, &proto) != -1 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+                return object;
+            }
+        }
+    }
+
+    return nullptr;
+}
+
 // 0x48B318
 void _obj_remove_all()
 {
     ObjectListNode* node;
     ObjectListNode* prev;
     ObjectListNode* next;
+
+    // Realtime combat, the smoothing tables and the interaction prompt hold pointers into the
+    // objects about to be freed (a mid-combat map exit): drop them BEFORE they dangle.
+    combat_rt_notify_objects_freed();
+    anim_smooth_reset();
+    interact_prompt_reset();
 
     _scr_remove_all();
 
@@ -2343,6 +2453,14 @@ void objectGetRect(Object* obj, Rect* rect)
 
             tileScreenX += obj->x;
             tileScreenY += obj->y;
+
+            // Where it is DRAWN (Smooth movement, animation.cc) -- a dirty rect that missed the glide
+            // would leave the sprite smeared across the floor.
+            int glideX;
+            int glideY;
+            anim_smooth_offset(obj, &glideX, &glideY);
+            tileScreenX += glideX;
+            tileScreenY += glideY;
 
             rect->left = tileScreenX - width / 2;
             rect->top = tileScreenY - height + 1;
@@ -2921,6 +3039,13 @@ int _obj_intersects_with(Object* object, int x, int y)
 
                 tileScreenX += object->x;
                 tileScreenY += object->y;
+
+                // The pointer finds a gliding body where it is drawn.
+                int glideX;
+                int glideY;
+                anim_smooth_offset(object, &glideX, &glideY);
+                tileScreenX += glideX;
+                tileScreenY += glideY;
 
                 minX = tileScreenX - width / 2;
                 maxX = minX + width - 1;
@@ -4667,6 +4792,13 @@ static void objectDrawOutline(Object* object, Rect* rect)
         x += object->x;
         y += object->y;
 
+        // The outline follows the glide, like the body it outlines (_obj_render_object).
+        int glideX;
+        int glideY;
+        anim_smooth_offset(object, &glideX, &glideY);
+        x += glideX;
+        y += glideY;
+
         objectRect.left = x - frameWidth / 2;
         objectRect.top = y - (frameHeight - 1);
         objectRect.right = objectRect.left + frameWidth - 1;
@@ -4912,6 +5044,14 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
 
         objectScreenX += object->x;
         objectScreenY += object->y;
+
+        // Smooth movement: drawn where its glide has got to (animation.cc). objectGetRect and the hit
+        // test add the very same offset, so the dirty rects always cover what is on screen.
+        int glideX;
+        int glideY;
+        anim_smooth_offset(object, &glideX, &glideY);
+        objectScreenX += glideX;
+        objectScreenY += glideY;
 
         objectRect.left = objectScreenX - frameWidth / 2;
         objectRect.top = objectScreenY - (frameHeight - 1);

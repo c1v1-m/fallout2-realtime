@@ -1,0 +1,19 @@
+# (A) Load the mid-fight quick save rtchunk-save-fight wrote: the two raiders must come back FIGHTING him
+# (before the chunk they came back neutral: map.cc NULLs every whoHitMe on a load). The bot is off.
+name rtchunk-load-fight
+map DESERT1.MAP
+loadslot 1
+seed 1
+duration 12
+
+note 500 loaded
+note 11000 end
+
+expect \[FLOW/autotest\] loadslot 1 rc=0
+expect ap-restore\]
+expect quick-slots-restore\]
+expect fight-load\] map=0 cur=0 elev=0 saved=2 resolved=2
+expect-count >=2 \[FLOW/fight-restore\] id=
+expect-not fight-restore-left
+expect-count >=1 \[COMBAT/attack\] NPC
+expect-not load-handler-failed

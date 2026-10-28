@@ -27,6 +27,12 @@
 #include "text_font.h"
 #include "window_manager.h"
 
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's automap.cc change, ported).
+#include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 #define AUTOMAP_OFFSET_COUNT (AUTOMAP_MAP_COUNT * ELEVATION_COUNT)
@@ -398,6 +404,24 @@ void automapShow(bool isInGame, bool isUsingScanner)
     gameMouseSetCursor(MOUSE_CURSOR_ARROW);
 
     bool done = false;
+
+    // A SHOULDER BUTTON CLOSES IT AGAIN (fallout1-ce 2026-10-17): the motion sensor in an LB / RB quick
+    // slot opens this map, and the same button puts it away. Latched to the state at opening; B and
+    // BACK close it too (rt_pad_pressed: seen released first).
+    bool padPrevLb = true;
+    bool padPrevRb = true;
+    {
+        SDL_GameController* pad = gamepad_ui_get_controller();
+        if (pad != nullptr) {
+            SDL_GameControllerUpdate();
+            padPrevLb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+            padPrevRb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
+        }
+    }
+    bool padArmedB = false;
+    bool padArmedBack = false;
+    bool closedByPad = false;
+
     while (!done) {
         sharedFpsLimiter.mark();
 
@@ -406,6 +430,21 @@ void automapShow(bool isInGame, bool isUsingScanner)
         // FIXME: There is minor bug in the interface - pressing H/L to toggle
         // high/low details does not update switch state.
         int keyCode = inputGetInput();
+
+        SDL_GameController* pad = gamepad_ui_get_controller();
+        if (pad != nullptr) {
+            SDL_GameControllerUpdate();
+            bool lb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+            bool rb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
+            if ((lb && !padPrevLb) || (rb && !padPrevRb)
+                || rt_pad_pressed(SDL_CONTROLLER_BUTTON_B, &padArmedB)
+                || rt_pad_pressed(SDL_CONTROLLER_BUTTON_BACK, &padArmedBack)) {
+                keyCode = KEY_ESCAPE;
+                closedByPad = true;
+            }
+            padPrevLb = lb;
+            padPrevRb = rb;
+        }
         switch (keyCode) {
         case KEY_TAB:
         case KEY_ESCAPE:
@@ -492,6 +531,11 @@ void automapShow(bool isInGame, bool isUsingScanner)
 
     windowDestroy(window);
     fontSetCurrent(oldFont);
+
+    // The press that closed it is still down -- and may be the quick slot that opens it: a new epoch.
+    if (closedByPad) {
+        gamepad_ui_bump_input_epoch();
+    }
 }
 
 // Renders automap in Map window.

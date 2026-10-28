@@ -1,0 +1,23 @@
+# F2 play-through: Klamath with its scripts -- talk to Torr, then to Maida Buckner, on the pad.
+name m-klamath-talk
+map KLAMALL.MAP
+mapscript on
+seed 1
+census
+duration 40
+
+talk 2000 16777315
+shot 5000
+tap 6000 A
+shot 8000
+tap 10000 B
+tap 11000 B
+talk 14000 16777314
+shot 17000
+tap 18000 A
+shot 20000
+tap 22000 B
+tap 23000 B
+note 30000 the dialogue should be over
+
+expect \[FLOW/autotest\] end why=time .* modal=-1

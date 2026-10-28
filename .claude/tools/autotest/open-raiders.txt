@@ -1,0 +1,25 @@
+# Fallout 2 port of fallout1-ce's open-raiders: four raiders with pistols in the open desert; the
+# dude stands and shoots. F2 pids: 16777454 = Raider (ai 13), items as in F1 (8 10mm pistol,
+# 29 10mm JHP, 40 stimpak, 4 knife, 2 metal armor).
+name open-raiders-f2
+map DESERT1.MAP
+seed 1
+duration 60
+
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude stat EN 8
+dude hp 90
+dude skill small_guns 110
+dude armor 2
+dude wield 8
+dude item 29 6
+dude item 40 3
+
+spawn 16777454 22500 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22496 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22504 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22092 rot 5 wield 4 hostile
+
+at 0 fight

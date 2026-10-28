@@ -1,0 +1,28 @@
+# Fled-enemy memory (B, HIS DESIGN 2026-10-26): two raiders fight the dude outside the Temple of Trials
+# (ARTEMPLE, a SAVED map); mid-fight he leaves (mapgo = a scripted exit) for an empty desert map and comes back
+# 5 s later. They must be remembered at the exit and turn on him again once they see him -- before this they
+# came back neutral. If fled-remember is missing, the fight had not started by 6 s (read combat-enter).
+name rtfled-leave-return
+map ARTEMPLE.MAP
+seed 1
+duration 26
+dude tile 17288 rot 2
+dude hp 400
+dude armor 2
+cleararea 20
+spawn 16777454 17888 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 17892 rot 5 wield 8 item 29 4 hostile
+
+note 500 the raiders come
+mapgo 6000 DESERT2.MAP -1 0
+note 8000 away
+mapgo 11000 ARTEMPLE.MAP 17288 0
+note 24000 end
+
+expect combat-enter\]
+expect fled-remember] map=126 n=[23] 
+expect map-load-stage\] done name=desert2
+expect map-load-stage\] done name=artemple.sav
+expect-count >=1 fled-reaggro] .*pid=16777454
+expect-count >=2 (fled-reaggro] .*pid=16777454|fled-forget] .*pid=16777454 why=hostile)
+expect-not fight-restore\]

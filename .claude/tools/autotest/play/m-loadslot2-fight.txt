@@ -1,0 +1,10 @@
+# F2 regression for his 2026-10-24 crash: a LOADED save brings critters (and the dude) back with their
+# saved cid, and the first realtime attack wrote through the unallocated AI info list. Slot 2 of his
+# saves (a copy in build/Release/data/SAVEGAME) is the Temple of Trials with ants: fight them.
+name m-loadslot2-fight
+map DESERT1.MAP
+seed 1
+duration 25
+loadslot 2
+
+at 0 fight

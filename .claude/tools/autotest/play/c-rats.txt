@@ -1,0 +1,21 @@
+# F2 play-through: rats (their own attacks and animations) against an armed dude.
+name c-rats
+map DESERT1.MAP
+seed 1
+duration 45
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude stat EN 8
+dude hp 300
+dude skill small_guns 150
+dude armor 17
+dude wield 23
+dude item 35 4
+dude item 40 4
+
+spawn 16777328 22100 rot 5 hostile
+spawn 16777328 22104 rot 5 hostile
+spawn 16777326 22300 rot 5 hostile
+
+at 0 fight

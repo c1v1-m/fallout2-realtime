@@ -1,0 +1,23 @@
+# F2 play-through: plasma grenades from the RB quick slot.
+name w-plasmagrenade
+map DESERT1.MAP
+seed 1
+duration 30
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude hp 250
+dude skill throwing 130
+dude armor 2
+dude wield 8
+dude item 29 2
+dude item 26 4
+dude quickslot rb 26
+
+spawn 16777454 21700 rot 5 wield 8 item 29 2 hostile
+spawn 16777454 21702 rot 5 wield 8 item 29 2 hostile
+
+at 0 throw
+at 6 throw
+at 12 throw
+at 18 fight

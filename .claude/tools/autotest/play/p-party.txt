@@ -1,0 +1,24 @@
+# F2 play-through: Sulik and Vic RECRUITED (party), against four raiders -- do followers fight?
+name p-party
+map DESERT1.MAP
+seed 1
+duration 50
+dude tile 20100 rot 2
+dude stat PE 8
+dude stat AG 8
+dude hp 250
+dude skill small_guns 120
+dude armor 2
+dude wield 8
+dude item 29 4
+dude item 40 4
+
+spawn 16777313 20302 rot 2 wield 5 party
+spawn 16777278 19902 rot 2 wield 8 item 29 3 party
+
+spawn 16777454 22500 rot 5 wield 8 item 29 2 hostile
+spawn 16777454 22496 rot 5 wield 8 item 29 2 hostile
+spawn 16777455 22900 rot 5 wield 4 hostile
+spawn 16777455 22904 rot 5 wield 4 hostile
+
+at 0 fight

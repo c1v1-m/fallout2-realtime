@@ -35,6 +35,12 @@
 #include "tile.h"
 #include "window_manager.h"
 
+// Realtime (fallout1-ce's intface.cc changes, ported).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 // The width of connectors in the indicator box.
@@ -109,6 +115,7 @@ static int _intface_change_fid_callback(Object* a1, Object* a2);
 static void interfaceBarSwapHandsAnimatePutAwayTakeOutSequence(int previousWeaponAnimationCode, int weaponAnimationCode);
 static int intface_init_items();
 static int interfaceBarRefreshMainAction();
+static void intface_build_ap_lights();
 static int endTurnButtonInit();
 static int endTurnButtonFree();
 static int endCombatButtonInit();
@@ -293,6 +300,12 @@ int gInterfaceBarContentOffset = 0;
 int gInterfaceBarWidth = -1;
 bool gInterfaceBarIsCustom = false;
 static Art* gCustomInterfaceBarBackground = nullptr;
+
+// Realtime build: the IFACE_BAR_WIDTH f2_res.ini asked for, when svga.cc had to narrow the bar to leave
+// the LB / RB slots their room (0 = not narrowed). customInterfaceBarInit then cuts the narrower bar
+// out of that wider art -- see interface_bar_cut.
+int gInterfaceBarSourceWidth = 0;
+static unsigned char* gCustomInterfaceBarCut = nullptr;
 
 int gInterfaceSidePanelsImageId = 2;
 bool gInterfaceSidePanelsExtendFromScreenEdge = false;
@@ -563,6 +576,16 @@ int interfaceInit()
         return intface_fatal_error(-1);
     }
 
+    // The two-AP bulb, built from the green one (realtime's AP strip shows up to twenty points).
+    intface_build_ap_lights();
+
+    // MODS "Combat box sound" -- default OFF (his setting); 1 = the vanilla clunk and chime.
+    {
+        int boxSound = 0;
+        configGetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_COMBAT_BOX_SOUND_KEY, &boxSound);
+        intface_set_combat_box_sound(boxSound != 0);
+    }
+
     blitBufferToBuffer(gInterfaceWindowBuffer + gInterfaceBarWidth * 14 + 316 + gInterfaceBarContentOffset, 90, 5, gInterfaceBarWidth, gInterfaceActionPointsBarBackground, 90);
 
     if (indicatorBarInit() == -1) {
@@ -602,6 +625,9 @@ void interfaceReset()
     indicatorBarReset();
 
     gInterfaceCurrentHand = 0;
+
+    // A new game or a load: no fight is live, so the combat box shuts without its animation.
+    intface_rt_combat_box_reset();
 }
 
 // 0x45E440
@@ -858,6 +884,1274 @@ bool interfaceBarEnabled()
     return gInterfaceBarEnabled;
 }
 
+// --- REALTIME (fallout1-ce's intface.cc changes, ported) ---------------------------------------------
+
+// THE COMBAT BOX IN REALTIME. Vanilla opens the end-turn/end-combat box (its curtains, endanim.frm)
+// when a fight begins and shuts it when it ends; realtime never runs _combat_begin, so it stayed shut.
+// combat_rt calls intface_rt_combat_box_tick every frame with whether a fight is ENGAGED; the box
+// opens frame by frame, lights up green, and shuts RT_BOX_CLOSE_DELAY after the fight cools (so a
+// one-frame lull never flaps it). Paint only -- the buttons themselves are turn-based and stay down.
+#define RT_BOX_CLOSE_DELAY 0.75f
+
+static int rt_box_frame = 0; // endanim frame painted now; 0 = closed, which is the bar's own art
+static int rt_box_dir = 0; // +1 opening, -1 closing, 0 settled
+static bool rt_box_want = false;
+static bool rt_box_lit = false;
+static bool rt_box_dirty = false; // a bar repaint may have wiped it: paint the current state again
+static float rt_box_accum = 0.0f;
+static float rt_box_cold_for = 0.0f;
+
+// MODS "Combat box sound" (cfg combat_box_sound): the open/close clunk and the lights chime.
+static bool rt_box_sound = true;
+
+bool intface_get_combat_box_sound()
+{
+    return rt_box_sound;
+}
+
+void intface_set_combat_box_sound(bool on)
+{
+    rt_box_sound = on;
+}
+
+// Is there a strip right of the bar wide enough for the RB slot? (Fallout 1's SIDE_PANEL_MIN_WIDTH.)
+// Without one the slot sits on the end-turn box, and the combat curtains stand down for it.
+static bool intface_side_panel_ok()
+{
+    return gInterfaceSidePanelsTrailingWindow != -1 && windowGetWidth(gInterfaceSidePanelsTrailingWindow) >= 60;
+}
+
+static void intface_rt_box_paint(Art* art, int frame, bool lights)
+{
+    unsigned char* dest = gInterfaceWindowBuffer + gInterfaceBarWidth * 38 + 580 + gInterfaceBarContentOffset;
+    unsigned char* src = artGetFrameData(art, frame, 0);
+    if (src != nullptr) {
+        blitBufferToBuffer(src, 57, 58, 57, dest, gInterfaceBarWidth);
+    }
+
+    if (lights) {
+        // endltgrn.frm -- the green lights vanilla shows while it is your turn.
+        FrmImage lightsFrmImage;
+        if (lightsFrmImage.lock(buildFid(OBJ_TYPE_INTERFACE, 109, 0, 0, 0))) {
+            blitBufferToBufferTrans(lightsFrmImage.getData(), 57, 58, 57, dest, gInterfaceBarWidth);
+        }
+    }
+
+    windowRefreshRect(gInterfaceBarWindow, &gInterfaceBarEndButtonsRect);
+}
+
+void intface_rt_combat_box_tick(bool engaged, float dt)
+{
+    // ⚠️ ONLY WITH A SIDE PANEL: without one the RB quick slot lives on this box.
+    if (gInterfaceBarWindow == -1 || !intface_side_panel_ok() || !combat_rt_enabled()) {
+        return;
+    }
+
+    if (engaged) {
+        rt_box_want = true;
+        rt_box_cold_for = 0.0f;
+    } else if (rt_box_want) {
+        rt_box_cold_for += dt;
+        if (rt_box_cold_for >= RT_BOX_CLOSE_DELAY) {
+            rt_box_want = false;
+        }
+    }
+
+    // Settled and untouched is every frame of the game but a few: leave before touching the art.
+    bool settled = rt_box_dir == 0 && (rt_box_want ? rt_box_lit : rt_box_frame == 0);
+    if (settled && !rt_box_dirty) {
+        return;
+    }
+
+    CacheEntry* handle;
+    Art* art = artLock(buildFid(OBJ_TYPE_INTERFACE, 104, 0, 0, 0), &handle);
+    if (art == nullptr) {
+        return;
+    }
+
+    int last = artGetFrameCount(art) - 1;
+    int target = rt_box_want ? last : 0;
+
+    if (rt_box_dirty) {
+        rt_box_dirty = false;
+        intface_rt_box_paint(art, rt_box_frame, rt_box_lit);
+    }
+
+    if (rt_box_frame != target) {
+        int dir = target > rt_box_frame ? 1 : -1;
+        if (dir != rt_box_dir) {
+            rt_box_dir = dir;
+            rt_box_accum = 0.0f;
+            if (rt_box_sound) {
+                soundPlayFile(dir > 0 ? "iciboxx1" : "icibcxx1");
+            }
+        }
+
+        int fps = artGetFramesPerSecond(art);
+        if (fps <= 0) {
+            fps = 10;
+        }
+
+        rt_box_accum += dt;
+        if (rt_box_accum >= 1.0f / (float)fps) {
+            // One frame per tick at most: a long frame never skips the curtains.
+            rt_box_accum = 0.0f;
+            rt_box_frame += dir;
+            rt_box_lit = false;
+            intface_rt_box_paint(art, rt_box_frame, false);
+        }
+    } else {
+        rt_box_dir = 0;
+        if (rt_box_want && !rt_box_lit) {
+            rt_box_lit = true;
+            if (rt_box_sound) {
+                soundPlayFile("icombat2");
+            }
+            intface_rt_box_paint(art, rt_box_frame, true);
+        }
+    }
+
+    artUnlock(handle);
+}
+
+// A new game or a load: shut at once, no animation, no sound.
+void intface_rt_combat_box_reset()
+{
+    bool painted = rt_box_frame != 0 || rt_box_lit;
+
+    rt_box_frame = 0;
+    rt_box_dir = 0;
+    rt_box_want = false;
+    rt_box_lit = false;
+    rt_box_dirty = false;
+    rt_box_accum = 0.0f;
+    rt_box_cold_for = 0.0f;
+
+    if (painted && gInterfaceBarWindow != -1) {
+        CacheEntry* handle;
+        Art* art = artLock(buildFid(OBJ_TYPE_INTERFACE, 104, 0, 0, 0), &handle);
+        if (art != nullptr) {
+            intface_rt_box_paint(art, 0, false);
+            artUnlock(handle);
+        }
+    }
+}
+
+void intface_rt_combat_box_invalidate()
+{
+    if (rt_box_frame != 0 || rt_box_lit) {
+        rt_box_dirty = true;
+    }
+}
+
+// --- THE QUICK SLOTS BESIDE THE BAR (fallout1-ce's intface.cc, ported) ------------------------------
+//
+// The RB quick slot (the old heal slot) and the LB quick slot: an item icon, the key that uses it and
+// how many are left, each in the end-turn box's closed frame. Fallout 2 already keeps a window on
+// each side of the bar when the screen is wider than it (sidePanelsInit -- the HRP art, or plain
+// black without it), so they live there: RB in a column hugging the bar on the right, LB its mirror
+// on the left. On a screen only 640 wide there are no side windows; RB then sits ON the end-turn box,
+// exactly as Fallout 1 does it, and the realtime combat curtains stand down for it.
+#define HEAL_SLOT_X 580
+#define HEAL_SLOT_Y 38
+#define HEAL_SLOT_W 57
+#define HEAL_SLOT_H 58
+
+// What is currently PAINTED, so the per-frame poll is free when nothing changed. -2 = never drawn,
+// which is also what a full bar repaint resets it to.
+static int heal_slot_pid = -2;
+static int heal_slot_count = -1;
+static int heal_slot_pad = -1;
+
+static int lb_slot_pid = -2;
+static int lb_slot_count = -1;
+static int lb_slot_armed = -1;
+
+void intface_invalidate_heal_slot()
+{
+    heal_slot_pid = -2;
+    heal_slot_count = -1;
+    heal_slot_pad = -1;
+    lb_slot_pid = -2;
+    lb_slot_count = -1;
+    lb_slot_armed = -1;
+}
+
+// Paints one slot at \`base\` (pitch \`pitch\`): the box frame when \`framed\`, a black plate, the icon,
+// the key label (red while its item is drawn) and the count (green, red when empty).
+static void intface_slot_paint(unsigned char* base, int pitch, bool framed, Object* item, int count, const char* label, bool armed)
+{
+    if (framed) {
+        // Out in the side strip there is no bar art to frame it, so it brings its own: the end-turn
+        // box's closed frame, the very art the RB slot sits on when there is no strip.
+        CacheEntry* frameHandle;
+        Art* frame = artLock(buildFid(OBJ_TYPE_INTERFACE, 104, 0, 0, 0), &frameHandle);
+        if (frame != nullptr) {
+            unsigned char* data = artGetFrameData(frame, 0, 0);
+            if (data != nullptr) {
+                blitBufferToBuffer(data, HEAL_SLOT_W, HEAL_SLOT_H, HEAL_SLOT_W, base, pitch);
+            }
+            artUnlock(frameHandle);
+        }
+    }
+
+    // Flat black plate, inset 2px so the box's own bevel still frames it.
+    bufferFill(base + pitch * 2 + 2, HEAL_SLOT_W - 4, HEAL_SLOT_H - 4, pitch, _colorTable[0]);
+
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+
+    int lineH = fontGetLineHeight();
+    int iconH = HEAL_SLOT_H - 8 - lineH * 2;
+
+    if (item != nullptr) {
+        // Fits the art inside the box preserving aspect, index 0 left alone -- hence the plate first.
+        artRender(itemGetInventoryFid(item), base + pitch * 4 + 4, HEAL_SLOT_W - 8, iconH, pitch);
+    }
+
+    int labelY = 4 + iconH;
+    int labelX = (HEAL_SLOT_W - fontGetStringWidth(label)) / 2;
+    fontDrawText(base + pitch * labelY + labelX, label, pitch, pitch, armed ? _colorTable[31744] : _colorTable[32747]);
+
+    char countText[8];
+    snprintf(countText, sizeof(countText), "%d", count);
+    int countY = labelY + lineH;
+    int countX = (HEAL_SLOT_W - fontGetStringWidth(countText)) / 2;
+    fontDrawText(base + pitch * countY + countX, countText, pitch, pitch, count > 0 ? _colorTable[992] : _colorTable[31744]);
+
+    fontSetCurrent(oldFont);
+}
+
+// The column both side slots use: 78 px wide (the width the old aimed-part readout set), 4 px off the
+// bar, the slot centred in it -- hugging the bar rather than drifting to the screen edge.
+static int intface_slot_column_x(int stripW, bool rightOfBar)
+{
+    int columnW = 78 < stripW - 4 ? 78 : stripW - 4;
+    int x;
+    if (rightOfBar) {
+        int columnX = stripW >= columnW + 8 ? 4 : (stripW - columnW) / 2;
+        x = columnX + (columnW - HEAL_SLOT_W) / 2;
+    } else {
+        int columnRight = stripW - 4;
+        x = columnRight - columnW + (columnW - HEAL_SLOT_W) / 2;
+    }
+    return x < 0 ? 0 : x;
+}
+
+void intface_update_heal_slot(Object* item, int count, bool armed)
+{
+    // Turn-based still owns the end-turn box, so stay off.
+    if (gInterfaceBarWindow == -1 || !combat_rt_enabled()) {
+        return;
+    }
+
+    // The label names the key: RB with a pad, T on the keyboard. Part of the change test, so plugging
+    // a pad in or out repaints it, and so is whether its item is drawn (red label).
+    int pad = gamepad_ui_get_controller() != nullptr ? 1 : 0;
+    pad += armed ? 2 : 0;
+    int pid = item != nullptr ? item->pid : -1;
+    if (pid == heal_slot_pid && count == heal_slot_count && pad == heal_slot_pad) {
+        return;
+    }
+    heal_slot_pid = pid;
+    heal_slot_count = count;
+    heal_slot_pad = pad;
+
+    const char* label = (pad & 1) ? "RB" : "T";
+
+    if (intface_side_panel_ok()) {
+        int win = gInterfaceSidePanelsTrailingWindow;
+        int pitch = windowGetWidth(win);
+        unsigned char* buffer = windowGetBuffer(win);
+        if (buffer == nullptr) {
+            return;
+        }
+        int x = intface_slot_column_x(pitch, true);
+        intface_slot_paint(buffer + pitch * HEAL_SLOT_Y + x, pitch, true, item, count, label, armed);
+        Rect rect = { x, HEAL_SLOT_Y, x + HEAL_SLOT_W - 1, HEAL_SLOT_Y + HEAL_SLOT_H - 1 };
+        windowRefreshRect(win, &rect);
+    } else {
+        int x = HEAL_SLOT_X + gInterfaceBarContentOffset;
+        intface_slot_paint(gInterfaceWindowBuffer + gInterfaceBarWidth * HEAL_SLOT_Y + x, gInterfaceBarWidth, false, item, count, label, armed);
+        windowRefreshRect(gInterfaceBarWindow, &gInterfaceBarEndButtonsRect);
+    }
+}
+
+void intface_update_quick_slot_lb(Object* item, int count, bool armed)
+{
+    if (gInterfaceBarWindow == -1 || !combat_rt_enabled() || gInterfaceSidePanelsLeadingWindow == -1) {
+        return;
+    }
+
+    int win = gInterfaceSidePanelsLeadingWindow;
+    int pitch = windowGetWidth(win);
+    unsigned char* buffer = windowGetBuffer(win);
+    if (buffer == nullptr || pitch < HEAL_SLOT_W + 4) {
+        return;
+    }
+
+    int pad = gamepad_ui_get_controller() != nullptr ? 1 : 0;
+    int pid = item != nullptr ? item->pid : -1;
+    int armedNow = (armed ? 1 : 0) + pad * 2;
+    if (pid == lb_slot_pid && count == lb_slot_count && armedNow == lb_slot_armed) {
+        return;
+    }
+    lb_slot_pid = pid;
+    lb_slot_count = count;
+    lb_slot_armed = armedNow;
+
+    int x = intface_slot_column_x(pitch, false);
+    intface_slot_paint(buffer + pitch * HEAL_SLOT_Y + x, pitch, true, item, count, pad ? "LB" : "H", armed);
+    Rect rect = { x, HEAL_SLOT_Y, x + HEAL_SLOT_W - 1, HEAL_SLOT_Y + HEAL_SLOT_H - 1 };
+    windowRefreshRect(win, &rect);
+}
+
+// --- AIMED-SHOT PART, IN THE WEAPON SLOT -----------------------------------
+//
+// Where an aimed RT goes: the part bound in the LB called-shot window (gpui_aim_last_part, default
+// HEAD), printed in the WEAPON SLOT left of its bullseye while the slot is on its AIMED mode
+// ("dej ty eyes a to kam mířím vedle toho terčíku… vlevo teda vedle toho terčíku", 2026-10-09).
+//
+// ⚠️ THE SIDE-PANEL READOUT IS GONE. From 2026-10-08 it printed "RB <part>" (later "AIM <part>")
+// above the heal slot; once the part sat next to the bullseye that was the same fact twice, and he
+// had it removed ("a zruš ho… tu duplicitu"). The slot is the only place it is shown now.
+
+// The part the slot prints; UNCALLED = nothing. Fed by intface_update_aim_part from the pad tick.
+static int aim_slot_weapon_part = HIT_LOCATION_UNCALLED;
+
+// Short enough to sit between the AP cost and the bullseye in the worn letters below.
+static const char* intface_aim_part_name(int hitLocation)
+{
+    switch (hitLocation) {
+    case HIT_LOCATION_HEAD:
+        return "HEAD";
+    case HIT_LOCATION_EYES:
+        return "EYES";
+    case HIT_LOCATION_TORSO:
+        return "TORSO";
+    case HIT_LOCATION_GROIN:
+        return "GROIN";
+    case HIT_LOCATION_LEFT_ARM:
+        return "L ARM";
+    case HIT_LOCATION_RIGHT_ARM:
+        return "R ARM";
+    case HIT_LOCATION_LEFT_LEG:
+        return "L LEG";
+    case HIT_LOCATION_RIGHT_LEG:
+        return "R LEG";
+    default:
+        return "BODY";
+    }
+}
+
+void intface_update_aim_part(int hitLocation)
+{
+    // Turn-based asks for the part on every shot; there is nothing bound to print.
+    if (gInterfaceBarWindow == -1 || !combat_rt_enabled()) {
+        return;
+    }
+
+    // Repaint the slot when the part changes, but only while it is AIMED -- otherwise it shows no
+    // part, and the next switch into the aimed mode repaints it anyway (intface_toggle_item_state /
+    // intface_item_set_aiming).
+    if (hitLocation != aim_slot_weapon_part) {
+        aim_slot_weapon_part = hitLocation;
+        int slotAction = gInterfaceItemStates[gInterfaceCurrentHand].action;
+        if (slotAction == INTERFACE_ITEM_ACTION_PRIMARY_AIMING
+            || slotAction == INTERFACE_ITEM_ACTION_SECONDARY_AIMING) {
+            interfaceBarRefreshMainAction();
+        }
+    }
+}
+
+// --- THE WORN LETTERS ----------------------------------------------------------
+//
+// *"Můžeme to udělat, ať je to taky tak ošuntělé jako celej text ve hře?"* The words on the bar
+// (AP, SINGLE, BURST, THROW...) are not a font: they are hand-drawn art with thick strokes, each
+// stroke shaded darker at its edges and lighter down its middle, the pixels varying from stroke to
+// stroke. This label is drawn the same way, and it took five rounds to get there (2026-10-09/10):
+//   1. font 101 in the art's colour -- read as pasted on;
+//   2. letters cut from the word art, colours picked at random -- "pixelated, jiný styl": the
+//      bevel IS the style, noise destroys it;
+//   3. letters cut from the art with their own colours -- right, but 11 px, as big as SINGLE;
+//      then "ten text zmenši": shrunk to 3/4 with area averaging, which no pixel art survives --
+//   4. "je to blurry, proč je to blurry": every output pixel was a mix of up to four;
+//   5. NOW: small letters DRAWN AT SIZE, 8 rows with 2-px strokes in the bar's blocky hand, nothing
+//      resampled, so every pixel is a whole palette entry and the edges stay hard.
+//
+// The shading still comes from the original: every stroke row takes the colours of a real 3-px
+// vertical stroke of the word art at the matching row -- left edge / middle / right edge along a
+// longer run, the MIDDLE for both pixels of a 2-px stroke. Seven real strokes are used, one per
+// stroke of the label, so neighbouring strokes differ the way they do on the bar.
+//
+// ⚠️ ONLY BRIGHT STROKES, AND NO DARK EDGE ON A 2-PX STROKE (2026-10-10): *"torso poslední o vypadá
+// zvláštně"*. Giving a 2-px stroke the middle + RIGHT EDGE made every round letter's right side
+// darker than its left, and the sources first chosen included SINGLE's N right stem, ten of whose
+// eleven pixels are grey -- whichever letter drew that stroke came out half grey (TORSO's last O,
+// GROIN's O and I). Measured per column, the strokes kept are the ones with no grey middle. Then the
+// colours are moved onto the AP digits' (intface_worn_build_remap), because the word art is dimmer
+// than the AP cost the label sits next to: "moc tmavé oproti AP 4".
+//
+// Checked in renders from MASTER.DAT beside AP 4 under six guns before shipping
+// (.claude/tools/sideart_preview/slotpreview.js, env SMALL=1 MULTI=1 BRIGHT=1 TWO_MID=1 REMAP=1).
+//
+// ⚠️ NO SHADOW: the black one tried under it on a gun was "strašná".
+#define WORN_H 8
+#define WORN_SPACE 3
+#define WORN_GAP 1
+#define WORN_MAX_W 64
+
+typedef struct IntfaceWornGlyph {
+    char ch;
+    const char* rows[WORN_H];
+} IntfaceWornGlyph;
+
+static const IntfaceWornGlyph intface_worn_glyphs[] = {
+    { 'H', { "##...##", "##...##", "##...##", "#######", "#######", "##...##", "##...##", "##...##" } },
+    { 'E', { "######", "######", "##....", "#####.", "#####.", "##....", "######", "######" } },
+    { 'A', { "..###..", ".#####.", "##...##", "##...##", "#######", "#######", "##...##", "##...##" } },
+    { 'D', { "#####..", "######.", "##..###", "##...##", "##...##", "##..###", "######.", "#####.." } },
+    { 'Y', { "##..##", "##..##", "##..##", ".####.", "..##..", "..##..", "..##..", "..##.." } },
+    { 'S', { ".#####", "######", "##....", "#####.", ".#####", "....##", "######", "#####." } },
+    { 'T', { "######", "######", "..##..", "..##..", "..##..", "..##..", "..##..", "..##.." } },
+    { 'O', { ".#####.", "#######", "##...##", "##...##", "##...##", "##...##", "#######", ".#####." } },
+    { 'R', { "######.", "#######", "##...##", "#######", "######.", "##.###.", "##..###", "##...##" } },
+    { 'G', { ".#####.", "#######", "##.....", "##.....", "##..###", "##...##", "#######", ".#####." } },
+    { 'I', { "##", "##", "##", "##", "##", "##", "##", "##" } },
+    { 'N', { "##...##", "###..##", "###..##", "####.##", "##.####", "##..###", "##..###", "##...##" } },
+    { 'L', { "##....", "##....", "##....", "##....", "##....", "##....", "######", "######" } },
+    { 'M', { "##....##", "###..###", "########", "##.##.##", "##.##.##", "##....##", "##....##", "##....##" } },
+};
+
+// Real 3-px vertical strokes of the word art, 11 rows tall: { intrface.lst index, left column }.
+// SINGLE (43): E's stem, L's stem, N's left stem. THRUST (45): H's two stems. BURST (40): B's stem,
+// R's stem. (SINGLE's I at column 9 stays the fallback for a source row with a gap.)
+#define WORN_STROKE_ROWS 11
+#define WORN_STROKE_ARTS 3
+static const int intface_worn_stroke_arts[WORN_STROKE_ARTS] = { 43, 45, 40 };
+static const int intface_worn_strokes[][2] = {
+    { 43, 44 },
+    { 45, 10 },
+    { 45, 18 },
+    { 40, 0 },
+    { 40, 22 },
+    { 43, 36 },
+    { 43, 13 },
+};
+
+static const IntfaceWornGlyph* intface_worn_glyph(char ch)
+{
+    for (size_t i = 0; i < sizeof(intface_worn_glyphs) / sizeof(intface_worn_glyphs[0]); i++) {
+        if (intface_worn_glyphs[i].ch == ch) {
+            return &(intface_worn_glyphs[i]);
+        }
+    }
+    return nullptr;
+}
+
+// Width in pixels; -1 when the text has a letter the set does not carry (the caller draws nothing
+// rather than a word with a hole in it).
+static int intface_worn_text_width(const char* text)
+{
+    int width = 0;
+    for (const char* p = text; *p != '\0'; p++) {
+        if (p != text) {
+            width += WORN_GAP;
+        }
+        if (*p == ' ') {
+            width += WORN_SPACE;
+            continue;
+        }
+        const IntfaceWornGlyph* glyph = intface_worn_glyph(*p);
+        if (glyph == nullptr) {
+            return -1;
+        }
+        width += (int)strlen(glyph->rows[0]);
+    }
+    return width;
+}
+
+// ⚠️ RECOLOURED ONTO THE AP DIGITS' COLOURS (2026-10-10): *"moc tmavé oproti AP 4"*. The word art
+// the shading comes from (SINGLE, BURST...) is a dimmer mix with greys and browns in it; the digits
+// are a brighter yellow. Every pixel keeps its place in the bevel but takes the digits' colour at the
+// same BRIGHTNESS RANK: the darkest word-art pixels become the darkest digit pixels, the brightest the
+// brightest. Measured from the art at first use, not hard-coded -- a replaced interface FRM brings its
+// own colours along.
+static unsigned char intface_worn_remap[256];
+static bool intface_worn_remap_ready = false;
+
+static float intface_worn_luma(int index)
+{
+    return 0.299f * _cmap[index * 3] + 0.587f * _cmap[index * 3 + 1] + 0.114f * _cmap[index * 3 + 2];
+}
+
+static void intface_worn_count(int artNum, unsigned int* counts)
+{
+    CacheEntry* handle;
+    Art* art = artLock(buildFid(OBJ_TYPE_INTERFACE, artNum, 0, 0, 0), &handle);
+    if (art == nullptr) {
+        return;
+    }
+    int size = artGetWidth(art, 0, 0) * artGetHeight(art, 0, 0);
+    unsigned char* data = artGetFrameData(art, 0, 0);
+    for (int i = 0; i < size; i++) {
+        if (data[i] != 0) {
+            counts[data[i]]++;
+        }
+    }
+    artUnlock(handle);
+}
+
+static void intface_worn_build_remap()
+{
+    for (int i = 0; i < 256; i++) {
+        intface_worn_remap[i] = (unsigned char)i;
+    }
+    intface_worn_remap_ready = true;
+
+    // Source: the bar's words (SINGLE, UNARMED, THRUST, BURST, THROW). Target: the ten AP digits
+    // (art 290), the brightest text on the slot.
+    unsigned int from[256] = { 0 };
+    unsigned int to[256] = { 0 };
+    static const int sourceArts[] = { 43, 287, 45, 40, 117 };
+    for (size_t i = 0; i < sizeof(sourceArts) / sizeof(sourceArts[0]); i++) {
+        intface_worn_count(sourceArts[i], from);
+    }
+    intface_worn_count(290, to);
+
+    unsigned int fromTotal = 0;
+    unsigned int toTotal = 0;
+    for (int i = 0; i < 256; i++) {
+        fromTotal += from[i];
+        toTotal += to[i];
+    }
+    if (fromTotal == 0 || toTotal == 0) {
+        return; // art missing: leave the colours as they are
+    }
+
+    // The target's palette entries from darkest to brightest (a 256-entry insertion sort, once).
+    int order[256];
+    int orderCount = 0;
+    for (int i = 0; i < 256; i++) {
+        if (to[i] == 0) {
+            continue;
+        }
+        int at = orderCount++;
+        while (at > 0 && intface_worn_luma(order[at - 1]) > intface_worn_luma(i)) {
+            order[at] = order[at - 1];
+            at--;
+        }
+        order[at] = i;
+    }
+
+    for (int v = 1; v < 256; v++) {
+        if (from[v] == 0) {
+            continue;
+        }
+        // v's rank among the source pixels: those darker, plus half of those exactly as bright.
+        float luma = intface_worn_luma(v);
+        unsigned int darker = 0;
+        unsigned int same = 0;
+        for (int u = 0; u < 256; u++) {
+            if (from[u] == 0) {
+                continue;
+            }
+            float l = intface_worn_luma(u);
+            if (l < luma) {
+                darker += from[u];
+            } else if (l == luma) {
+                same += from[u];
+            }
+        }
+        float rank = (darker + same * 0.5f) / fromTotal;
+
+        // ...and the target pixel at that rank.
+        unsigned int want = (unsigned int)(rank * toTotal);
+        if (want >= toTotal) {
+            want = toTotal - 1;
+        }
+        unsigned int seen = 0;
+        for (int k = 0; k < orderCount; k++) {
+            seen += to[order[k]];
+            if (seen > want) {
+                intface_worn_remap[v] = (unsigned char)order[k];
+                break;
+            }
+        }
+    }
+}
+
+// Paints `text` into `dest` (width x WORN_H, pitch == width, already zeroed: 0 is transparent, the
+// same convention as FRM data, so the result goes through trans_buf_to_buf like any art). False if
+// the stroke art could not be loaded -- the caller then draws nothing.
+static bool intface_worn_text_compose(const char* text, unsigned char* dest, int width)
+{
+    if (!intface_worn_remap_ready) {
+        intface_worn_build_remap();
+    }
+
+    // The words the strokes come from, locked once for the whole label. [0] is SINGLE, the fallback.
+    CacheEntry* handles[WORN_STROKE_ARTS];
+    Art* arts[WORN_STROKE_ARTS];
+    for (int i = 0; i < WORN_STROKE_ARTS; i++) {
+        arts[i] = artLock(buildFid(OBJ_TYPE_INTERFACE, intface_worn_stroke_arts[i], 0, 0, 0), &(handles[i]));
+        if (arts[i] == nullptr) {
+            for (int j = 0; j < i; j++) {
+                artUnlock(handles[j]);
+            }
+            return false;
+        }
+    }
+    Art* single = arts[0];
+
+    bool ok = true;
+    int x = 0;
+    for (const char* p = text; *p != '\0'; p++) {
+        int index = (int)(p - text);
+        if (p != text) {
+            x += WORN_GAP;
+        }
+        if (*p == ' ') {
+            x += WORN_SPACE;
+            continue;
+        }
+        const IntfaceWornGlyph* glyph = intface_worn_glyph(*p);
+        if (glyph == nullptr) {
+            ok = false;
+            break;
+        }
+
+        int glyphW = (int)strlen(glyph->rows[0]);
+        for (int y = 0; y < WORN_H; y++) {
+            const char* row = glyph->rows[y];
+            int sy = y * WORN_STROKE_ROWS / WORN_H;
+            for (int gx = 0; gx < glyphW && x + gx < width; gx++) {
+                if (row[gx] != '#') {
+                    continue;
+                }
+
+                // The run of stroke pixels this one sits in, and where in it.
+                int runStart = gx;
+                while (runStart > 0 && row[runStart - 1] == '#') {
+                    runStart--;
+                }
+                int runEnd = gx;
+                while (runEnd < glyphW - 1 && row[runEnd + 1] == '#') {
+                    runEnd++;
+                }
+                int column;
+                if (runEnd - runStart <= 1) {
+                    column = 1; // a 1- or 2-px stroke is all middle (see above)
+                } else {
+                    column = gx == runStart ? 0 : (gx == runEnd ? 2 : 1);
+                }
+
+                // One real stroke per stroke of the label (letter index and where the run starts).
+                const int* stroke = intface_worn_strokes[(index * 3 + runStart * 2) % (int)(sizeof(intface_worn_strokes) / sizeof(intface_worn_strokes[0]))];
+                Art* art = single;
+                for (int i = 0; i < WORN_STROKE_ARTS; i++) {
+                    if (intface_worn_stroke_arts[i] == stroke[0]) {
+                        art = arts[i];
+                    }
+                }
+                int artW = artGetWidth(art, 0, 0);
+                unsigned char* data = artGetFrameData(art, 0, 0);
+                unsigned char v = data[sy * artW + stroke[1] + column];
+                if (v == 0) {
+                    // A gap in that stroke at this row: SINGLE's I is solid top to bottom.
+                    unsigned char* iData = artGetFrameData(single, 0, 0);
+                    v = iData[sy * artGetWidth(single, 0, 0) + 9 + column];
+                }
+                if (v != 0) {
+                    dest[y * width + x + gx] = intface_worn_remap[v];
+                }
+            }
+        }
+        x += glyphW;
+    }
+
+    for (int i = 0; i < WORN_STROKE_ARTS; i++) {
+        artUnlock(handles[i]);
+    }
+    return ok;
+}
+
+
+// NON-BLOCKING HIT-POINT COUNTER (realtime). Vanilla's animated counter rolls the digits inside
+// interfaceRenderCounter's own loop, which never runs the game update -- so the whole world stopped
+// for ~250 ms on every hit the dude took. This is the same odometer stepped from the frame loop: each
+// point costs three drawn phases (the digit rolls OUT, the value steps, the digit rolls IN), at most
+// one phase per tick, so a hitch never banks up a burst and nothing blocks.
+//
+// ⚠️ THE SPEED IS A SPECTRUM (fallout1-ce 2026-10-19, his "50HP ultra rychle, malé hp 5 se bude posouvat
+// pomaleji", picked for hits and heals alike). Vanilla spends ~250 ms on any roll, and the
+// one-phase-per-tick rule stretched a big one far past that: a 50-point change crawled for 2.5 s at
+// 60 fps. Now the counter runs at a speed set by how far it still has to go -- HP_ROLL_TAU is the time
+// the gap takes to shrink by about two thirds, HP_ROLL_MIN_RATE (points per second) the slowest it ever
+// goes -- so a big change flies and settles, a scratch ticks over point by point. A heal coming in over
+// time (combat_rt_heal_over_time) is followed the same way. When the spectrum asks for more points per
+// second than three frames a point can show, one roll steps SEVERAL points (hp_roll_owed).
+#define HP_ROLL_TAU (0.25f)
+#define HP_ROLL_MIN_RATE (10.0f)
+#define HP_ROLL_PHASE_OUT 0
+#define HP_ROLL_PHASE_IN 1
+#define HP_ROLL_PHASE_SETTLE 2
+#define HP_ROLL_PHASES 3
+
+static bool hp_roll_active = false;
+static int hp_roll_target = 0;
+static float hp_roll_accum = 0.0f; // time spent in the current phase
+static float hp_roll_owed = 0.0f; // points the speed has earned and the counter not yet shown
+static int hp_roll_step = 0; // the points this roll moves, signed (chosen at its OUT phase)
+static int hp_roll_phase = HP_ROLL_PHASE_OUT;
+// For the trace line at the end of a roll (intface_hp_roll_done).
+static int hp_roll_from = 0;
+static float hp_roll_took = 0.0f;
+static int hp_roll_rolls = 0;
+static int hp_roll_max_step = 0;
+
+// [STATE/hp-roll]: how long the counter took and in how many rolls (biggest step), for a change of
+// three points or more -- what the spectrum (HP_ROLL_TAU) is checked against.
+static void intface_hp_roll_done()
+{
+    if (abs(gInterfaceLastRenderedHitPoints - hp_roll_from) >= 3) {
+        trace_event(TRACE_STATE, "hp-roll", "from=%d to=%d took=%.2f rolls=%d maxstep=%d", hp_roll_from,
+            gInterfaceLastRenderedHitPoints, hp_roll_took, hp_roll_rolls, hp_roll_max_step);
+    }
+}
+
+// The color thresholds vanilla applies at 25% / 50% of max HP, per intermediate value.
+static int intface_hp_points_color(int hp)
+{
+    int maxHp = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
+
+    if (hp < (int)((double)maxHp * 0.25)) {
+        return INTERFACE_NUMBERS_COLOR_RED;
+    } else if (hp < (int)((double)maxHp * 0.5)) {
+        return INTERFACE_NUMBERS_COLOR_YELLOW;
+    } else {
+        return INTERFACE_NUMBERS_COLOR_WHITE;
+    }
+}
+
+// Which decimal digits differ between two values: bit 0 ones, bit 1 tens, bit 2 hundreds.
+static int intface_hp_digit_mask(int a, int b)
+{
+    int aa = abs(a);
+    int bb = abs(b);
+    int mask = 0;
+
+    if (aa % 10 != bb % 10) {
+        mask |= 1;
+    }
+    if ((aa / 10) % 10 != (bb / 10) % 10) {
+        mask |= 2;
+    }
+    if (aa / 100 != bb / 100) {
+        mask |= 4;
+    }
+
+    return mask;
+}
+
+// One frame of the roll, with interfaceRenderCounter's buffer arithmetic (9x17 digits in a 360-wide
+// sheet, sign 6 wide, at 473,40). transition: 0 none, +1 rolling out, -1 rolling in.
+static void intface_hp_roll_draw(int value, int digitMask, int transition)
+{
+    if (value > 999) {
+        value = 999;
+    } else if (value < -999) {
+        value = -999;
+    }
+
+    unsigned char* numbers = _numbersFrmImage.getData() + gInterfaceLastRenderedHitPointsColor;
+    unsigned char* dest = gInterfaceWindowBuffer + gInterfaceBarWidth * 40 + gInterfaceBarContentOffset;
+
+    unsigned char* downSrc = numbers + 90;
+    unsigned char* upSrc = numbers + 99;
+    unsigned char* minusSrc = numbers + 108;
+    unsigned char* plusSrc = numbers + 114;
+
+    unsigned char* signDest = dest + 473;
+    unsigned char* hundredsDest = dest + 473 + 6;
+    unsigned char* tensDest = dest + 473 + 6 + 9;
+    unsigned char* onesDest = dest + 473 + 6 + 9 * 2;
+
+    int sign = value >= 0 ? 1 : -1;
+    int magnitude = abs(value);
+
+    int ones = magnitude % 10;
+    int tens = (magnitude / 10) % 10;
+    int hundreds = magnitude / 100;
+
+    blitBufferToBuffer(numbers + 9 * hundreds, 9, 17, 360, hundredsDest, gInterfaceBarWidth);
+    blitBufferToBuffer(numbers + 9 * tens, 9, 17, 360, tensDest, gInterfaceBarWidth);
+    blitBufferToBuffer(numbers + 9 * ones, 9, 17, 360, onesDest, gInterfaceBarWidth);
+    blitBufferToBuffer(sign >= 0 ? plusSrc : minusSrc, 6, 17, 360, signDest, gInterfaceBarWidth);
+
+    if (transition != 0) {
+        unsigned char* transitionSrc = transition > 0 ? upSrc : downSrc;
+
+        if ((digitMask & 1) != 0) {
+            blitBufferToBuffer(transitionSrc, 9, 17, 360, onesDest, gInterfaceBarWidth);
+        }
+        if ((digitMask & 2) != 0) {
+            blitBufferToBuffer(transitionSrc, 9, 17, 360, tensDest, gInterfaceBarWidth);
+        }
+        if ((digitMask & 4) != 0) {
+            blitBufferToBuffer(transitionSrc, 9, 17, 360, hundredsDest, gInterfaceBarWidth);
+        }
+    }
+
+    Rect numbersRect = { 473 + gInterfaceBarContentOffset, 40, 473 + gInterfaceBarContentOffset + 33, 40 + 17 };
+    windowRefreshRect(gInterfaceBarWindow, &numbersRect);
+}
+
+// Start -- or re-target -- the roll. Re-targeting mid-roll (a second hit while the first still
+// rolls) must NOT restart from the old value, or the counter would visibly jump backwards.
+static void intface_hp_roll_start()
+{
+    if (gInterfaceBarWindow == -1 || gDude == nullptr) {
+        return;
+    }
+
+    hp_roll_target = critterGetHitPoints(gDude);
+
+    if (hp_roll_target == gInterfaceLastRenderedHitPoints) {
+        // Nothing to roll. A roll in flight finishes the point it is on and stops there (its OUT
+        // phase finds no gap).
+        return;
+    }
+
+    // The speed is not fixed here: the tick reads it off the gap every frame (HP_ROLL_TAU).
+    if (!hp_roll_active) {
+        hp_roll_accum = 0.0f;
+        hp_roll_owed = 0.0f;
+        hp_roll_phase = HP_ROLL_PHASE_OUT;
+        hp_roll_active = true;
+        hp_roll_from = gInterfaceLastRenderedHitPoints;
+        hp_roll_took = 0.0f;
+        hp_roll_rolls = 0;
+        hp_roll_max_step = 0;
+    }
+}
+
+// Frame-loop pump for the roll (combat_rt_update calls it, fight or not).
+void intface_hp_roll_tick(float dt)
+{
+    if (!hp_roll_active) {
+        return;
+    }
+
+    if (gInterfaceBarWindow == -1 || gDude == nullptr) {
+        hp_roll_active = false;
+        return;
+    }
+
+    // Points per second for the gap as it is now; one point = three phases.
+    int gap = hp_roll_target - gInterfaceLastRenderedHitPoints;
+    float rate = (float)abs(gap) / HP_ROLL_TAU;
+    if (rate < HP_ROLL_MIN_RATE) {
+        rate = HP_ROLL_MIN_RATE;
+    }
+    float phaseSeconds = 1.0f / (rate * (float)HP_ROLL_PHASES);
+
+    hp_roll_owed += rate * dt;
+    hp_roll_took += dt;
+    if (hp_roll_owed > (float)abs(gap) + 1.0f) {
+        hp_roll_owed = (float)abs(gap) + 1.0f; // a long frame or a pause banks nothing beyond the gap
+    }
+
+    hp_roll_accum += dt;
+
+    if (hp_roll_accum < phaseSeconds) {
+        return;
+    }
+
+    // Exactly one phase per tick.
+    hp_roll_accum = 0.0f;
+
+    switch (hp_roll_phase) {
+    case HP_ROLL_PHASE_OUT: {
+        if (gap == 0) {
+            // Arrived (or the bar came back to the shown value mid-roll): settle and stop.
+            gInterfaceLastRenderedHitPointsColor = intface_hp_points_color(gInterfaceLastRenderedHitPoints);
+            intface_hp_roll_draw(gInterfaceLastRenderedHitPoints, 0, 0);
+            hp_roll_active = false;
+            hp_roll_owed = 0.0f;
+            intface_hp_roll_done();
+            break;
+        }
+        // How many points this roll moves: one while a point takes longer than a frame per phase,
+        // otherwise as many as the speed has earned since the last one.
+        int points = 1;
+        if (phaseSeconds < dt) {
+            points = (int)hp_roll_owed;
+            if (points < 1) {
+                points = 1;
+            }
+            if (points > abs(gap)) {
+                points = abs(gap);
+            }
+            hp_roll_owed -= (float)points;
+        } else {
+            hp_roll_owed = 0.0f;
+        }
+        if (hp_roll_owed < 0.0f) {
+            hp_roll_owed = 0.0f;
+        }
+        hp_roll_step = gap > 0 ? points : -points;
+        hp_roll_rolls++;
+        if (points > hp_roll_max_step) {
+            hp_roll_max_step = points;
+        }
+
+        gInterfaceLastRenderedHitPointsColor = intface_hp_points_color(gInterfaceLastRenderedHitPoints);
+        intface_hp_roll_draw(gInterfaceLastRenderedHitPoints, intface_hp_digit_mask(gInterfaceLastRenderedHitPoints, gInterfaceLastRenderedHitPoints + hp_roll_step), 1);
+        hp_roll_phase = HP_ROLL_PHASE_IN;
+        break;
+    }
+
+    case HP_ROLL_PHASE_IN: {
+        // The target may have moved since the OUT phase: never step past it, and not at all if it is
+        // now the other way.
+        int step = hp_roll_step;
+        if (gap * step <= 0) {
+            step = 0;
+        } else if (abs(step) > abs(gap)) {
+            step = gap;
+        }
+        int previous = gInterfaceLastRenderedHitPoints;
+        gInterfaceLastRenderedHitPoints += step;
+        gInterfaceLastRenderedHitPointsColor = intface_hp_points_color(gInterfaceLastRenderedHitPoints);
+        intface_hp_roll_draw(gInterfaceLastRenderedHitPoints, intface_hp_digit_mask(previous, gInterfaceLastRenderedHitPoints), -1);
+        hp_roll_phase = HP_ROLL_PHASE_SETTLE;
+        break;
+    }
+
+    case HP_ROLL_PHASE_SETTLE:
+    default:
+        gInterfaceLastRenderedHitPointsColor = intface_hp_points_color(gInterfaceLastRenderedHitPoints);
+        intface_hp_roll_draw(gInterfaceLastRenderedHitPoints, 0, 0);
+        hp_roll_phase = HP_ROLL_PHASE_OUT;
+
+        if (gInterfaceLastRenderedHitPoints == hp_roll_target) {
+            hp_roll_active = false;
+            intface_hp_roll_done();
+        }
+        break;
+    }
+}
+
+// Drop a roll in flight and snap the counter to the truth (a load, a map teardown, a new game).
+void intface_hp_roll_cancel()
+{
+    if (!hp_roll_active) {
+        return;
+    }
+
+    hp_roll_active = false;
+    hp_roll_accum = 0.0f;
+    hp_roll_phase = HP_ROLL_PHASE_OUT;
+
+    if (gInterfaceBarWindow != -1 && gDude != nullptr) {
+        interfaceRenderHitPoints(false);
+    }
+}
+
+// The LIGHT-GREEN AP bulb: one bulb worth TWO action points, for the AP beyond the ten the strip can
+// show (his pick: "udělej dvojku, světle zelená za dva AP"). Built from the green bulb, every channel
+// lifted toward white, so it stays green but reads paler. Fallout 2's own yellow bulb is used as is.
+static unsigned char moveLightGreenLight[5 * 5];
+
+static void intface_build_ap_lights()
+{
+    unsigned char* green = _greenLightFrmImage.getData();
+    for (int index = 0; index < 5 * 5; index++) {
+        unsigned char pixel = green != nullptr ? green[index] : 0;
+        if (pixel == 0) {
+            moveLightGreenLight[index] = 0;
+            continue;
+        }
+
+        int rgb = Color2RGB(pixel);
+        int r = (rgb >> 10) & 0x1F;
+        int g = (rgb >> 5) & 0x1F;
+        int b = rgb & 0x1F;
+
+        int lr = r + 12 > 0x1F ? 0x1F : r + 12;
+        int lg = g + 8 > 0x1F ? 0x1F : g + 8;
+        int lb = b + 12 > 0x1F ? 0x1F : b + 12;
+        moveLightGreenLight[index] = _colorTable[(lr << 10) | (lg << 5) | lb];
+    }
+}
+
+// SELF-HEALING WEAPON FID. The dude's sprite carries the weapon he holds in bits 12-15 of his fid,
+// and the only thing that normally updates it is the swap animation's end callback. In realtime that
+// sequence is not guaranteed to finish, or even to start, which left the hand holding one weapon and
+// the SPRITE the previous one ("vystřelil jsem z pistole, ale přehrála se animace pušky"). So the
+// fid is reconciled against the hand every frame -- only while the dude is idle, on his feet, and no
+// swap is in flight.
+static bool intface_dude_is_down()
+{
+    if (gDude == nullptr) {
+        return false;
+    }
+    int anim = FID_ANIM_TYPE(gDude->fid);
+    return _critter_is_prone(gDude) || anim == ANIM_BACK_TO_STANDING || anim == ANIM_PRONE_TO_STANDING;
+}
+
+void intface_reconcile_weapon_fid()
+{
+    if (gInterfaceBarWindow == -1 || gDude == nullptr || gInterfaceBarSwapHandsInProgress) {
+        return;
+    }
+
+    // Never fight a running animation -- that is how the fid got out of step in the first place.
+    if (animationIsBusy(gDude) != 0) {
+        return;
+    }
+
+    if (intface_dude_is_down()) {
+        return;
+    }
+
+    Object* item = gInterfaceItemStates[gInterfaceCurrentHand].item;
+    if (item == (Object*)-1) {
+        return; // hands not initialised yet
+    }
+
+    int wantCode = 0;
+    if (item != nullptr && itemGetType(item) == ITEM_TYPE_WEAPON) {
+        wantCode = weaponGetAnimationCode(item);
+    }
+
+    int haveCode = (gDude->fid & 0xF000) >> 12;
+    if (haveCode == wantCode) {
+        return;
+    }
+
+    // Keep the pose and facing the dude already has; only the weapon code changes.
+    int fid = buildFid(OBJ_TYPE_CRITTER,
+        gDude->fid & 0xFFF,
+        FID_ANIM_TYPE(gDude->fid),
+        wantCode,
+        gDude->rotation + 1);
+
+    Rect rect;
+    if (objectSetFid(gDude, fid, &rect) == 0) {
+        tileWindowRefreshRect(&rect, gDude->elevation);
+    }
+}
+
+// Is `action` a mode this weapon can actually be switched INTO? ⚠️ Realtime drops the RELOAD entry:
+// reloading has its own binding, and cycling onto it only meant a shot that did not fire.
+static bool intface_item_action_available(InterfaceItemState* itemState, int action)
+{
+    bool realtime = combat_rt_enabled();
+
+    switch (action) {
+    case INTERFACE_ITEM_ACTION_PRIMARY:
+        // Always reachable -- this is what makes the cycle terminate.
+        return true;
+    case INTERFACE_ITEM_ACTION_PRIMARY_AIMING:
+        return critterCanAim(gDude, itemState->primaryHitMode);
+    case INTERFACE_ITEM_ACTION_SECONDARY:
+        return itemState->secondaryHitMode != HIT_MODE_PUNCH
+            && itemState->secondaryHitMode != HIT_MODE_KICK
+            && weaponGetAttackTypeForHitMode(itemState->item, itemState->secondaryHitMode) != ATTACK_TYPE_NONE;
+    case INTERFACE_ITEM_ACTION_SECONDARY_AIMING:
+        return itemState->secondaryHitMode != HIT_MODE_PUNCH
+            && itemState->secondaryHitMode != HIT_MODE_KICK
+            && weaponGetAttackTypeForHitMode(itemState->item, itemState->secondaryHitMode) != ATTACK_TYPE_NONE
+            && critterCanAim(gDude, itemState->secondaryHitMode);
+    case INTERFACE_ITEM_ACTION_RELOAD:
+        return !realtime && ammoGetCapacity(itemState->item) != ammoGetQuantity(itemState->item);
+    default:
+        return false;
+    }
+}
+
+// ⚠️ THE FIRING MODE IS REMEMBERED (fallout1-ce 2026-10-22, "když spawnu nebo loadnu save tak míření je
+// vždycky defaultně na normal hit ... ať si to pamatuje to míření"). Vanilla puts a weapon slot back on
+// its plain primary mode whenever a different item lands in it -- and after a load or a new game every
+// item is a different object, so the aimed mode (or a burst) was gone every time. The bound PART was
+// already remembered (aim_part, gamepad_ui); the MODE now is too: the one the player last picked is
+// written to the cfg (fire_mode) on the spot, and every weapon that lands in a hand -- a load, a new
+// game, a swap -- starts on it when it has it. Aimed falls back to plain for a weapon that cannot aim, a
+// burst to plain for one with no burst.
+static int intface_fire_mode_pref = -2; // -2: not read from the cfg yet
+
+static int intface_fire_mode_get()
+{
+    if (intface_fire_mode_pref == -2) {
+        int value = INTERFACE_ITEM_ACTION_PRIMARY;
+        configGetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_FIRE_MODE_KEY, &value);
+        intface_fire_mode_pref = value >= INTERFACE_ITEM_ACTION_PRIMARY && value <= INTERFACE_ITEM_ACTION_SECONDARY_AIMING
+            ? value
+            : INTERFACE_ITEM_ACTION_PRIMARY;
+    }
+    return intface_fire_mode_pref;
+}
+
+// Only the player's own choices come here: a cycle (LT+Y, N, a right-click) and binding a part.
+static void intface_fire_mode_store(int action)
+{
+    if (action < INTERFACE_ITEM_ACTION_PRIMARY || action > INTERFACE_ITEM_ACTION_SECONDARY_AIMING
+        || action == intface_fire_mode_get()) {
+        return;
+    }
+    intface_fire_mode_pref = action;
+    configSetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_FIRE_MODE_KEY, action);
+    gameConfigSave(); // at once: a crash must not lose it
+    trace_event(TRACE_INPUT, "fire-mode-pref", "action=%d", action);
+}
+
+// The mode a weapon (or the bare fist / foot) that has just landed in `hand` starts on.
+static int intface_fire_mode_for(InterfaceItemState* itemState, int hand)
+{
+    int want = intface_fire_mode_get();
+    int got = INTERFACE_ITEM_ACTION_PRIMARY;
+    if (intface_item_action_available(itemState, want)) {
+        got = want;
+    } else if (want == INTERFACE_ITEM_ACTION_SECONDARY_AIMING
+        && intface_item_action_available(itemState, INTERFACE_ITEM_ACTION_PRIMARY_AIMING)) {
+        got = INTERFACE_ITEM_ACTION_PRIMARY_AIMING;
+    }
+    if (got != INTERFACE_ITEM_ACTION_PRIMARY) {
+        trace_event(TRACE_INPUT, "fire-mode-apply", "hand=%d pid=%d want=%d got=%d",
+            hand, itemState->item != nullptr ? itemState->item->pid : -1, want, got);
+    }
+    return got;
+}
+
+// Would a toggle actually land on a DIFFERENT mode? The caller can refuse audibly instead.
+bool intface_item_can_toggle_state()
+{
+    if (gInterfaceBarWindow == -1) {
+        return false;
+    }
+
+    InterfaceItemState* itemState = &(gInterfaceItemStates[gInterfaceCurrentHand]);
+    if (itemState->isWeapon == 0) {
+        return false;
+    }
+
+    for (int action = INTERFACE_ITEM_ACTION_USE; action < INTERFACE_ITEM_ACTION_COUNT; action++) {
+        if (action != itemState->action && intface_item_action_available(itemState, action)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// CE: put the active hand on its AIMED mode -- what binding a part in the called-shot window does,
+// so the next RT shot goes there (rt_player_called_loc). True when the slot shows the bullseye.
+bool intface_item_set_aiming()
+{
+    if (gInterfaceBarWindow == -1) {
+        return false;
+    }
+
+    InterfaceItemState* itemState = &(gInterfaceItemStates[gInterfaceCurrentHand]);
+    if (itemState->isWeapon == 0) {
+        return false;
+    }
+
+    int want;
+    switch (itemState->action) {
+    case INTERFACE_ITEM_ACTION_PRIMARY_AIMING:
+    case INTERFACE_ITEM_ACTION_SECONDARY_AIMING:
+        intface_fire_mode_store(itemState->action); // binding a part is choosing to aim
+        return true;
+    case INTERFACE_ITEM_ACTION_PRIMARY:
+        want = INTERFACE_ITEM_ACTION_PRIMARY_AIMING;
+        break;
+    case INTERFACE_ITEM_ACTION_SECONDARY:
+        want = INTERFACE_ITEM_ACTION_SECONDARY_AIMING;
+        break;
+    default:
+        return false;
+    }
+
+    if (!intface_item_action_available(itemState, want)) {
+        return false;
+    }
+
+    itemState->action = want;
+    interfaceBarRefreshMainAction();
+    intface_fire_mode_store(want);
+    return true;
+}
+
+// Would intface_reload_weapon do anything right now? A weapon in the active hand that takes ammo, a
+// magazine that is not full, and a box in the pack that fits -- asked WITHOUT loading anything (the
+// reload animation plays first and loads at the end).
+bool intface_can_reload_weapon()
+{
+    if (gInterfaceBarWindow == -1 || gDude == nullptr) {
+        return false;
+    }
+
+    Object* weapon = gInterfaceItemStates[gInterfaceCurrentHand].item;
+    // ⚠️ The empty hand is (Object*)-1, not null, and a hand can hold a non-weapon.
+    if (weapon == nullptr || weapon == (Object*)-1 || itemGetType(weapon) != ITEM_TYPE_WEAPON) {
+        return false;
+    }
+
+    int capacity = ammoGetCapacity(weapon);
+    if (capacity <= 0 || ammoGetQuantity(weapon) >= capacity) {
+        return false;
+    }
+
+    int index = -1;
+    Object* ammo;
+    while ((ammo = _inven_find_type(gDude, ITEM_TYPE_AMMO, &index)) != nullptr) {
+        if (weaponCanBeReloadedWith(weapon, ammo)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// The object intface_reload_weapon would reload (the active hand's), or null when that hand is empty.
+Object* intface_reload_target()
+{
+    if (gInterfaceBarWindow == -1) {
+        return nullptr;
+    }
+
+    Object* weapon = gInterfaceItemStates[gInterfaceCurrentHand].item;
+    return weapon == (Object*)-1 ? nullptr : weapon;
+}
+
+// The controller reload: the active-hand weapon from inventory ammo. Unlike _intface_item_reload it
+// does NOT cycle the item action -- a direct reload must not change the selected attack mode.
+int intface_reload_weapon()
+{
+    if (gInterfaceBarWindow == -1) {
+        return -1;
+    }
+
+    bool reloaded = false;
+    while (weaponAttemptReload(gDude, gInterfaceItemStates[gInterfaceCurrentHand].item) != -1) {
+        reloaded = true;
+    }
+
+    interfaceUpdateItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+
+    if (!reloaded) {
+        return -1;
+    }
+
+    const char* sfx = sfxBuildWeaponName(WEAPON_SOUND_EFFECT_READY, gInterfaceItemStates[gInterfaceCurrentHand].item, HIT_MODE_RIGHT_WEAPON_PRIMARY, nullptr);
+    soundPlayFile(sfx);
+
+    return 0;
+}
+
 // 0x45EB98
 void interfaceBarRefresh()
 {
@@ -866,6 +2160,10 @@ void interfaceBarRefresh()
         interfaceRenderHitPoints(false);
         interfaceRenderArmorClass(false);
         indicatorBarRefresh();
+        // The repaint above wiped the realtime combat box (and the RB slot, when it sits on the box);
+        // let the next tick put them back.
+        intface_invalidate_heal_slot();
+        intface_rt_combat_box_invalidate();
         windowRefresh(gInterfaceBarWindow);
     }
     indicatorBarRefresh();
@@ -879,6 +2177,20 @@ void interfaceRenderHitPoints(bool animate)
     if (gInterfaceBarWindow == -1) {
         return;
     }
+
+    // Realtime: hand the animation to the frame-loop roll instead of the blocking one below --
+    // wherever the frame loop runs, fight or not. Only a screen with a loop of its own (the
+    // inventory, a conversation) still gets the vanilla roll, where nothing moves while it plays.
+    if (animate
+        && (combat_rt_active() || (combat_rt_enabled() && !inven_any_open() && !GameMode::isInGameMode(GameMode::kDialog)))) {
+        intface_hp_roll_start();
+        return;
+    }
+
+    // Something authoritative is setting the value: whatever was in flight is stale.
+    hp_roll_active = false;
+    hp_roll_accum = 0.0f;
+    hp_roll_phase = HP_ROLL_PHASE_OUT;
 
     int hp = critterGetHitPoints(gDude);
     int maxHp = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
@@ -950,6 +2262,11 @@ void interfaceRenderHitPoints(bool animate)
 // 0x45EDA8
 void interfaceRenderArmorClass(bool animate)
 {
+    // The guard the other indicators carry: combat_rt pushes this every frame the value moves.
+    if (gInterfaceBarWindow == -1) {
+        return;
+    }
+
     int armorClass = critterGetStat(gDude, STAT_ARMOR_CLASS);
 
     int delay = 0;
@@ -971,6 +2288,14 @@ void interfaceRenderActionPoints(int actionPointsLeft, int bonusActionPoints)
         return;
     }
 
+    // Realtime holds the engine combat.ap maxed so movement stays free, so it can't drive the bar:
+    // every caller gets the real RT pool, and the Bonus Move reserve as the yellow bulbs. Hidden while
+    // the dude is stopped on an empty pool (it cannot move him until the red countdown ends).
+    if (combat_rt_enabled()) {
+        actionPointsLeft = combat_rt_player_ap();
+        bonusActionPoints = combat_rt_move_blocked() ? 0 : combat_rt_bonus_move_ap();
+    }
+
     blitBufferToBuffer(gInterfaceActionPointsBarBackground, 90, 5, 90, gInterfaceWindowBuffer + 14 * gInterfaceBarWidth + gInterfaceBarContentOffset + 316, gInterfaceBarWidth);
 
     if (actionPointsLeft == -1) {
@@ -980,30 +2305,64 @@ void interfaceRenderActionPoints(int actionPointsLeft, int bonusActionPoints)
     } else {
         frmData = _greenLightFrmImage.getData();
 
-        if (actionPointsLeft < 0) {
-            actionPointsLeft = 0;
-        }
-
-        if (actionPointsLeft > 10) {
-            actionPointsLeft = 10;
-        }
-
-        if (bonusActionPoints >= 0) {
-            if (actionPointsLeft + bonusActionPoints > 10) {
-                bonusActionPoints = 10 - actionPointsLeft;
-            }
-        } else {
-            bonusActionPoints = 0;
+        // Realtime: an empty pool STOPS the dude, and he may walk again only once AP climbs back to
+        // the resume threshold -- for exactly that window the refilling points light RED, so watching
+        // the reds go 1-2-3 IS the countdown to moving again.
+        if (combat_rt_enabled() && combat_rt_move_blocked()) {
+            frmData = _redLightFrmImage.getData();
         }
     }
 
-    int index;
-    for (index = 0; index < actionPointsLeft; index++) {
-        blitBufferToBuffer(frmData, 5, 5, 5, gInterfaceWindowBuffer + 14 * gInterfaceBarWidth + 316 + index * 9 + gInterfaceBarContentOffset, gInterfaceBarWidth);
+    // ⚠️ TEN BULBS, UP TO TWENTY POINTS (fallout1-ce 2026-10-04, his rules). A + M <= 10: A green, then
+    // M yellow, one point per bulb (vanilla's layout). Otherwise, from the front: M yellow worth TWO
+    // (the AP underneath plus the movement point), A - 10 light green worth TWO, the rest green, one each.
+    int apUnits = actionPointsLeft > 0 ? actionPointsLeft : 0;
+    int moveUnits = bonusActionPoints > 0 ? bonusActionPoints : 0;
+
+    int yellowDouble = 0;
+    int lightDouble = 0;
+    int greenSingle;
+    int yellowSingle = 0;
+
+    if (apUnits + moveUnits <= 10) {
+        greenSingle = apUnits;
+        yellowSingle = moveUnits;
+    } else {
+        yellowDouble = moveUnits;
+        if (yellowDouble > apUnits) {
+            yellowDouble = apUnits;
+        }
+        if (yellowDouble > 10) {
+            yellowDouble = 10;
+        }
+
+        lightDouble = apUnits > 10 ? apUnits - 10 : 0;
+        if (lightDouble > 10 - yellowDouble) {
+            lightDouble = 10 - yellowDouble;
+        }
+
+        greenSingle = apUnits - yellowDouble - 2 * lightDouble;
+        if (greenSingle > 10 - yellowDouble - lightDouble) {
+            greenSingle = 10 - yellowDouble - lightDouble;
+        }
+        if (greenSingle < 0) {
+            greenSingle = 0;
+        }
     }
 
-    for (; index < (actionPointsLeft + bonusActionPoints); index++) {
-        blitBufferToBuffer(_yellowLightFrmImage.getData(), 5, 5, 5, gInterfaceWindowBuffer + 14 * gInterfaceBarWidth + 316 + gInterfaceBarContentOffset + index * 9, gInterfaceBarWidth);
+    unsigned char* bulbs = gInterfaceWindowBuffer + 14 * gInterfaceBarWidth + 316 + gInterfaceBarContentOffset;
+    int slot = 0;
+    for (int index = 0; index < yellowDouble && slot < 10; index++) {
+        blitBufferToBuffer(_yellowLightFrmImage.getData(), 5, 5, 5, bulbs + 9 * slot++, gInterfaceBarWidth);
+    }
+    for (int index = 0; index < lightDouble && slot < 10; index++) {
+        blitBufferToBuffer(moveLightGreenLight, 5, 5, 5, bulbs + 9 * slot++, gInterfaceBarWidth);
+    }
+    for (int index = 0; index < greenSingle && slot < 10; index++) {
+        blitBufferToBuffer(frmData, 5, 5, 5, bulbs + 9 * slot++, gInterfaceBarWidth);
+    }
+    for (int index = 0; index < yellowSingle && slot < 10; index++) {
+        blitBufferToBuffer(_yellowLightFrmImage.getData(), 5, 5, 5, bulbs + 9 * slot++, gInterfaceBarWidth);
     }
 
     if (!gInterfaceBarInitialized) {
@@ -1072,7 +2431,7 @@ int interfaceUpdateItems(bool animated, int leftItemAction, int rightItemAction)
 
             if (leftItemAction == INTERFACE_ITEM_ACTION_DEFAULT) {
                 if (leftItemState->isWeapon != 0) {
-                    leftItemState->action = INTERFACE_ITEM_ACTION_PRIMARY;
+                    leftItemState->action = intface_fire_mode_for(leftItemState, HAND_LEFT);
                 } else {
                     leftItemState->action = INTERFACE_ITEM_ACTION_USE;
                 }
@@ -1090,6 +2449,7 @@ int interfaceUpdateItems(bool animated, int leftItemAction, int rightItemAction)
             // SFALL
             leftItemState->primaryHitMode = unarmedGetPunchHitMode(false);
             leftItemState->secondaryHitMode = unarmedGetPunchHitMode(true);
+            leftItemState->action = intface_fire_mode_for(leftItemState, HAND_LEFT); // the remembered mode
 
             // SFALL: Keep selected attack mode.
             // CE: Implementation is different.
@@ -1121,7 +2481,7 @@ int interfaceUpdateItems(bool animated, int leftItemAction, int rightItemAction)
 
             if (rightItemAction == INTERFACE_ITEM_ACTION_DEFAULT) {
                 if (rightItemState->isWeapon != 0) {
-                    rightItemState->action = INTERFACE_ITEM_ACTION_PRIMARY;
+                    rightItemState->action = intface_fire_mode_for(rightItemState, HAND_RIGHT);
                 } else {
                     rightItemState->action = INTERFACE_ITEM_ACTION_USE;
                 }
@@ -1138,6 +2498,7 @@ int interfaceUpdateItems(bool animated, int leftItemAction, int rightItemAction)
             // SFALL
             rightItemState->primaryHitMode = unarmedGetKickHitMode(false);
             rightItemState->secondaryHitMode = unarmedGetKickHitMode(true);
+            rightItemState->action = intface_fire_mode_for(rightItemState, HAND_RIGHT); // the remembered mode
 
             // SFALL: Keep selected attack mode.
             // CE: Implementation is different.
@@ -1221,44 +2582,22 @@ int interfaceCycleItemAction()
         bool done = false;
         while (!done) {
             itemState->action++;
-            switch (itemState->action) {
-            case INTERFACE_ITEM_ACTION_PRIMARY:
-                done = true;
-                break;
-            case INTERFACE_ITEM_ACTION_PRIMARY_AIMING:
-                if (critterCanAim(gDude, itemState->primaryHitMode)) {
-                    done = true;
-                }
-                break;
-            case INTERFACE_ITEM_ACTION_SECONDARY:
-                if (itemState->secondaryHitMode != HIT_MODE_PUNCH
-                    && itemState->secondaryHitMode != HIT_MODE_KICK
-                    && weaponGetAttackTypeForHitMode(itemState->item, itemState->secondaryHitMode) != ATTACK_TYPE_NONE) {
-                    done = true;
-                }
-                break;
-            case INTERFACE_ITEM_ACTION_SECONDARY_AIMING:
-                if (itemState->secondaryHitMode != HIT_MODE_PUNCH
-                    && itemState->secondaryHitMode != HIT_MODE_KICK
-                    && weaponGetAttackTypeForHitMode(itemState->item, itemState->secondaryHitMode) != ATTACK_TYPE_NONE
-                    && critterCanAim(gDude, itemState->secondaryHitMode)) {
-                    done = true;
-                }
-                break;
-            case INTERFACE_ITEM_ACTION_RELOAD:
-                if (ammoGetCapacity(itemState->item) != ammoGetQuantity(itemState->item)) {
-                    done = true;
-                }
-                break;
-            case INTERFACE_ITEM_ACTION_COUNT:
+            if (itemState->action == INTERFACE_ITEM_ACTION_COUNT) {
+                // Wrap: ++ on the next pass takes USE to PRIMARY, which is always available.
                 itemState->action = INTERFACE_ITEM_ACTION_USE;
-                break;
+                continue;
             }
+            done = intface_item_action_available(itemState, itemState->action);
         }
     }
 
     if (oldAction != itemState->action) {
         interfaceBarRefreshMainAction();
+        // Remembered (intface_fire_mode_store) -- except the step OFF reload that the turn-based
+        // reload path takes, which is not a choice.
+        if (itemState->isWeapon != 0 && oldAction != INTERFACE_ITEM_ACTION_RELOAD) {
+            intface_fire_mode_store(itemState->action);
+        }
     }
 
     return 0;
@@ -1305,7 +2644,14 @@ void _intface_use_item()
         gameMouseSetCursor(MOUSE_CURSOR_USE_CROSSHAIR);
         gameMouseSetMode(GAME_MOUSE_MODE_USE_CROSSHAIR);
     } else if (_obj_action_can_use(ptr->item)) {
-        if (isInCombat()) {
+        if (isInCombat() && combat_rt_enabled()) {
+            // Realtime holds the engine combat.ap maxed, so charge combat_rt's pool instead.
+            int actionPointsRequired = itemGetActionPointCost(gDude, ptr->secondaryHitMode, false);
+            if (combat_rt_spend_ap(actionPointsRequired)) {
+                _obj_use_item(gDude, ptr->item);
+                interfaceUpdateItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+            }
+        } else if (isInCombat()) {
             int actionPointsRequired = itemGetActionPointCost(gDude, ptr->secondaryHitMode, false);
             if (actionPointsRequired <= gDude->data.critter.combat.ap) {
                 _obj_use_item(gDude, ptr->item);
@@ -1564,6 +2910,9 @@ static int interfaceBarRefreshMainAction()
 
     InterfaceItemState* itemState = &(gInterfaceItemStates[gInterfaceCurrentHand]);
     int actionPoints = -1;
+    int aimPartBullseyeW = -1; // set when the bullseye is drawn: the slot is on its AIMED mode
+    int aimPartApRight = 7 + 17 + 7 + 10; // right edge of the AP cost's digit (MVEPNT.FRM + one digit)
+    int aimPartApH = 12;
 
     if (itemState->isDisabled == 0) {
         memcpy(_itemButtonUp, _itemButtonNormalFrmImage.getData(), sizeof(_itemButtonUp));
@@ -1634,6 +2983,8 @@ static int interfaceBarRefreshMainAction()
                     }
 
                     _dark_trans_buf_to_buf(data, width, height, width, _itemButtonDown, 181 - width + 1, v9, 188, 59641);
+
+                    aimPartBullseyeW = width; // the part name goes up against its left edge, below
                 }
             }
 
@@ -1738,6 +3089,8 @@ static int interfaceBarRefreshMainAction()
             unsigned char* data = apFrmImage.getData();
 
             blitBufferToBufferTrans(data, width, height, width, _itemButtonUp + 188 * (60 - height) + 7, 188);
+            aimPartApRight = 7 + width + 7 + 10; // "AP", the gap, one 10-px digit (see below)
+            aimPartApH = height; // before the pressed frame trims it
 
             int v29 = 60 - height - 2;
             if (v29 < 0) {
@@ -1793,6 +3146,27 @@ static int interfaceBarRefreshMainAction()
         }
     }
 
+    // CE: realtime names the part an AIMED shot goes to, in small worn letters drawn at size
+    // (intface_worn_text_compose), only while the slot shows its bullseye -- RIGHT AFTER THE AP COST,
+    // centred on its height, the corner no gun's art covers. Turn-based asks every shot, so nothing
+    // is printed there. On top of the item, no shadow; the pressed frame the way every word on the bar
+    // is drawn (+1, -2).
+    if (aimPartBullseyeW >= 0 && combat_rt_enabled() && aim_slot_weapon_part != HIT_LOCATION_UNCALLED) {
+        const char* partName = intface_aim_part_name(aim_slot_weapon_part);
+        int labelW = intface_worn_text_width(partName);
+        int labelX = aimPartApRight + 5;
+        int labelY = (60 - aimPartApH) + (aimPartApH - WORN_H + 1) / 2; // centred; an odd half-pixel goes down
+        bool fits = labelX + labelW <= 181 - aimPartBullseyeW - 3; // never under the bullseye
+        if (labelW > 0 && labelW <= WORN_MAX_W && fits && labelY >= 2 && labelY + WORN_H <= 67) {
+            unsigned char label[WORN_MAX_W * WORN_H];
+            memset(label, 0, sizeof(label));
+            if (intface_worn_text_compose(partName, label, labelW)) {
+                blitBufferToBufferTrans(label, labelW, WORN_H, labelW, _itemButtonUp + 188 * labelY + labelX, 188);
+                _dark_trans_buf_to_buf(label, labelW, WORN_H, labelW, _itemButtonDown, labelX + 1, labelY - 2, 188, 59641);
+            }
+        }
+    }
+
     if (!gInterfaceBarInitialized) {
         _intface_update_ammo_lights();
 
@@ -1825,6 +3199,13 @@ static int _intface_change_fid_callback(Object* a1, Object* a2)
 // 0x46066C
 static void interfaceBarSwapHandsAnimatePutAwayTakeOutSequence(int previousWeaponAnimationCode, int weaponAnimationCode)
 {
+    // Down: the hand has already changed, show it, and leave the body alone (intface_dude_is_down);
+    // the sprite catches up through intface_reconcile_weapon_fid once he is on his feet.
+    if (combat_rt_enabled() && intface_dude_is_down()) {
+        interfaceBarRefreshMainAction();
+        return;
+    }
+
     gInterfaceBarSwapHandsInProgress = true;
 
     reg_anim_clear(gDude);
@@ -1856,6 +3237,13 @@ static void interfaceBarSwapHandsAnimatePutAwayTakeOutSequence(int previousWeapo
     animationRegisterCallbackForced(nullptr, nullptr, (AnimationCallback*)_intface_change_fid_callback, -1);
 
     if (reg_anim_end() == -1) {
+        return;
+    }
+
+    // REALTIME: DO NOT BLOCK. The loop below pumps input and presents until the swap animation ends,
+    // but never runs the game update -- the whole world froze for the swap. Returning leaves the
+    // animation registered: the main loop plays it and its two callbacks still fire.
+    if (combat_rt_enabled()) {
         return;
     }
 
@@ -1995,6 +3383,13 @@ static int endCombatButtonFree()
 // 0x460AA0
 static void interfaceUpdateAmmoBar(int x, int ratio)
 {
+    // The bar is 70 pixels tall: an out-of-range ratio (a stale weapon) wrote past the window buffer.
+    if (ratio < 0) {
+        ratio = 0;
+    } else if (ratio > 70) {
+        ratio = 70;
+    }
+
     if ((ratio & 1) != 0) {
         ratio -= 1;
     }
@@ -2490,6 +3885,52 @@ bool indicatorBarHide()
     return oldIsVisible;
 }
 
+// Realtime build: A BAR NARROWER THAN ITS ART (2026-10-23, his "pipboy obrazovka může být širší, když se
+// tam najde místo pro lb a rb"). The Hi-Res patch ships the bar at 800 only, and on our 853-wide screen
+// an 800 bar leaves no room beside it for the LB / RB slots. Its message screen is the 640 bar's drawn
+// wider -- everything right of it is the 640 art column for column -- so the narrower bar is the wide
+// one with columns taken out of the middle of that screen: nothing redrawn, nothing resampled. The cut
+// sits where the columns that become neighbours differ least (measured on HR_IFACE_800: 80 columns
+// from x 146, the joint about as rough as the art's own grain). Everything right of the screen then
+// moves left with gInterfaceBarContentOffset, exactly as it moves right for the full wide bar.
+// Returns the pixels (width x art height, malloc'd) or nullptr.
+#define INTERFACE_BAR_CUT_CENTER 186
+
+static unsigned char* interface_bar_cut(Art* wide, int width)
+{
+    int srcWidth = artGetWidth(wide, 0, 0);
+    int height = artGetHeight(wide, 0, 0);
+    unsigned char* src = artGetFrameData(wide, 0, 0);
+    int remove = srcWidth - width;
+    // Only out of the stretched part of the screen: never narrower than the 640 bar it was widened from.
+    if (src == nullptr || remove <= 0 || width < 640 || remove > srcWidth - 640) {
+        return nullptr;
+    }
+
+    // The screen's glass runs from DISPLAY_MONITOR_X (23) for 167 + (srcWidth - 640) columns; keep 40
+    // columns of its rounded ends untouched on either side.
+    int screenLeft = 23 + 40;
+    int screenRight = 23 + 167 + (srcWidth - 640) - 40;
+    int cut = INTERFACE_BAR_CUT_CENTER - remove / 2;
+    if (cut + remove > screenRight) {
+        cut = screenRight - remove;
+    }
+    if (cut < screenLeft) {
+        cut = screenLeft;
+    }
+
+    unsigned char* pixels = (unsigned char*)internal_malloc(width * height);
+    if (pixels == nullptr) {
+        return nullptr;
+    }
+    for (int y = 0; y < height; y++) {
+        memcpy(pixels + width * y, src + srcWidth * y, cut);
+        memcpy(pixels + width * y + cut, src + srcWidth * y + cut + remove, width - cut);
+    }
+    debugPrint("interface: %d bar cut from the %d art (%d columns at x %d)\n", width, srcWidth, remove, cut);
+    return pixels;
+}
+
 static void customInterfaceBarInit()
 {
     gInterfaceBarContentOffset = gInterfaceBarWidth - 640;
@@ -2499,9 +3940,19 @@ static void customInterfaceBarInit()
         snprintf(path, sizeof(path), "art\\intrface\\HR_IFACE_%d.FRM", gInterfaceBarWidth);
 
         gCustomInterfaceBarBackground = artLoad(path);
+
+        // Realtime build: no art at this width -- cut it out of the wider bar it was narrowed from.
+        if (gCustomInterfaceBarBackground == nullptr && gInterfaceBarSourceWidth > gInterfaceBarWidth) {
+            snprintf(path, sizeof(path), "art\\intrface\\HR_IFACE_%d.FRM", gInterfaceBarSourceWidth);
+            Art* wide = artLoad(path);
+            if (wide != nullptr) {
+                gCustomInterfaceBarCut = interface_bar_cut(wide, gInterfaceBarWidth);
+                internal_free(wide);
+            }
+        }
     }
 
-    if (gCustomInterfaceBarBackground != nullptr) {
+    if (gCustomInterfaceBarBackground != nullptr || gCustomInterfaceBarCut != nullptr) {
         gInterfaceBarIsCustom = true;
     } else {
         gInterfaceBarContentOffset = 0;
@@ -2516,12 +3967,22 @@ static void customInterfaceBarExit()
         internal_free(gCustomInterfaceBarBackground);
         gCustomInterfaceBarBackground = nullptr;
     }
+
+    if (gCustomInterfaceBarCut != nullptr) {
+        internal_free(gCustomInterfaceBarCut);
+        gCustomInterfaceBarCut = nullptr;
+    }
 }
 
 unsigned char* customInterfaceBarGetBackgroundImageData()
 {
     if (!gInterfaceBarIsCustom) {
         return nullptr;
+    }
+
+    // Realtime build: the bar cut from a wider one (interface_bar_cut), same pitch as any custom bar.
+    if (gCustomInterfaceBarCut != nullptr) {
+        return gCustomInterfaceBarCut;
     }
 
     return artGetFrameData(gCustomInterfaceBarBackground, 0, 0);

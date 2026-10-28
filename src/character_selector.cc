@@ -28,6 +28,11 @@
 #include "settings.h"
 #include "sfall_config.h"
 #include "skill.h"
+
+#include <SDL.h>
+
+// Realtime / controller (fallout1-ce's select.cc changes, ported).
+#include "rt/game/gamepad_ui.h"
 #include "stat.h"
 #include "svga.h"
 #include "text_font.h"
@@ -147,6 +152,269 @@ static FrmImage _previousButtonPressedFrmImage;
 
 static std::vector<PremadeCharacterDescription> gCustomPremadeCharacterDescriptions;
 
+// CONTROLLER NAVIGATION for the character SELECTION screen -- the first thing New Game shows. Every
+// clickable thing is a stop, the arrows under the portrait included; the D-pad / stick steps the
+// focus SPATIALLY, A presses the focused button (the very code the button sends), B backs out.
+//
+// The indicator is a 1px frame in Fallout's selection yellow, drawn through a SAVE-UNDER (the labels
+// are painted once and never repainted, so anything erased against the background would eat them),
+// hence the strict erase -> input -> draw order in the loop.
+struct SelFocusItem {
+    int x;
+    int y;
+    int w;
+    int h;
+    int code; // what pressing A sends -- the same code the on-screen button emits
+};
+
+static const SelFocusItem sel_items[] = {
+    { CS_WINDOW_TAKE_BUTTON_X, CS_WINDOW_TAKE_BUTTON_Y, 15, 16, KEY_LOWERCASE_T },
+    { CS_WINDOW_PREVIOUS_BUTTON_X, CS_WINDOW_PREVIOUS_BUTTON_Y, 20, 18, 500 },
+    { CS_WINDOW_NEXT_BUTTON_X, CS_WINDOW_NEXT_BUTTON_Y, 20, 18, 501 },
+    { CS_WINDOW_MODIFY_BUTTON_X, CS_WINDOW_MODIFY_BUTTON_Y, 15, 16, KEY_LOWERCASE_M },
+    { CS_WINDOW_CREATE_BUTTON_X, CS_WINDOW_CREATE_BUTTON_Y, 15, 16, KEY_LOWERCASE_C },
+    { CS_WINDOW_BACK_BUTTON_X, CS_WINDOW_BACK_BUTTON_Y, 15, 16, KEY_ESCAPE },
+};
+
+#define SEL_FOCUS_COUNT ((int)(sizeof(sel_items) / sizeof(sel_items[0])))
+#define SEL_FOCUS_TAKE 0
+
+#define SEL_HL_MAX_W 40
+#define SEL_HL_MAX_H 40
+
+static unsigned char sel_hl_top[SEL_HL_MAX_W];
+static unsigned char sel_hl_bottom[SEL_HL_MAX_W];
+static unsigned char sel_hl_left[SEL_HL_MAX_H];
+static unsigned char sel_hl_right[SEL_HL_MAX_H];
+static int sel_hl_x = -1;
+static int sel_hl_y;
+static int sel_hl_w;
+static int sel_hl_h;
+static int sel_focus = SEL_FOCUS_TAKE;
+
+// Three pixels of air around the focused item.
+static void sel_focus_bounds(int* x, int* y, int* w, int* h)
+{
+    const SelFocusItem* it = &(sel_items[sel_focus]);
+    *x = it->x - 3;
+    *y = it->y - 3;
+    *w = it->w + 6;
+    *h = it->h + 6;
+}
+
+// Drag the POINTER along with the frame: two indicators of the same thing must never disagree.
+static void sel_park_cursor()
+{
+    if (gCharacterSelectorWindow == -1) {
+        return;
+    }
+
+    Rect rect;
+    if (windowGetRect(gCharacterSelectorWindow, &rect) != 0) {
+        return;
+    }
+
+    const SelFocusItem* it = &(sel_items[sel_focus]);
+    _mouse_set_position(rect.left + it->x + it->w / 2, rect.top + it->y + it->h / 2);
+}
+
+// SPATIAL step: the nearest item that genuinely lies in the direction pushed. The candidate must move
+// at least SEL_STEP_MIN along the pushed axis, and candidates that OVERLAP the current item on the
+// other axis win outright; others only within SEL_STEP_SLOP, or the focus stays put.
+#define SEL_STEP_MIN 10
+#define SEL_STEP_SLOP 40
+
+static void sel_focus_step(int dx, int dy)
+{
+    const SelFocusItem* cur = &(sel_items[sel_focus]);
+    int cx = cur->x + cur->w / 2;
+    int cy = cur->y + cur->h / 2;
+
+    int best = -1;
+    int bestScore = 0;
+    bool bestOverlaps = false;
+
+    for (int i = 0; i < SEL_FOCUS_COUNT; i++) {
+        if (i == sel_focus) {
+            continue;
+        }
+
+        const SelFocusItem* it = &(sel_items[i]);
+        int ix = it->x + it->w / 2;
+        int iy = it->y + it->h / 2;
+
+        int along = dx != 0 ? (ix - cx) * dx : (iy - cy) * dy;
+        if (along < SEL_STEP_MIN) {
+            continue;
+        }
+
+        int across = dx != 0 ? (iy - cy) : (ix - cx);
+        if (across < 0) {
+            across = -across;
+        }
+
+        bool overlaps = dx != 0
+            ? (it->y < cur->y + cur->h && it->y + it->h > cur->y)
+            : (it->x < cur->x + cur->w && it->x + it->w > cur->x);
+
+        if (!overlaps && across > SEL_STEP_SLOP) {
+            continue;
+        }
+
+        int score = along + 2 * across;
+
+        if (best == -1 || (overlaps && !bestOverlaps)
+            || (overlaps == bestOverlaps && score < bestScore)) {
+            best = i;
+            bestScore = score;
+            bestOverlaps = overlaps;
+        }
+    }
+
+    if (best != -1) {
+        sel_focus = best;
+        sel_park_cursor();
+        soundPlayFile("ib1p1xx1");
+    }
+}
+
+static void sel_hl_erase()
+{
+    if (sel_hl_x < 0 || gCharacterSelectorWindow == -1) {
+        return;
+    }
+
+    unsigned char* buf = windowGetBuffer(gCharacterSelectorWindow);
+    if (buf == nullptr) {
+        sel_hl_x = -1;
+        return;
+    }
+
+    memcpy(buf + CS_WINDOW_WIDTH * sel_hl_y + sel_hl_x, sel_hl_top, sel_hl_w);
+    memcpy(buf + CS_WINDOW_WIDTH * (sel_hl_y + sel_hl_h - 1) + sel_hl_x, sel_hl_bottom, sel_hl_w);
+    for (int i = 0; i < sel_hl_h; i++) {
+        unsigned char* row = buf + CS_WINDOW_WIDTH * (sel_hl_y + i);
+        row[sel_hl_x] = sel_hl_left[i];
+        row[sel_hl_x + sel_hl_w - 1] = sel_hl_right[i];
+    }
+
+    sel_hl_x = -1;
+}
+
+static void sel_hl_draw()
+{
+    if (gCharacterSelectorWindow == -1) {
+        return;
+    }
+
+    unsigned char* buf = windowGetBuffer(gCharacterSelectorWindow);
+    if (buf == nullptr) {
+        return;
+    }
+
+    int x;
+    int y;
+    int w;
+    int h;
+    sel_focus_bounds(&x, &y, &w, &h);
+
+    if (x < 0 || y < 0 || w < 3 || h < 3 || w > SEL_HL_MAX_W || h > SEL_HL_MAX_H
+        || x + w > CS_WINDOW_WIDTH || y + h > CS_WINDOW_HEIGHT) {
+        return;
+    }
+
+    // Whole footprint saved before any of it is drawn, or the corners come back yellow.
+    memcpy(sel_hl_top, buf + CS_WINDOW_WIDTH * y + x, w);
+    memcpy(sel_hl_bottom, buf + CS_WINDOW_WIDTH * (y + h - 1) + x, w);
+    for (int i = 0; i < h; i++) {
+        const unsigned char* row = buf + CS_WINDOW_WIDTH * (y + i);
+        sel_hl_left[i] = row[x];
+        sel_hl_right[i] = row[x + w - 1];
+    }
+
+    unsigned char color = _colorTable[32747];
+    memset(buf + CS_WINDOW_WIDTH * y + x, color, w);
+    memset(buf + CS_WINDOW_WIDTH * (y + h - 1) + x, color, w);
+    for (int i = 0; i < h; i++) {
+        unsigned char* row = buf + CS_WINDOW_WIDTH * (y + i);
+        row[x] = color;
+        row[x + w - 1] = color;
+    }
+
+    sel_hl_x = x;
+    sel_hl_y = y;
+    sel_hl_w = w;
+    sel_hl_h = h;
+}
+
+static bool sel_prev_up;
+static bool sel_prev_down;
+static bool sel_prev_left;
+static bool sel_prev_right;
+static bool sel_prev_a;
+static bool sel_prev_b;
+
+// Latch the CURRENT state as "already seen", so the A that opened this screen (on the main menu)
+// does not instantly hit TAKE.
+static void sel_pad_prime(SDL_GameController* pad)
+{
+    SDL_GameControllerUpdate();
+    sel_prev_up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+    sel_prev_down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+    sel_prev_left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
+    sel_prev_right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
+    sel_prev_a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    sel_prev_b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+}
+
+static void sel_pad_poll(SDL_GameController* pad)
+{
+    SDL_GameControllerUpdate();
+
+    bool up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+    bool down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+    bool left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
+    bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
+    bool a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+
+    // All four directions move the FOCUS; switching character is A on one of the arrows.
+    if (up && !sel_prev_up) {
+        sel_focus_step(0, -1);
+    }
+    if (down && !sel_prev_down) {
+        sel_focus_step(0, 1);
+    }
+    if (left && !sel_prev_left) {
+        sel_focus_step(-1, 0);
+    }
+    if (right && !sel_prev_right) {
+        sel_focus_step(1, 0);
+    }
+
+    if (a && !sel_prev_a) {
+        enqueueInputEvent(sel_items[sel_focus].code);
+    }
+    if (b && !sel_prev_b) {
+        enqueueInputEvent(KEY_ESCAPE);
+    }
+
+    sel_prev_up = up;
+    sel_prev_down = down;
+    sel_prev_left = left;
+    sel_prev_right = right;
+    sel_prev_a = a;
+    sel_prev_b = b;
+}
+
 // 0x4A71D0
 int characterSelectorOpen()
 {
@@ -159,8 +427,28 @@ int characterSelectorOpen()
         mouseShowCursor();
     }
 
+    // Same reason as the character editor: this screen injects its own button codes and must not
+    // inherit anyone else's.
+    inputEventQueueReset();
+
     colorPaletteLoad("color.pal");
     paletteFadeTo(_cmap);
+
+    // Re-fetched every frame, never latched once on entry: gamepad_ui opens the controller LAZILY.
+    sel_focus = SEL_FOCUS_TAKE;
+    sel_hl_x = -1;
+    bool selSuppressWas = false;
+    {
+        SDL_GameController* pad = gamepad_ui_get_controller();
+        if (pad != nullptr) {
+            sel_pad_prime(pad);
+            sel_park_cursor(); // start with the pointer already on the framed item
+            // A is ours here (it sends the focused item's own key code); stop the shared router from
+            // also firing a raw click at the pointer, and the shared snap from moving it.
+            selSuppressWas = gamepad_ui_set_suppress_a_click(true);
+            gamepad_ui_set_suppress_snap(true);
+        }
+    }
 
     int rc = 0;
     bool done = false;
@@ -169,6 +457,13 @@ int characterSelectorOpen()
 
         if (_game_user_wants_to_quit != 0) {
             break;
+        }
+
+        // Erase -> input -> draw, once per frame, which is what keeps the save-under honest.
+        SDL_GameController* selPad = gamepad_ui_get_controller();
+        if (selPad != nullptr) {
+            sel_hl_erase();
+            sel_pad_poll(selPad);
         }
 
         int keyCode = inputGetInput();
@@ -242,9 +537,22 @@ int characterSelectorOpen()
             break;
         }
 
+        if (selPad != nullptr && !done) {
+            // The editor (MODIFY / CREATE) ran its own loop; its suppressions came back off with it.
+            gamepad_ui_set_suppress_a_click(true);
+            gamepad_ui_set_suppress_snap(true);
+            sel_hl_draw();
+            windowRefresh(gCharacterSelectorWindow);
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    sel_hl_erase();
+    inputEventQueueReset();
+    gamepad_ui_set_suppress_a_click(selSuppressWas);
+    gamepad_ui_set_suppress_snap(false);
 
     paletteFadeTo(gPaletteBlack);
     characterSelectorWindowFree();

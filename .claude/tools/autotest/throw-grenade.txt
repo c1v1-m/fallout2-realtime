@@ -1,0 +1,19 @@
+# Fallout 2: frag grenades (pid 25) at a raider -- once with no lock, then locked. Exercises the
+# projectile flight as a sequence of its own (actions.cc ActionFlight) and the blast commit.
+name throw-grenade-f2
+map DESERT1.MAP
+seed 1
+duration 14
+
+dude tile 20100 rot 2
+dude stat ST 5
+dude stat PE 8
+dude hp 200
+dude armor 17
+dude item 25 4
+
+spawn 16777454 22100 rot 5 hostile
+
+at 0 throwfree
+at 3 idle
+at 4 throw

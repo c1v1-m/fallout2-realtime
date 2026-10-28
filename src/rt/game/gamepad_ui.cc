@@ -1,4 +1,7 @@
 #include "game/gamepad_ui.h"
+#if FALLOUT_RT_GAME == 2
+#include <rt_hooks.h>
+#endif
 
 #include <ctype.h>
 #include <math.h>
@@ -280,6 +283,13 @@ static bool gpui_useon_item_in_hand();
 static bool gpui_targeting_cursor_armed();
 // Puts the pointer a few tiles in front of the dude (the use-on crosshair's starting spot).
 static void gpui_useon_park_cursor();
+// ...or, for a lockpick, straight on the nearest locked thing, as the Lockpick skill parks.
+static void gpui_useon_park_for(int pid);
+
+static bool gpui_is_lockpick_pid(int pid)
+{
+    return pid == 84 || pid == 77; // Lockpicks, Electronic Lockpick
+}
 
 // A screen is running its OWN controller-driven navigation and reads the pad
 // directly in its own loop -- the main menu (highlight + A) and the load/save slot
@@ -353,6 +363,12 @@ static void gpui_acquire()
 
     // The game playing by itself (autotest.cc) uses its virtual pad, never a real one.
     int virtualPad = autotest_controller_index();
+#if FALLOUT_RT_GAME == 2
+    // Fallout 2: the screen test's virtual pad (FALLOUT_RT_PADTEST, rt_f2_hooks.cc) wins over a real one too.
+    if (virtualPad < 0) {
+        virtualPad = rt_padtest_controller_index();
+    }
+#endif
     if (virtualPad >= 0) {
         gpui_controller = SDL_GameControllerOpen(virtualPad);
         gpui_on_virtual_pad = gpui_controller != NULL;
@@ -1166,10 +1182,12 @@ static void gpui_action_buttons(SDL_GameController* pad, int* dx, int* dy, int* 
     // THE QUICK SLOTS ARE BOUND HERE (2026-10-15): in your own inventory, LB / RB over an item binds
     // it to that slot. RB's right-click there only switched the hand/arrow cursor, which the pad never
     // needed -- a held A opens the action menu.
+    // ...and in a loot window RB steps to the next body (gpui_button_shortcuts), so no right-click there.
     bool invNormal = invOpen && inven_current_window_type() == INVENTORY_WINDOW_TYPE_NORMAL;
+    bool invLoot = invOpen && inven_current_window_type() == INVENTORY_WINDOW_TYPE_LOOT;
     if (invNormal && (lbEdge || rbEdge)) {
         gpui_qs_bind_under_cursor(lbEdge ? GPUI_QS_LB : GPUI_QS_RB);
-    } else if (rbEdge && !radial_wheel_is_open()
+    } else if (rbEdge && !invLoot && !radial_wheel_is_open()
         && (gamepad_ui_menu_active() || inven_any_open() || dialog_active())) {
         *buttons |= MOUSE_STATE_RIGHT_BUTTON_DOWN;
         gpui_cursor_show_time = get_time();
@@ -1726,8 +1744,11 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
         // ⚠️ NOT THE CHARACTER SHEET. That one grew real navigation, where Down means "next row",
         // so the toggle was eating the most-used direction on the screen: every step down the skill
         // list also closed it. B / BACK still back out of it, like everywhere else.
-        bool sameDirection = (gpui_dpad_screen_open == GPUI_DPAD_PIPBOY && upPressed)
-            || (gpui_dpad_screen_open == GPUI_DPAD_AUTOMAP && leftPressed);
+        //
+        // ⚠️ AND NOT THE PIP-BOY, for the same reason (2026-10-21): its lists step with the D-pad
+        // (pipboy.cc), so Up -- "the entry above" -- shut the whole Pip-Boy instead. Found by the
+        // screen test photographing the CONTROLS pages.
+        bool sameDirection = gpui_dpad_screen_open == GPUI_DPAD_AUTOMAP && leftPressed;
         if (bPressed || backPressed || sameDirection) {
             // ⚠️ SPEND THE PRESS THAT CLOSES, or its RELEASE reopens the screen. BACK and
             // START open on the release edge now (they grew a hold -- exit-run and quick
@@ -1758,9 +1779,18 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
     // A loot/container window is modal (so inven_is_open(), which is the normal
     // inventory only, is false here). B closes it: its Done button emits
     // KEY_ESCAPE, which the loot loop breaks on -- same as the BACK escape hatch.
+    // X takes everything you can carry and LB / RB step to the previous / next body nearby (2026-10-22,
+    // his pick "vzít vše + další mrtvola"): the loot window's own Shift+A and arrow keys, see
+    // loot_collect_bodies in inventry.cc.
     if (inven_any_open() && inven_current_window_type() == INVENTORY_WINDOW_TYPE_LOOT) {
         if (bPressed) {
             GNW_add_input_buffer(KEY_ESCAPE);
+        } else if (xPressed) {
+            GNW_add_input_buffer(KEY_UPPERCASE_A);
+        } else if (lbPressed) {
+            GNW_add_input_buffer(KEY_PAGE_UP);
+        } else if (rbPressed) {
+            GNW_add_input_buffer(KEY_PAGE_DOWN);
         }
         return;
     }
@@ -3354,6 +3384,53 @@ static bool gpui_inject_pending = false; // a jab is playing and has not reached
 static int gpui_inject_pid = -1;
 static int gpui_inject_ap = 0;
 static unsigned int gpui_inject_at = 0;
+
+// ⚠️ HOLD THE SLOT, KEEP HEALING -- LIKE ESTUS (2026-10-19, his: "něco jako souls když pije hráč estus
+// flašky. Nejdřív se napije - animace zvednutí ruky a pak další estus je hlt z flašky. Tak v tomto
+// případě se zahraje kus animace píchnutí znova a tak dude se znovu healne" -- "a to nebude stát AP,
+// když už se to healuje po několikáté"). A drug taken from a quick slot whose button is STILL HELD at
+// the jab's action frame is followed, GPUI_CHAIN_DELAY_MS later, by the next one: the hand stays up
+// and only the jab plays again -- the injection animation from GPUI_CHAIN_BACK_FRAMES before its
+// action frame (anim_set_start_frame). The first one paid the pack's price (gpui_pack_cost); the
+// ones after it are free, as everything you take inside the open inventory is. It ends when the
+// button comes up, when nothing is left in the slot to take, at full health (hit points plus the heal
+// still coming in, combat_rt_heal_left -- holding on would only waste them), or when a hit cuts the
+// jab (gpui_inject_tick). The keyboard reports no release, so H never chains.
+#define GPUI_CHAIN_BACK_FRAMES 3
+#define GPUI_CHAIN_DELAY_MS 120
+// ⚠️ ...AND ON THE FLOOR TOO (2026-10-20, trace_2026-10-20_200245: "ten stimpack quick heal nic nefunguje
+// jak jsme řešili ala dark souls"). He held LB 3.7 s getting up after a knockdown -- exactly when a
+// heal is wanted -- and got one stimpak: no jab can register on a body that is down or standing up, the
+// first one went in at once (gpui_quick_use's no-jab path) and that path never armed the chain. Now it
+// does, and while he is down or getting up the next ones go in at once too, at the jab's pace
+// (GPUI_CHAIN_INSTANT_MS); once he is up the chain goes on with a full jab.
+#define GPUI_CHAIN_INSTANT_MS 380
+static bool gpui_chain_last_instant = false; // the last one went in with no jab (he was down)
+// ⚠️ EACH ONE A WHOLE JAB (2026-10-20, "Strašně rychle se aktivuje ten druhej stimpack"; his pick "Celý
+// vpich znovu"). The jab-only follow-up came 0.3 s after the first -- 120 ms, then three frames to the
+// needle. Now the next one waits for the jab before it to finish and plays the whole injection again,
+// like another draw on the estus: one stimpak per jab (~0.75 s at his stats). On the floor the same
+// pace (gpui_chain_floor_ms). GPUI_CHAIN_BACK_FRAMES / anim_set_start_frame stay, unused by the chain.
+static unsigned int gpui_chain_floor_ms()
+{
+    anim_set_injection_timing(obj_dude);
+    unsigned int ms = gpui_injection_duration();
+    anim_set_injection_timing(NULL);
+    return ms > GPUI_CHAIN_INSTANT_MS ? ms : GPUI_CHAIN_INSTANT_MS;
+}
+
+// ⚠️ HELD SHORT OF AP, IT WAITS (2026-10-20, "jo udělej to"). He held LB 2.3 s with 2 AP of the 4 a
+// stimpak costs: one buzz, and nothing when the AP came back in the meantime. Now a slot's drug refused
+// for AP while its button stays down waits for the pool -- for GPUI_AP_WAIT_MS at most, as the grenade
+// waits in the hand (RT_THROW_AP_WAIT) -- and goes in the moment it can be paid. Letting go ends it.
+#define GPUI_AP_WAIT_MS 2000
+static int gpui_ap_wait_slot = -1;
+static int gpui_ap_wait_pid = -1;
+static unsigned int gpui_ap_wait_since = 0;
+static int gpui_quick_use_slot = -1;     // the quick slot gpui_quick_use is being called for, else -1
+static int gpui_chain_slot = -1;         // the slot whose held button drives the chain; -1 = none
+static unsigned int gpui_chain_due_at = 0; // when the next one is asked for; 0 = not now
+static int gpui_chain_count = 0;          // follow-ups in this chain
 // The explosive put-down (gpui_place_explosive).
 static bool gpui_place_pending = false;
 static Object* gpui_place_item = NULL; // compared against the pack's pointers only, until dropped
@@ -3375,6 +3452,9 @@ static Object* gpui_carried_drug(int pid)
 // deliberately the same sequence combatai.cc:370 runs when an NPC self-medicates -- remove one,
 // apply it, destroy it -- so the player's quick-use and the AI's go through identical engine paths.
 // False = the drug code refused (robotic body, dead) and the item is back in the pack.
+//
+// In a fight the hit points it gives do not land at once: item_d_take_drug puts them into the heal
+// pool (combat_rt_heal_over_time).
 static bool gpui_take_drug_now(Object* item)
 {
     if (item_remove_mult(obj_dude, item, 1) != 0) {
@@ -3416,25 +3496,44 @@ static int gpui_inject_done(void* a1, void* a2)
         return 0;
     }
 
-    trace_event(TRACE_ACTION, "quick-use", "pid=%d hp=%d->%d ap=%d cost=%d qp=%d lock=%ums fight=%d jab=%ums",
-        gpui_inject_pid, hpBefore, critter_get_hits(obj_dude), combat_rt_player_ap(), gpui_inject_ap,
-        perk_level(PERK_QUICK_POCKETS), gpui_injection_ms, combat_rt_active() ? 1 : 0,
+    if (gpui_chain_slot != -1) {
+        gpui_chain_due_at = get_time() + GPUI_CHAIN_DELAY_MS; // gpui_heal_chain_tick decides then
+        if (gpui_chain_due_at == 0) {
+            gpui_chain_due_at = 1;
+        }
+    }
+
+    trace_event(TRACE_ACTION, "quick-use", "pid=%d hp=%d->%d pool=%d ap=%d cost=%d qp=%d lock=%ums fight=%d jab=%ums",
+        gpui_inject_pid, hpBefore, critter_get_hits(obj_dude), combat_rt_heal_left(), combat_rt_player_ap(),
+        gpui_inject_ap, perk_level(PERK_QUICK_POCKETS), gpui_injection_ms, combat_rt_active() ? 1 : 0,
         elapsed_time(gpui_inject_at));
     return 0;
 }
 
 // Starts the jab. False = it could not register (he is in another live sequence -- a swing, a walk
 // segment -- or a transaction is open), and the caller takes the drug at once, as before.
-static bool gpui_inject_start(Object* item, int apCost)
+// followUp: the next one of a held-slot chain -- only the jab, from GPUI_CHAIN_BACK_FRAMES before the
+// action frame (see gpui_chain_slot); fullJab: a chained one that plays the whole animation all the same
+// (the first after getting up, when the hand is not raised).
+static bool gpui_inject_start(Object* item, int apCost, bool followUp = false, bool fullJab = false)
 {
     int fid = art_id(OBJ_TYPE_CRITTER, obj_dude->fid & 0xFFF, ANIM_MAGIC_HANDS_MIDDLE,
         (obj_dude->fid & 0xF000) >> 12, obj_dude->rotation + 1);
     int actionFrame = 0;
+    int frames = 0;
     CacheEntry* handle;
     Art* art = art_ptr_lock(fid, &handle);
     if (art != NULL) {
         actionFrame = art_frame_action_frame(art);
+        frames = art_frame_max_frame(art);
         art_ptr_unlock(handle);
+    }
+    int startFrame = 0;
+    if (followUp && !fullJab) {
+        startFrame = actionFrame - GPUI_CHAIN_BACK_FRAMES;
+        if (startFrame < 0) {
+            startFrame = 0;
+        }
     }
 
     if (register_begin(ANIMATION_REQUEST_RESERVED) != 0) {
@@ -3442,14 +3541,19 @@ static bool gpui_inject_start(Object* item, int apCost)
     }
     register_object_animate(obj_dude, ANIM_MAGIC_HANDS_MIDDLE, 0);
     // delay = frames of the animation before it: the call runs as the action frame is reached.
-    register_object_call(obj_dude, NULL, gpui_inject_done, actionFrame);
+    register_object_call(obj_dude, NULL, gpui_inject_done, actionFrame - startFrame);
 
     // The bracket makes compute_tpf time the jab by (AGI + INT + PE) / 3 (2026-10-06) -- for the
     // animation, which starts inside register_end, and for the lock measured here alike.
     anim_set_injection_timing(obj_dude);
+    anim_set_start_frame(obj_dude, startFrame);
     int rc = register_end();
+    anim_set_start_frame(NULL, 0);
     unsigned int ms = gpui_injection_duration();
     anim_set_injection_timing(NULL);
+    if (startFrame > 0 && frames > 0) {
+        ms = ms * (unsigned int)(frames - startFrame) / (unsigned int)frames; // the lock is the part played
+    }
 
     if (rc != 0) {
         return false;
@@ -3464,9 +3568,15 @@ static bool gpui_inject_start(Object* item, int apCost)
     gpui_inject_ap = apCost;
     gpui_inject_at = get_time();
     combat_rt_inject_begin(obj_dude);
+    if (!followUp) {
+        gpui_chain_slot = gpui_quick_use_slot; // a slot's own press may chain; anything else may not
+        gpui_chain_count = 0;
+        gpui_chain_last_instant = false;
+    }
+    gpui_chain_due_at = 0;
 
-    trace_event(TRACE_ACTION, "inject-start", "pid=%d frame=%d lock=%ums ap=%d", item->pid, actionFrame, ms,
-        combat_rt_player_ap());
+    trace_event(TRACE_ACTION, "inject-start", "pid=%d frame=%d from=%d lock=%ums ap=%d", item->pid, actionFrame,
+        startFrame, ms, combat_rt_player_ap());
     return true;
 }
 
@@ -3484,11 +3594,153 @@ static void gpui_inject_tick()
     gpui_inject_pending = false;
     combat_rt_refund_ap(gpui_inject_ap);
     gpui_injection_ms = 0;
+    gpui_chain_slot = -1;
+    gpui_chain_due_at = 0;
     trace_event(TRACE_ACTION, "inject-cut", "pid=%d refund=%d ap=%d anim=%d after=%ums", gpui_inject_pid,
         gpui_inject_ap, combat_rt_player_ap(), FID_ANIM_TYPE(obj_dude->fid), elapsed_time(gpui_inject_at));
 }
 
+static Object* gpui_quick_slot_item(int slot, int* count);
+static bool gpui_item_is_throwable(Object* item);
+static bool gpui_item_is_tool(Object* item);
+
+static void gpui_quick_use(int pid);
+static int gpui_pack_cost();
+
+static void gpui_ap_wait_tick()
+{
+    if (gpui_ap_wait_slot == -1 || obj_dude == NULL) {
+        return;
+    }
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    SDL_GameControllerButton button = gpui_ap_wait_slot == GPUI_QS_LB
+        ? SDL_CONTROLLER_BUTTON_LEFTSHOULDER
+        : SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+    const char* end = NULL;
+    if (pad == NULL || SDL_GameControllerGetButton(pad, button) == 0) {
+        end = "released";
+    } else if (elapsed_time(gpui_ap_wait_since) > GPUI_AP_WAIT_MS) {
+        end = "timeout";
+    } else if (combat_rt_player_ap() >= gpui_pack_cost()) {
+        int slot = gpui_ap_wait_slot;
+        int pid = gpui_ap_wait_pid;
+        gpui_ap_wait_slot = -1;
+        trace_event(TRACE_ACTION, "quick-use-wait", "end=paid pid=%d waited=%ums ap=%d", pid,
+            elapsed_time(gpui_ap_wait_since), combat_rt_player_ap());
+        gpui_quick_use_slot = slot; // a held slot: it may chain from here (gpui_chain_slot)
+        gpui_quick_use(pid);
+        gpui_quick_use_slot = -1;
+        return;
+    }
+    if (end != NULL) {
+        trace_event(TRACE_ACTION, "quick-use-wait", "end=%s pid=%d waited=%ums ap=%d", end, gpui_ap_wait_pid,
+            elapsed_time(gpui_ap_wait_since), combat_rt_player_ap());
+        gpui_ap_wait_slot = -1;
+    }
+}
+
+static void gpui_heal_chain_end(const char* why)
+{
+    if (gpui_chain_slot != -1) {
+        trace_event(TRACE_ACTION, "heal-chain", "end=%s count=%d hp=%d pool=%d", why, gpui_chain_count,
+            obj_dude != NULL ? critter_get_hits(obj_dude) : -1, combat_rt_heal_left());
+    }
+    gpui_chain_slot = -1;
+    gpui_chain_due_at = 0;
+}
+
+// From the safe tick: the next jab of a held slot (gpui_chain_slot), once its moment has come.
+static void gpui_heal_chain_tick()
+{
+    if (gpui_chain_slot == -1 || gpui_chain_due_at == 0 || obj_dude == NULL) {
+        return;
+    }
+    if ((int)(get_time() - gpui_chain_due_at) < 0) {
+        return;
+    }
+    gpui_chain_due_at = 0;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    SDL_GameControllerButton button = gpui_chain_slot == GPUI_QS_LB
+        ? SDL_CONTROLLER_BUTTON_LEFTSHOULDER
+        : SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+    if (pad == NULL || SDL_GameControllerGetButton(pad, button) == 0) {
+        gpui_heal_chain_end("released");
+        return;
+    }
+    if (critter_is_dead(obj_dude) || gpui_inject_pending) {
+        gpui_heal_chain_end("busy");
+        return;
+    }
+    if (critter_get_hits(obj_dude) + combat_rt_heal_left() >= stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS)) {
+        gpui_heal_chain_end("full");
+        return;
+    }
+    int count;
+    Object* item = gpui_quick_slot_item(gpui_chain_slot, &count);
+    if (item == NULL || gpui_item_is_throwable(item) || gpui_item_is_tool(item)
+        || item_get_type(item) != ITEM_TYPE_DRUG) {
+        gpui_heal_chain_end("none");
+        return;
+    }
+    // Down or getting up: no jab can register (see GPUI_CHAIN_INSTANT_MS) -- the next one goes in now.
+    int bodyAnim = FID_ANIM_TYPE(obj_dude->fid);
+    if (critter_is_prone(obj_dude) || bodyAnim == ANIM_PRONE_TO_STANDING || bodyAnim == ANIM_BACK_TO_STANDING) {
+        if (!gpui_take_drug_now(item)) {
+            gpui_heal_chain_end("refused");
+            return;
+        }
+        gpui_chain_count++;
+        gpui_chain_last_instant = true;
+        gpui_chain_due_at = get_time() + gpui_chain_floor_ms();
+        if (gpui_chain_due_at == 0) {
+            gpui_chain_due_at = 1;
+        }
+        trace_event(TRACE_ACTION, "heal-chain", "next=%d pid=%d hp=%d pool=%d left=%d instant=1", gpui_chain_count,
+            item->pid, critter_get_hits(obj_dude), combat_rt_heal_left(), count - 1);
+        return;
+    }
+
+    // The jab before is still playing: the next one waits for it to end (asked again next frame).
+    // Anything else holding the body (a step, a swing) ends the chain instead.
+    if (anim_busy(obj_dude) != 0) {
+        if (FID_ANIM_TYPE(obj_dude->fid) != ANIM_MAGIC_HANDS_MIDDLE) {
+            gpui_heal_chain_end("busy");
+            return;
+        }
+        gpui_chain_due_at = get_time() + 1;
+        return;
+    }
+    // A whole jab every time (see gpui_chain_floor_ms).
+    if (!gpui_inject_start(item, 0, true, true)) {
+        gpui_heal_chain_end("refused");
+        return;
+    }
+    gpui_chain_last_instant = false;
+    gpui_chain_count++;
+    trace_event(TRACE_ACTION, "heal-chain", "next=%d pid=%d hp=%d pool=%d left=%d", gpui_chain_count, item->pid,
+        critter_get_hits(obj_dude), combat_rt_heal_left(), count - 1);
+}
+
 // Use one of `pid` on the dude: the jab, and the drug at its frame (see gpui_inject_pending).
+// ⚠️ ANYTHING FROM THE PACK COSTS WHAT THE INVENTORY COSTS (2026-10-19, his rule: "prostě je to z
+// inventáře. Granát taky stojí 4"). Vanilla reaches into the pack through the inventory screen -- 4 AP
+// to open it, one less per rank of Quick Pockets (inven_action_cursor's own formula) -- and every pad
+// shortcut that takes something out of it is that reach: a drug or an item from a quick slot, an
+// explosive put down, an item used on something, the grenade's quick draw, the weapon wheel, armour.
+// They were 2 (1 with Quick Pockets) and the wheel was free. Swapping hands (Y) stays free, and a
+// reload is vanilla's own 2.
+static int gpui_pack_cost()
+{
+    int cost = 4 - perk_level(PERK_QUICK_POCKETS);
+    return cost > 0 ? cost : 0;
+}
+
+int gamepad_ui_pack_ap_cost()
+{
+    return gpui_pack_cost();
+}
+
 static void gpui_quick_use(int pid)
 {
     // ⚠️ COSTS 2 AP AND REFUSES WHEN YOU CANNOT PAY (2026-08-29). It used to charge only when
@@ -3501,13 +3753,21 @@ static void gpui_quick_use(int pid)
     // destroyed -- refusing down there would eat the drug and heal nothing. Out of combat the
     // pool sits at maximum, so this never bites outside a fight.
     //
-    // QUICK POCKETS TAKES ONE OFF (2026-10-11, his idea: "quick pocket by mohl snížit cenu stimpacku
-    // o 1"). Vanilla's perk makes reaching into the pack cheaper (inventory 4 AP -> 3, inventry.cc);
-    // in realtime the quick-use IS reaching into the pack, so every drug taken this way costs 1 AP.
-    int apCost = perk_level(PERK_QUICK_POCKETS) > 0 ? 1 : 2;
+    // QUICK POCKETS (2026-10-11, his idea: "quick pocket by mohl snížit cenu stimpacku o 1") -- and
+    // since 2026-10-19 the whole price is the pack's (gpui_pack_cost): 4, less one per rank.
+    int apCost = gpui_pack_cost();
     if (combat_rt_player_ap() < apCost) {
+        if (gpui_ap_wait_slot != -1 && gpui_ap_wait_slot == gpui_quick_use_slot) {
+            return; // still waiting for the pool (gpui_ap_wait_tick)
+        }
         gsound_play_sfx_file("iisxxxx1");
         trace_event(TRACE_ACTION, "quick-use-refused", "pid=%d why=ap ap=%d", pid, combat_rt_player_ap());
+        if (gpui_quick_use_slot != -1) {
+            gpui_ap_wait_slot = gpui_quick_use_slot; // a held slot waits (GPUI_AP_WAIT_MS)
+            gpui_ap_wait_pid = pid;
+            gpui_ap_wait_since = get_time();
+            trace_event(TRACE_ACTION, "quick-use-wait", "pid=%d ap=%d cost=%d", pid, combat_rt_player_ap(), apCost);
+        }
         return;
     }
 
@@ -3533,14 +3793,20 @@ static void gpui_quick_use(int pid)
     // anim 20 (falling) -> anim 11 (this) -> anim 14, and the standup pass then reported
     // `fall=14`, i.e. it stood him up from a hit-react he should never have been in.
     //
-    // The HEAL still happens -- at once, below, with the AP; only the animation is skipped (the same
-    // fallback covers a jab that could not register). Making the drug itself fail here would be a
-    // silent balance change: being knocked down would start costing you the heal.
+    // The HEAL still happens -- below, with the AP; only the animation is skipped (the same fallback
+    // covers a jab that could not register: in the traces that is always the stand-up after a fall).
+    // Making the drug itself fail here would be a silent balance change: being knocked down would
+    // start costing you the heal.
+    //
+    // ⚠️ ...BUT IN A FIGHT IT NO LONGER LANDS AT ONCE (2026-10-19). This path was the spam: five
+    // stimpaks on the floor and getting up, 36 -> 71 HP in under two seconds (trace_2026-10-19_204959,
+    // every one jab=0). It goes into the heal pool like the jab's does (item_d_take_drug).
     if (!critter_is_prone(obj_dude) && gpui_inject_start(item, apCost)) {
         return;
     }
 
-    // On the floor, or the jab could not register: the drug works at once, with no animation.
+    // On the floor, or the jab could not register: the drug is taken now, with no animation (in a fight
+    // its hit points still come in over time).
     int hpBefore = critter_get_hits(obj_dude);
     int apBefore = combat_rt_player_ap();
     if (!gpui_take_drug_now(item)) {
@@ -3558,9 +3824,21 @@ static void gpui_quick_use(int pid)
     // the top of this function, before the item was spent.
     combat_rt_spend_ap(apCost);
 
-    trace_event(TRACE_ACTION, "quick-use", "pid=%d hp=%d->%d ap=%d->%d cost=%d qp=%d lock=%ums fight=%d jab=0",
-        pid, hpBefore, critter_get_hits(obj_dude), apBefore, combat_rt_player_ap(),
+    trace_event(TRACE_ACTION, "quick-use", "pid=%d hp=%d->%d pool=%d ap=%d->%d cost=%d qp=%d lock=%ums fight=%d jab=0",
+        pid, hpBefore, critter_get_hits(obj_dude), combat_rt_heal_left(), apBefore, combat_rt_player_ap(),
         apCost, perk_level(PERK_QUICK_POCKETS), gpui_injection_ms, combat_rt_active() ? 1 : 0);
+
+    // A held slot goes on from here too (GPUI_CHAIN_INSTANT_MS).
+    gpui_chain_slot = gpui_quick_use_slot;
+    gpui_chain_count = 0;
+    gpui_chain_last_instant = true;
+    gpui_chain_due_at = 0;
+    if (gpui_chain_slot != -1) {
+        gpui_chain_due_at = get_time() + gpui_chain_floor_ms();
+        if (gpui_chain_due_at == 0) {
+            gpui_chain_due_at = 1;
+        }
+    }
 }
 
 // What the dedicated heal button (LB+B) reaches for, best first. Fallout 1 has no other
@@ -3834,6 +4112,9 @@ void gamepad_ui_quick_slots_reset()
 
 static void gpui_qt_set(int state)
 {
+    if (state == GPUI_QT_IDLE || state == GPUI_QT_RESTORE) {
+        combat_rt_set_quick_throw_cost(-1); // put away: a grenade in the hand is priced by its card again
+    }
     gpui_qt_state = state;
     gpui_qt_since = get_time();
 }
@@ -3841,6 +4122,11 @@ static void gpui_qt_set(int state)
 static bool gpui_qs_drawn(int slot)
 {
     return gpui_qt_state != GPUI_QT_IDLE && gpui_qt_slot == slot;
+}
+
+bool gamepad_ui_quick_throw_held()
+{
+    return gpui_qt_state == GPUI_QT_DRAWING || gpui_qt_state == GPUI_QT_READY;
 }
 
 // From the hook (no animation here): a press of a slot's button, or its hold for LB.
@@ -3961,19 +4247,17 @@ static void gpui_qt_tick()
         gpui_qt_hand = intface_is_item_right_hand();
         Object* current = gpui_qt_hand_item();
         if (current != NULL && current->pid == gpui_qt_pid) {
-            // Already in the hand: nothing to draw, nothing to pay, nothing to put back.
+            // Already in the hand: nothing to draw, nothing to put back -- and the throw at the slot's price.
             gpui_qt_prev_pid = gpui_qt_pid;
             gpui_qt_prev_obj = current;
+            combat_rt_set_quick_throw_cost(gpui_pack_cost());
             gpui_qt_set(gpui_qt_release_seen ? GPUI_QT_THROW_REQ : GPUI_QT_READY);
             return;
         }
-        int apCost = perk_level(PERK_QUICK_POCKETS) > 0 ? 1 : 2;
-        if (combat_rt_player_ap() < apCost) {
-            gpui_qt_set(GPUI_QT_IDLE);
-            gsound_play_sfx_file("iisxxxx1");
-            trace_event(TRACE_INPUT, "quick-draw-refused", "why=ap ap=%d", combat_rt_player_ap());
-            return;
-        }
+        // ⚠️ THE DRAW IS FREE, THE THROW IS THE PRICE (2026-10-21, his "jako stimpack za 4 body"): the
+        // pack price (gpui_pack_cost, 4 - QP rank) used to be paid here AND the card's 4 for the throw,
+        // 8 in all. Now the whole thing is one item from the pack, like a stimpak: the throw costs
+        // gpui_pack_cost (combat_rt_set_quick_throw_cost) and waits in the hand when short of it.
         // The art inven_wield is about to check itself (see gpui_weapon_equip for why first).
         int fid = art_id(OBJ_TYPE_CRITTER, obj_dude->fid & 0xFFF,
             item_w_anim_weap(item, HIT_MODE_RIGHT_WEAPON_PRIMARY), item_w_anim_code(item),
@@ -3986,12 +4270,21 @@ static void gpui_qt_tick()
         }
         gpui_qt_prev_pid = current != NULL ? current->pid : -1;
         gpui_qt_prev_obj = current;
-        combat_rt_spend_ap(apCost);
+        combat_rt_set_quick_throw_cost(gpui_pack_cost());
         // ⚠️ NO HOLSTER (2026-10-16, his pick "Bez schování" to "ať je přepínání víc smooth"): the
         // put-away of the gun was ~0.6 s of nothing between the press and the throw. The grenade is
         // in the hand at once; the gun comes back with its own take-out after the throw (RESTORE).
         inven_wield_instant(obj_dude, item, gpui_qt_hand);
+#if FALLOUT_RT_GAME == 2
+        // ⚠️ ...AND NO DRAW EITHER IN FALLOUT 2 (2026-10-24, his pick "Bez vytahování"): the bar's animated
+        // update plays the item's TAKE-OUT whenever the hand changes, and the throw waited for it --
+        // a spear's is ten frames at 8 fps, 1.25 s of drawing before every quick throw. The item is
+        // in the hand at once (inven_wield_instant set the pose) and the throw goes straight out; its
+        // wind-up is the throw's own (RT_THROW_WINDUP in animation.cc).
+        intface_update_items(false);
+#else
         intface_update_items(true);
+#endif
         trace_event(TRACE_ACTION, "quick-draw", "slot=%d pid=%d prev=%d ap=%d", gpui_qt_slot, gpui_qt_pid,
             gpui_qt_prev_pid, combat_rt_player_ap());
         gpui_qt_set(GPUI_QT_DRAWING);
@@ -4385,8 +4678,13 @@ static int gpui_collect_usable_items(int* pids, int* counts, int count, int max)
         // ⚠️ NO ARMOUR (2026-10-17, "quick menu dej pryč brnění, docela tam překáží"). It was added the
         // same day ("Quick inventory i pro armour by se hodil") and taken out again; gpui_quick_wear and
         // its dispatch stay, unreachable, should it come back.
+        // ⚠️ AND KEYS (2026-10-21, "klíč se neobjevil v quick inventory"). A key is its own item type, not
+        // MISC, so it never made the list -- and in Fallout a key is only ever used ON a door (its script
+        // checks the key's pid). Listed, it arms the use-on crosshair like the rope.
         int type = item_get_type(item);
-        if (type != ITEM_TYPE_MISC) {
+        if (type == ITEM_TYPE_KEY) {
+            // in: always a use-on
+        } else if (type != ITEM_TYPE_MISC) {
             continue;
         } else if (!proto_action_can_use(item->pid) && !proto_action_can_use_on(item->pid)) {
             continue;
@@ -4475,13 +4773,13 @@ static void gpui_place_explosive(Object* item, bool chargeAp)
         gsound_play_sfx_file("iisxxxx1");
         return;
     }
-    if (chargeAp && combat_rt_player_ap() < 2) {
+    if (chargeAp && combat_rt_player_ap() < gpui_pack_cost()) {
         gsound_play_sfx_file("iisxxxx1");
         trace_event(TRACE_ACTION, "explosive-place-refused", "why=ap ap=%d", combat_rt_player_ap());
         return;
     }
     if (chargeAp) {
-        combat_rt_spend_ap(2);
+        combat_rt_spend_ap(gpui_pack_cost());
     }
 
     gpui_place_item = item;
@@ -4538,10 +4836,7 @@ static void gpui_place_tick()
 // under it.
 static void gpui_quick_wear(int pid)
 {
-    int apCost = 4 - perk_level(PERK_QUICK_POCKETS);
-    if (apCost < 0) {
-        apCost = 0;
-    }
+    int apCost = gpui_pack_cost();
     if (combat_rt_player_ap() < apCost) {
         gsound_play_sfx_file("iisxxxx1");
         trace_event(TRACE_ACTION, "quick-wear-refused", "pid=%d why=ap ap=%d cost=%d", pid, combat_rt_player_ap(), apCost);
@@ -4604,10 +4899,12 @@ static void gpui_quick_wear(int pid)
 
 // USE an item on yourself, exactly the inventory's Use (inventry.cc, GAME_MOUSE_ACTION_MENU_ITEM_USE):
 // take one out of the stack, protinst_use_item it, destroy it if that consumed it, otherwise put it
-// back. 2 AP in a fight, refused when the pool cannot pay -- the same price the drugs have.
+// back. The pack's price in a fight (gpui_pack_cost), refused when the pool cannot pay -- the same
+// price the drugs have.
 static void gpui_quick_use_item(int pid)
 {
-    if (combat_rt_player_ap() < 2) {
+    int apCost = gpui_pack_cost();
+    if (combat_rt_player_ap() < apCost) {
         gsound_play_sfx_file("iisxxxx1");
         return;
     }
@@ -4642,15 +4939,25 @@ static void gpui_quick_use_item(int pid)
     } else {
         item_add_force(obj_dude, item, 1);
         // The timer window's PLACE: armed and put down in one action (its AP is the arming's).
-        if (inven_set_timer_place_requested() && gpui_is_armed_explosive(item->pid)) {
+        bool place = inven_set_timer_place_requested();
+#if FALLOUT_RT_GAME == 2
+        // ⚠️ IN FALLOUT 2 THE DONE PUTS IT DOWN TOO (2026-10-24, the Deck: "plastic explosive se nedají
+        // na zem a jsou v inventory po place"). Vanilla F2's Use from the hand (_obj_use_item, rc 2) sets
+        // the timer and connects the explosive to the floor at once; only the inventory screen's Use
+        // keeps it in the pack (to plant it). The wheel is the hand's Use, so A in the timer window puts
+        // it down as X does. Kept in the pack, a botched Traps roll blew it up on him
+        // (f2_trace_2026-10-24_113000 s=315.89 -> 320.81).
+        place = rc == 2;
+#endif
+        if (place && gpui_is_armed_explosive(item->pid)) {
             gpui_place_explosive(item, false);
         }
     }
 
     if (rc != -1) {
-        combat_rt_spend_ap(2);
+        combat_rt_spend_ap(apCost);
     }
-    trace_event(TRACE_ACTION, "quick-use-item", "pid=%d rc=%d ap=%d", pid, rc, combat_rt_player_ap());
+    trace_event(TRACE_ACTION, "quick-use-item", "pid=%d rc=%d cost=%d ap=%d", pid, rc, apCost, combat_rt_player_ap());
     intface_update_items(true);
 }
 
@@ -4666,10 +4973,103 @@ static void gpui_quick_use_on_item(int pid)
         return;
     }
     gmouse_set_use_on_item(pid);
-    gpui_useon_park_cursor();
+    gpui_useon_park_for(pid);
     gpui_cursor_show_time = get_time();
     gsound_play_sfx_file("ib1p1xx1");
     trace_event(TRACE_ACTION, "quick-use-on", "pid=%d", pid);
+}
+
+// ⚠️ A LOCKPICK STAYS ARMED UNTIL THE LOCK GIVES (2026-10-21, "ať ho používám několikrát za sebou. Teď ho
+// musím furt hledat z inventáře"). Vanilla's use-on crosshair is spent by one click, so every failed
+// attempt sent him back to the quick inventory for the lockpick. Now, once the attempt has played out
+// (the dude's walk and hands are done), the crosshair comes back for the same lockpick, glued on the same
+// lock -- for as long as that lock is still locked and he still carries one. Success, a lockpick broken on
+// a critical failure, B, or anything else armed in the meantime ends it. The roll is vanilla's every
+// time (GenLock: +20 with the lockpicks, a critical failure jams the lock and breaks them).
+#define GPUI_PICK_RETRY_GIVE_UP_MS 15000
+#define GPUI_PICK_RETRY_MIN_MS 300
+
+static int gpui_pick_retry_pid = -1;
+static bool gpui_pick_retry_hand = false;
+static Object* gpui_pick_retry_target = NULL;
+static int gpui_pick_retry_target_id = -1;
+static int gpui_pick_retry_elevation = 0;
+static unsigned int gpui_pick_retry_since = 0;
+
+void gamepad_ui_lockpick_used(int pid, Object* target, bool fromHand)
+{
+    gpui_pick_retry_pid = -1;
+    if (target == NULL || !gpui_is_lockpick_pid(pid) || !obj_is_locked(target)) {
+        return;
+    }
+    // From the hand, only when the pad armed it: a mouse player's crosshair stays vanilla.
+    if (fromHand && gamepad_ui_mouse_in_use()) {
+        return;
+    }
+    gpui_pick_retry_pid = pid;
+    gpui_pick_retry_hand = fromHand;
+    gpui_pick_retry_target = target;
+    gpui_pick_retry_target_id = target->id;
+    gpui_pick_retry_elevation = target->elevation;
+    gpui_pick_retry_since = get_time();
+}
+
+static void gpui_lockpick_retry_tick()
+{
+    if (gpui_pick_retry_pid == -1 || obj_dude == NULL) {
+        return;
+    }
+
+    unsigned int age = elapsed_time(gpui_pick_retry_since);
+    if (age > GPUI_PICK_RETRY_GIVE_UP_MS) {
+        trace_event(TRACE_ACTION, "lockpick-retry", "give-up pid=%d", gpui_pick_retry_pid);
+        gpui_pick_retry_pid = -1;
+        return;
+    }
+
+    // Wait for the attempt to play out: the walk there, the hands, the script's roll.
+    if (age < GPUI_PICK_RETRY_MIN_MS || anim_busy(obj_dude) || radial_wheel_is_open() || gamepad_ui_menu_active()
+        || dialog_active() || inven_any_open() || !intface_is_enabled()) {
+        return;
+    }
+
+    int pid = gpui_pick_retry_pid;
+    gpui_pick_retry_pid = -1;
+
+    // Something else armed meanwhile (B put it away, another tool, a skill): that wins.
+    if (gmouse_3d_get_mode() != GAME_MOUSE_MODE_MOVE) {
+        return;
+    }
+
+    // The lock must still be on this map, as the very object it was.
+    Object* target = NULL;
+    for (Object* obj = obj_find_first_at(gpui_pick_retry_elevation); obj != NULL; obj = obj_find_next_at()) {
+        if (obj == gpui_pick_retry_target && obj->id == gpui_pick_retry_target_id) {
+            target = obj;
+            break;
+        }
+    }
+
+    bool locked = target != NULL && obj_is_locked(target);
+    bool carried = inven_pid_is_carried(obj_dude, pid) != 0;
+    if (!locked || !carried) {
+        trace_event(TRACE_ACTION, "lockpick-retry", "done pid=%d locked=%d carried=%d", pid, locked ? 1 : 0, carried ? 1 : 0);
+        return;
+    }
+
+    Object* hand = NULL;
+    if (gpui_pick_retry_hand && intface_get_current_item(&hand) != -1 && hand != NULL && hand->pid == pid) {
+        intface_use_item();
+        gsound_play_sfx_file("ib1p1xx1");
+    } else {
+        gpui_quick_use_on_item(pid);
+    }
+    if (gmouse_3d_get_mode() == GAME_MOUSE_MODE_USE_CROSSHAIR) {
+        gpui_tpick_set(target);
+        gpui_cursor_show_time = get_time();
+    }
+    trace_event(TRACE_ACTION, "lockpick-retry", "rearm pid=%d target=%d armed=%d", pid, target->id,
+        gmouse_3d_get_mode() == GAME_MOUSE_MODE_USE_CROSSHAIR ? 1 : 0);
 }
 
 // The ammo objects the open wheel is showing -- one per distinct proto, pointing at the first stack
@@ -4964,12 +5364,26 @@ static void gpui_weapon_equip(int index)
         return;
     }
 
+    // ⚠️ IN A FIGHT IT COSTS WHAT VANILLA'S WAY TO DO IT COSTS (2026-10-19, his pick "Jako inventář: 4 AP
+    // (− QP)"). Vanilla changes weapons through the inventory -- 4 AP to open it, one less per rank of
+    // Quick Pockets -- and the wheel is only a quicker way there; it was free, the put-away and the
+    // draw were its only price. Swapping hands (Y) stays free, as in vanilla. Out of a fight the pool
+    // is full and nothing is taken (combat_rt_spend_ap).
+    int apCost = gpui_pack_cost();
+    if (combat_rt_player_ap() < apCost) {
+        gsound_play_sfx_file("iisxxxx1");
+        trace_event(TRACE_INPUT, "weapon-equip-refused", "why=ap ap=%d cost=%d", combat_rt_player_ap(), apCost);
+        return;
+    }
+
     if (item == NULL) {
         // The bare-hands entry. inven_unwield plays the put-away animation itself when the hand
         // being emptied is the one the interface bar shows, so the swap reads on screen just like
         // a wield does.
+        combat_rt_spend_ap(apCost);
         inven_unwield(obj_dude, hand);
         intface_update_items(true);
+        trace_event(TRACE_ACTION, "weapon-equip", "pid=-1 cost=%d ap=%d", apCost, combat_rt_player_ap());
         return;
     }
 
@@ -4985,8 +5399,10 @@ static void gpui_weapon_equip(int index)
         return;
     }
 
+    combat_rt_spend_ap(apCost);
     inven_wield(obj_dude, item, hand);
     intface_update_items(true);
+    trace_event(TRACE_ACTION, "weapon-equip", "pid=%d cost=%d ap=%d", item->pid, apCost, combat_rt_player_ap());
 }
 
 // Drive from the per-frame safe tick (gamepad_ui_tick), exactly like the quick-use wheel.
@@ -5077,11 +5493,12 @@ static void gpui_weapon_wheel(SDL_GameController* pad)
                     bool isDrug = proto_ptr(pid, &proto) != -1 && proto != NULL
                         && proto->item.type == ITEM_TYPE_DRUG;
                     bool isArmor = proto != NULL && proto->item.type == ITEM_TYPE_ARMOR;
+                    bool isKey = proto != NULL && proto->item.type == ITEM_TYPE_KEY;
                     if (isArmor) {
                         gpui_quick_wear(pid);
                     } else if (isDrug) {
                         gpui_quick_use(pid);
-                    } else if (proto_action_can_use(pid)) {
+                    } else if (!isKey && proto_action_can_use(pid)) {
                         gpui_quick_use_item(pid);
                     } else {
                         gpui_quick_use_on_item(pid);
@@ -7406,6 +7823,18 @@ static void gpui_useon_park_cursor()
     gpui_park_cursor_at(sx + 16, sy + 15);
 }
 
+// A lockpick's crosshair opens ON the nearest locked door or container (the bed drawn over the Vats foot
+// locker took the click when it opened three tiles ahead), glued there so A means that lock.
+static void gpui_useon_park_for(int pid)
+{
+    Object* lock = gpui_is_lockpick_pid(pid) ? interact_prompt_skill_target(SKILL_LOCKPICK) : NULL;
+    if (lock != NULL) {
+        gpui_tpick_set(lock);
+    } else {
+        gpui_useon_park_cursor();
+    }
+}
+
 static void gpui_useon_arm(SDL_GameController* pad)
 {
     static bool prevA = false;
@@ -7506,7 +7935,8 @@ static void gpui_useon_arm(SDL_GameController* pad)
     // ...and put it in front of his eyes rather than wherever the pointer was abandoned. Only once
     // the mode is really up: intface_use_item() is the authority on whether this item arms anything.
     if (gmouse_3d_get_mode() == GAME_MOUSE_MODE_USE_CROSSHAIR) {
-        gpui_useon_park_cursor();
+        Object* hand = NULL;
+        gpui_useon_park_for(intface_get_current_item(&hand) != -1 && hand != NULL ? hand->pid : -1);
     }
 
     // Show the cursor you just armed. It is also what makes the confirming A land at all: a world
@@ -7825,9 +8255,9 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
     // The picker already stands aside for the same reason a few lines below.
     //
     // ⚠️ AND ONLY WITH THE REALTIME LAYER RUNNING. The world's stick-walk and RT-attack live in
-    // combat_rt; without it (the Fallout 2 port until that lands, or any build with realtime off)
-    // nothing would move the dude at all. There the world is one more click screen: the right stick
-    // drives the pointer and RT clicks -- vanilla click-to-walk, on the pad.
+    // combat_rt; without it (realtime off, or a port where it has not landed yet) nothing would move
+    // the dude at all. There the world is one more click screen: the right stick drives the pointer
+    // and RT clicks -- vanilla click-to-walk, on the pad.
     bool inWorld = combat_rt_enabled()
         && !gamepad_ui_menu_active()
         && !in_main_menu
@@ -8074,8 +8504,12 @@ static void gpui_drain_requests()
 {
     // A jab cut before its frame gives its AP back -- before any new press is judged.
     gpui_inject_tick();
+    gpui_heal_chain_tick();
+    gpui_ap_wait_tick();
     // ...and an explosive whose put-down was cut still lands.
     gpui_place_tick();
+    // A lockpick that failed comes back armed on the same lock.
+    gpui_lockpick_retry_tick();
 
     // A quick slot's drug (RB's stimpak, or whatever is bound), then the throw's state machine.
     if (gpui_qs_use_pending_slot != -1) {
@@ -8095,7 +8529,9 @@ static void gpui_drain_requests()
                 gpui_quick_use_on_item(item->pid);
             }
         } else {
+            gpui_quick_use_slot = slot; // a held button may chain this one (gpui_chain_slot)
             gpui_quick_use(item->pid);
+            gpui_quick_use_slot = -1;
         }
     }
     gpui_qt_tick();

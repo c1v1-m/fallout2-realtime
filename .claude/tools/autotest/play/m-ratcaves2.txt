@@ -1,0 +1,17 @@
+# F2 play-through: Klamath's rat caves with their scripts -- the dude placed by the rats (the map has no start tile, 20100 is rock).
+name m-ratcaves2
+map KLARATCV.MAP
+mapscript on
+seed 1
+census
+duration 120
+dude tile 21886 rot 2
+dude hp 120
+dude skill small_guns 90
+dude armor 74
+dude wield 8
+dude item 29 4
+dude item 40 4
+provoke
+
+at 0 fight

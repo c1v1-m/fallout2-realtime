@@ -1,0 +1,26 @@
+# F2 play-through: save and load on the pad -- pause menu, SAVE GAME into slot 1 (empty in the test
+# folder), then LOAD GAME from it. Photographs every step.
+name m-saveload
+map DESERT1.MAP
+seed 1
+duration 45
+dude tile 20100 rot 2
+dude item 40 3
+
+open 1000 options
+tap 2500 A
+shot 4000
+tap 4500 A
+shot 6000
+tap 6500 A
+shot 8500
+note 10000 saved
+open 12000 options
+tap 13500 DOWN
+tap 14000 A
+shot 16000
+tap 16500 A
+shot 18000
+tap 18500 A
+shot 23000
+note 30000 loaded

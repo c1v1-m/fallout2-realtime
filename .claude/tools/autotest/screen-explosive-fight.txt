@@ -1,0 +1,30 @@
+# F2 (2026-10-24): the game clock runs through a realtime fight (fallout1-ce scripts.cc port). A plastic
+# explosive put down while a raider is coming at him goes off on its timer, mid-fight -- with the clock
+# stopped by the warm combat bit it went off only once the fight was over.
+name screen-explosive-fight-f2
+map DESERT1.MAP
+seed 1
+duration 30
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 10
+dude item 85 2
+dude quickslot rb 85
+
+spawn 16777455 20908 rot 5 wield 4 hostile hp 400
+
+tap 1500 RB
+shot 2600
+tap 3000 DOWN
+tap 3400 DOWN
+tap 3800 DOWN
+tap 4200 DOWN
+tap 4600 DOWN
+shot 5100
+tap 5600 A
+shot 6800
+
+expect \[ACTION/quick-use-item\] pid=85 rc=2
+expect \[ACTION/explosive-place-start\] pid=209
+expect \[ACTION/explosive-placed\] pid=209
+expect hit for [2-9][0-9] hit points

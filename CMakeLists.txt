@@ -2,6 +2,17 @@ cmake_minimum_required(VERSION 3.13)
 
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
+# Fallout 2 Realtime: link the C/C++ runtime STATICALLY, so the exe runs on a PC without the Visual C++
+# redistributable ("MSVCP140.dll was not found") and through Proton on a Steam Deck -- the installer
+# puts this exe into the Steam folder as it is. CMP0091 decides how the runtime flags are made and must
+# be NEW before project(); the policy default carries it into SDL2 and the other subprojects. (fallout1-ce
+# does the same in its release tree.)
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 set(EXECUTABLE_NAME fallout2-ce)
 
 if(APPLE)
@@ -295,7 +306,9 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/rt/rt_f2_hooks.cc"
     "src/rt/rt_gconfig_keys.h"
     "src/rt/rt_hooks.h"
+    "src/rt/game/autotest.cc"
     "src/rt/game/autotest.h"
+    "src/rt/game/combat_rt.cc"
     "src/rt/game/combat_rt.h"
     "src/rt/game/game_trace.cc"
     "src/rt/game/game_trace.h"

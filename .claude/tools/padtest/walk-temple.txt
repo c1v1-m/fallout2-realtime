@@ -1,0 +1,29 @@
+# new game -> premade -> temple, then walk the left stick around (realtime: the stick walks)
+7 axis LY -24000
+7.2 axis LY 0
+7.45 axis LY -24000
+7.65 axis LY 0
+7.9 axis LY -24000
+8.1 axis LY 0
+8.35 axis LY -24000
+8.55 axis LY 0
+8.8 axis LY -24000
+9 axis LY 0
+9.25 axis LY -24000
+9.45 axis LY 0
+10.0 axis LY 24000
+10.2 axis LY 0
+11.0 tap A
+16.0 axis LY 24000
+16.2 axis LY 0
+17.0 tap A
+21.0 tap A
+# world: walk north for 6 s, then east 4 s, then north again
+26.0 axis LY -30000
+32.0 axis LY 0
+32.2 axis LX 30000
+36.0 axis LX 0
+36.2 axis LY -30000
+44.0 axis LY 0
+44.2 axis LX -30000
+50.0 axis LX 0

@@ -1,0 +1,21 @@
+# F2 play-through: Arroyo village with its scripts -- talk to Mynoc on the pad, pick a reply, leave.
+name m-arroyo-talk
+map ARVILLAG.MAP
+mapscript on
+seed 1
+census
+duration 30
+
+talk 2000 16777231
+shot 5000
+tap 6000 DOWN
+shot 7000
+tap 8000 A
+shot 10000
+tap 12000 B
+shot 14000
+tap 15000 B
+note 20000 the dialogue should be over
+
+expect \[FLOW/autotest\] talk .*rc=0
+expect \[FLOW/autotest\] end why=time .* modal=-1

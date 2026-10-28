@@ -1,0 +1,12 @@
+# F2: a quick save (START held) outside the Temple of Trials, at the map's start tile -- the newest save
+# for a CONTINUE test (padtest continue-autosave.txt).
+name m-quicksave-temple
+map ARTEMPLE.MAP
+mapscript on
+seed 1
+duration 8
+dude tile 17288 rot 0
+
+pad 2000 start 1
+pad 3000 start 0
+note 6000 saved

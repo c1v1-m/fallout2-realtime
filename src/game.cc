@@ -69,6 +69,8 @@
 #include "worldmap.h"
 
 #include "rt/game/gamepad_ui.h"
+#include "rt/game/combat_rt.h"
+#include "rt/rt_hooks.h"
 
 namespace fallout {
 
@@ -308,7 +310,14 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
         return -1;
     }
 
-    // Realtime build: the always-on controller layer (cursor, clicks, menu navigation, wheels).
+    // Realtime build: the always-on controller layer (cursor, clicks, menu navigation, wheels). The pad
+    // test's virtual controller (if asked for) must exist before it picks one.
+    // The virtual test pad must exist before anything opens a controller (combat_rt_init does).
+    rt_padtest_init();
+
+    // Realtime combat owns combat from here (rt/game/combat_rt.cc).
+    combat_rt_init();
+
     gamepad_ui_init();
 
     debugPrint(">combat_init\t");
@@ -423,6 +432,7 @@ void gameReset()
     _ResetLoadSave();
     gameDialogReset();
     combatReset();
+    combat_rt_reset();
     _game_user_wants_to_quit = 0;
     automapReset();
     _init_options_menu();
@@ -451,6 +461,7 @@ void gameExit()
     messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_MISC, nullptr);
     messageListFree(&gMiscMessageList);
     gamepad_ui_exit();
+    combat_rt_exit();
     combatExit();
     gameDialogExit();
     _scr_game_exit();

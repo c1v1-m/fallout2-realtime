@@ -1,0 +1,21 @@
+# F2: the quick throw (RB) with a grenade -- see m-throw-spear.
+# punch): no draw before the throw; the throw art's frames before the release hold longer, after it snap.
+name m-throw-grenade
+map DESERT1.MAP
+seed 1
+duration 24
+dude tile 20100 rot 2
+dude stat AG 9
+dude hp 200
+dude skill throwing 120
+dude wield 8
+dude item 29 2
+dude item 25 3
+dude quickslot rb 25
+
+spawn 16777455 20900 rot 5 wield 4 hostile hp 200
+
+at 0 idle
+at 2 throw
+at 8 throw
+at 14 idle

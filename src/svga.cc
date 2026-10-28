@@ -21,6 +21,8 @@
 #include "window_manager.h"
 #include "window_manager_private.h"
 
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 static bool createRenderer(int width, int height);
@@ -337,6 +339,28 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
 
             configGetBool(&resolutionConfig, "IFACE", "IFACE_BAR_MODE", &gInterfaceBarMode);
             configGetInt(&resolutionConfig, "IFACE", "IFACE_BAR_WIDTH", &gInterfaceBarWidth);
+            // Realtime build: the LB / RB quick slots live in the strips left and right of the bar
+            // (interface.cc, intface_side_panel_ok: 60 px each). Steam's f2_res.ini asks for the HRP's
+            // 800-wide bar, which on our 853-wide internal screen leaves 26 px a side -- LB had nowhere to
+            // go and RB fell onto the end-turn box (2026-10-23, "lb chybělo"); on a Deck's 768 the 800 bar
+            // does not even fit. So the bar is as wide as asked only while both strips keep 66 px (a 57 px
+            // slot and its margins); narrower than that it becomes the widest bar that still leaves them
+            // (a multiple of 8: 720 on 853), cut out of the wide art at load (interface.cc,
+            // interface_bar_cut -- his "pipboy obrazovka může být širší, když se tam najde místo pro lb a
+            // rb"), and vanilla's 640 where not even that is wider.
+            if (gInterfaceBarWidth > 640 && width - gInterfaceBarWidth < 2 * 66) {
+                int fit = (width - 2 * 66) & ~7;
+                int asked = gInterfaceBarWidth;
+                if (fit > 640) {
+                    gInterfaceBarSourceWidth = asked;
+                    gInterfaceBarWidth = fit;
+                } else {
+                    gInterfaceBarWidth = 640;
+                }
+                debugPrint("f2_res.ini: IFACE_BAR_WIDTH=%d leaves no room for the quick slots at %d wide; "
+                           "using a %d bar.\n",
+                    asked, width, gInterfaceBarWidth);
+            }
             configGetInt(&resolutionConfig, "IFACE", "IFACE_BAR_SIDE_ART", &gInterfaceSidePanelsImageId);
             configGetBool(&resolutionConfig, "IFACE", "IFACE_BAR_SIDES_ORI", &gInterfaceSidePanelsExtendFromScreenEdge);
         }
@@ -391,6 +415,14 @@ int _GNW95_init_window(int width, int height, bool fullscreen, int scale)
             // notification, Steam) -- the game sits at 0% CPU behind the taskbar looking exactly like
             // a crash. _DESKTOP never minimizes; the output is the desktop size anyway (see above).
             windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+        }
+
+        // The game playing by itself (rt/game/autotest.cc): a hidden window, never fullscreen.
+        if (gnw_headless || gnw_visible_override) {
+            windowFlags &= ~(SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_FULLSCREEN);
+            if (gnw_headless) {
+                windowFlags |= SDL_WINDOW_HIDDEN;
+            }
         }
 
         gSdlWindow = SDL_CreateWindow(gProgramWindowTitle, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width * scale, height * scale, windowFlags);

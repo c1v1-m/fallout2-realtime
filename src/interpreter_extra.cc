@@ -45,6 +45,11 @@
 #include "trait.h"
 #include "worldmap.h"
 
+// Realtime (fallout1-ce intextra.cc).
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 typedef enum ScriptError {
@@ -885,8 +890,35 @@ static void opCreateObject(Program* program)
         goto out;
     }
 
+    // DUPLICATE-SPAWN GUARD (fallout1-ce 2026-08-20, op_create_object_sid). A script that stages a scene
+    // with create_object_sid cannot tell the scene is ALREADY staged: its "already done" flag lives in
+    // the program's own stack values, and a map reload rebuilds the program without it (F1: Vinnie's
+    // ambush staged the whole Skulz gang a second time on top of the first, eight pairs, one proto on
+    // one tile). A LIVING critter of the SAME proto already standing on the target tile is never meant
+    // to be created twice -- two identical critters on one tile cannot be told apart or pathed
+    // through -- so the script gets the one that is there, and the sid block below re-arms it. Traced
+    // as a WARN: if it shows in ordinary play the rule is too broad.
+    Object* existing = nullptr;
+    if (PID_TYPE(pid) == OBJ_TYPE_CRITTER && tile > 0) {
+        Object** here = nullptr;
+        int hereCount = objectListCreate(tile, elevation, OBJ_TYPE_CRITTER, &here);
+        for (int i = 0; i < hereCount; i++) {
+            if (here[i] != gDude && here[i]->pid == pid && !critterIsDead(here[i])) {
+                existing = here[i];
+                break;
+            }
+        }
+        if (here != nullptr) {
+            objectListFree(here);
+        }
+    }
+
     Proto* proto;
-    if (protoGetProto(pid, &proto) != -1) {
+    if (existing != nullptr) {
+        trace_event(TRACE_WARN, "spawn-dedup", "by=%s pid=%d tile=%d elev=%d reused=%d",
+            program->name != nullptr ? program->name : "?", pid, tile, elevation, existing->id);
+        object = existing;
+    } else if (protoGetProto(pid, &proto) != -1) {
         if (objectCreateWithFidPid(&object, proto->fid, pid) != -1) {
             if (tile == -1) {
                 tile = 0;
@@ -1014,6 +1046,8 @@ static void opDisplayMsg(Program* program)
 {
     char* string = programStackPopString(program);
     displayMonitorAddMessage(string);
+    // Which script said it (the message window line is traced as [STATE/msg] by displayMonitorAddMessage).
+    trace_event(TRACE_STATE, "script-msg", "prog=%s", program != nullptr && program->name != nullptr ? program->name : "?");
 
     if (settings.debug.show_script_messages) {
         debugPrint("\n");
@@ -1411,7 +1445,14 @@ static void opAnimateMoveObjectToTile(Program* program)
         return;
     }
 
-    if (isInCombat()) {
+    // ⚠️ IN REALTIME ONLY A FIGHTER'S LEGS BELONG TO THE FIGHT (Fallout 2 Realtime 2026-10-24, the Deck:
+    // "radškorpioni jen koukají"). Vanilla refuses a scripted walk in combat because combat is a mode in
+    // which nobody else moves; realtime keeps the combat bit warm while anyone anywhere chases, and two
+    // spore plants that never reach him kept it warm for good -- every scripted walk on the map was
+    // refused, the encounter's radscorpions (ECScorp: wander until you see the dude, then attack) froze
+    // facing wherever they stood and never saw him. A critter combat_rt is not fighting with walks as its
+    // script says; a fighter stays combat_rt's.
+    if (isInCombat() && !(combat_rt_enabled() && !combat_rt_critter_fighting(object))) {
         return;
     }
 
@@ -1832,6 +1873,13 @@ static void opAttackComplex(Program* program)
         return;
     }
 
+    // A script's attack() that comes to nothing used to leave no mark at all (fallout1-ce, 2026-10-21).
+    trace_event(TRACE_FLOW, "script-attack", "prog=%s self=%d pid=%d target=%d active=%d/%d fleeing=%d dialog=%d combat=%d",
+        program->name != nullptr ? program->name : "?", self->id, self->pid, target->id,
+        critterIsActive(self) ? 1 : 0, critterIsActive(target) ? 1 : 0,
+        (target->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0 ? 1 : 0,
+        _gdialogActive() ? 1 : 0, isInCombat() ? 1 : 0);
+
     if (!critterIsActive(self) || (self->flags & OBJECT_HIDDEN) != 0) {
         debugPrint("\n   But is already Inactive (Dead/Stunned/Invisible)");
         program->flags &= ~PROGRAM_FLAG_0x20;
@@ -1855,7 +1903,14 @@ static void opAttackComplex(Program* program)
         return;
     }
 
-    if (isInCombat()) {
+    if (isInCombat() && combat_rt_enabled()) {
+        // ⚠️ REALTIME: THE SCRIPT'S ORDER ALWAYS GETS THROUGH (fallout1-ce 2026-10-04). Vanilla's branch
+        // below only acts on a critter that is NOT already ENGAGING -- sound in turn-based, where the
+        // end of a fight resets every participant's maneuver. combat_rt never runs that, so a critter
+        // that was in ANY earlier fight ignored its own script's attack(dude) for good whenever the
+        // warm combat bit was up, standing there until somebody shot it.
+        combat_rt_notify_attack(self, target);
+    } else if (isInCombat()) {
         CritterCombatData* combatData = &(self->data.critter.combat);
         if ((combatData->maneuver & CRITTER_MANEUVER_ENGAGING) == 0) {
             combatData->maneuver |= CRITTER_MANEUVER_ENGAGING;
@@ -1898,7 +1953,12 @@ static void opStartGameDialog(Program* program)
     Object* obj = static_cast<Object*>(programStackPopPointer(program));
     programStackPopInteger(program);
 
-    if (isInCombat()) {
+    // ⚠️ THE SAME QUESTION AS opGameDialogSystemEnter, OR THE TWO HALVES COME APART (fallout1-ce
+    // 2026-10-15): that op lets a conversation in while a fight that is not about you keeps realtime's
+    // combat bit warm; asking isInCombat() here refused the conversation's frame after it had been let
+    // in, and the reply and options came up in the engine's bare grey windows over the map. Identical
+    // to vanilla in turn-based, where combat_rt_under_threat falls back to isInCombat.
+    if (combat_rt_under_threat()) {
         return;
     }
 
@@ -2698,14 +2758,24 @@ static void opGameDialogSystemEnter(Program* program)
         }
     }
 
-    if (isInCombat()) {
+    // ⚠️ "IS SOMEBODY ACTUALLY COMING FOR ME?" -- not vanilla's isInCombat() (identical in turn-based:
+    // combat_rt_under_threat falls back to it). fallout1-ce 2026-10-13: a fight between two other
+    // parties kept realtime's combat bit warm, the critter heartbeat runs through such a fight, and a
+    // guard's critter_p_proc started its "put that weapon away" countdown and THEN asked for the
+    // warning conversation -- which this refused silently, so the guards opened fire unannounced.
+    if (combat_rt_under_threat()) {
+        trace_event(TRACE_FLOW, "dialog-refused", "pid=%d id=%d name=%s why=script-under-threat",
+            self->pid, self->id, objectGetName(self));
         return;
     }
 
     if (gameRequestState(GAME_STATE_4) == -1) {
+        trace_event(TRACE_FLOW, "dialog-refused", "pid=%d id=%d name=%s why=state",
+            self->pid, self->id, objectGetName(self));
         return;
     }
 
+    trace_event(TRACE_FLOW, "dialog-request", "pid=%d id=%d name=%s", self->pid, self->id, objectGetName(self));
     gGameDialogSpeaker = scriptGetSelf(program);
 }
 
@@ -2765,6 +2835,9 @@ static void opGameTimeAdvance(Program* program)
     int days = data / GAME_TIME_TICKS_PER_DAY;
     int remainder = data % GAME_TIME_TICKS_PER_DAY;
 
+    // A skip nobody can interrupt: poison may wound but not kill inside it (poisonEventProcess).
+    critter_set_poison_spares_life(true);
+
     for (int day = 0; day < days; day++) {
         gameTimeAddTicks(GAME_TIME_TICKS_PER_DAY);
         queueProcessEvents();
@@ -2772,6 +2845,8 @@ static void opGameTimeAdvance(Program* program)
 
     gameTimeAddTicks(remainder);
     queueProcessEvents();
+
+    critter_set_poison_spares_life(false);
 }
 
 // radiation_inc
@@ -3006,6 +3081,32 @@ static void opGetMessageString(Program* program)
 
 // critter_inven_obj
 // 0x458F00
+// The dude's weapon is hidden from a critter's HEARTBEAT and TIMER procs during a fight and a short
+// while after it -- the guards' "put that weapon away" countdown (RT_WEAPON_AMNESTY_SECONDS in
+// combat_rt.cc). Only those two procs and only a weapon: a talk still sees what you hold.
+static Object* critterInvenObjAmnesty(Program* program, Object* item)
+{
+    if (item == nullptr || itemGetType(item) != ITEM_TYPE_WEAPON || !combat_rt_weapon_amnesty()) {
+        return item;
+    }
+    Script* script;
+    if (scriptGetScript(scriptGetSid(program), &script) == -1) {
+        return item;
+    }
+    if (script->action != SCRIPT_PROC_CRITTER && script->action != SCRIPT_PROC_TIMED) {
+        return item;
+    }
+    // Traced at most every two seconds: every guard heartbeat asks, several times a second in a crowd.
+    static unsigned int lastTrace = 0;
+    if (getTicks() - lastTrace > 2000) {
+        lastTrace = getTicks();
+        Object* self = scriptGetSelf(program);
+        trace_event(TRACE_FLOW, "weapon-amnesty", "pid=%d id=%d proc=%d",
+            self != nullptr ? self->pid : -1, self != nullptr ? self->id : -1, script->action);
+    }
+    return nullptr;
+}
+
 static void opCritterGetInventoryObject(Program* program)
 {
     int type = programStackPopInteger(program);
@@ -3019,7 +3120,7 @@ static void opCritterGetInventoryObject(Program* program)
         case INVEN_TYPE_RIGHT_HAND:
             if (critter == gDude) {
                 if (interfaceGetCurrentHand() != HAND_LEFT) {
-                    programStackPushPointer(program, critterGetItem2(critter));
+                    programStackPushPointer(program, critterInvenObjAmnesty(program, critterGetItem2(critter)));
                 } else {
                     programStackPushPointer(program, nullptr);
                 }
@@ -3030,7 +3131,7 @@ static void opCritterGetInventoryObject(Program* program)
         case INVEN_TYPE_LEFT_HAND:
             if (critter == gDude) {
                 if (interfaceGetCurrentHand() == HAND_LEFT) {
-                    programStackPushPointer(program, critterGetItem1(critter));
+                    programStackPushPointer(program, critterInvenObjAmnesty(program, critterGetItem1(critter)));
                 } else {
                     programStackPushPointer(program, nullptr);
                 }
@@ -3127,6 +3228,12 @@ static void opFloatMessage(Program* program)
     if (obj == nullptr) {
         scriptPredefinedError(program, "float_msg", SCRIPT_ERROR_OBJECT_IS_NULL);
         return;
+    }
+
+    // What an NPC said over its head -- a refusal, a threat -- which no other trace line carries.
+    if (string != nullptr && *string != '\0') {
+        trace_event(TRACE_STATE, "float", "prog=%s pid=%d id=%d text=%.80s", program != nullptr && program->name != nullptr ? program->name : "?",
+            obj->pid, obj->id, string);
     }
 
     if (string == nullptr || *string == '\0') {
@@ -3457,7 +3564,13 @@ static void opRegAnimFunc(Program* program)
     ProgramValue param = programStackPopValue(program);
     int cmd = programStackPopInteger(program);
 
-    if (!isInCombat()) {
+    // ⚠️ BEGIN AND END PASS IN REALTIME (fallout1-ce 2026-10-13, a billboard that did not turn): a map's
+    // decorative loop is reg_anim_func(BEGIN) -> reg_anim_animate_forever -> reg_anim_func(END), and a
+    // map entered with realtime's combat bit warm registered it into no sequence. Every step a script
+    // can put between them is still gated on its own opcode, so the worst a passed BEGIN/END makes is
+    // an empty sequence. CLEAR stays gated: it would cut whatever combat_rt plays on a fighter.
+    bool passes = !isInCombat() || (combat_rt_enabled() && cmd != OP_REG_ANIM_FUNC_CLEAR);
+    if (passes) {
         switch (cmd) {
         case OP_REG_ANIM_FUNC_BEGIN:
             reg_anim_begin(param.integerValue);
@@ -3973,7 +4086,9 @@ static void opRegAnimAnimateForever(Program* program)
     int anim = programStackPopInteger(program);
     Object* obj = static_cast<Object*>(programStackPopPointer(program));
 
-    if (!isInCombat()) {
+    // Decorative and nothing else (fans, a billboard), started by a map's enter script -- out of combat
+    // in vanilla, but in realtime a map can be entered with the combat bit warm (fallout1-ce).
+    if (!isInCombat() || combat_rt_enabled()) {
         if (obj != nullptr) {
             animationRegisterAnimateForever(obj, anim, -1);
         } else {
@@ -3997,6 +4112,9 @@ static void opCritterInjure(Program* program)
     bool reverse = (flags & DAM_PERFORM_REVERSE) != 0;
 
     flags &= DAM_CRIP;
+    // Who cripples or blinds by script, and whom (fallout1-ce: the dude went blind with no attack near).
+    trace_event(TRACE_COMBAT, "script-injure", "script=%s pid=%d id=%d flags=0x%x reverse=%d dude=%d",
+        program->name, critter->pid, critter->id, flags, reverse ? 1 : 0, critter == gDude ? 1 : 0);
 
     if (reverse) {
         critter->data.critter.combat.results &= ~flags;
@@ -4078,11 +4196,23 @@ static void opObjectIsLocked(Program* program)
     programStackPushInteger(program, locked ? 1 : 0);
 }
 
+// Which script locks, unlocks, opens or closes what, and when (2026-10-24: Cameron's door stayed locked
+// for seconds after the win and nothing said whether his script had reached it). A null object is
+// traced too -- a tile_contains_pid_obj that found nothing looks exactly like a door nobody touched.
+static void scriptDoorTrace(Program* program, const char* op, Object* object)
+{
+    trace_event(TRACE_FLOW, "script-door", "op=%s prog=%s pid=%d id=%d tile=%d locked=%d open=%d",
+        op, program->name != nullptr ? program->name : "?",
+        object != nullptr ? object->pid : -1, object != nullptr ? object->id : -1, object != nullptr ? object->tile : -1,
+        object != nullptr && objectIsLocked(object) ? 1 : 0, object != nullptr && objectIsOpen(object) ? 1 : 0);
+}
+
 // obj_lock
 // 0x45B16C
 static void opObjectLock(Program* program)
 {
     Object* object = static_cast<Object*>(programStackPopPointer(program));
+    scriptDoorTrace(program, "lock", object);
 
     if (object != nullptr) {
         objectLock(object);
@@ -4096,6 +4226,7 @@ static void opObjectLock(Program* program)
 static void opObjectUnlock(Program* program)
 {
     Object* object = static_cast<Object*>(programStackPopPointer(program));
+    scriptDoorTrace(program, "unlock", object);
 
     if (object != nullptr) {
         objectUnlock(object);
@@ -4125,6 +4256,7 @@ static void opObjectIsOpen(Program* program)
 static void opObjectOpen(Program* program)
 {
     Object* object = static_cast<Object*>(programStackPopPointer(program));
+    scriptDoorTrace(program, "open", object);
 
     if (object != nullptr) {
         objectOpen(object);
@@ -4138,6 +4270,7 @@ static void opObjectOpen(Program* program)
 static void opObjectClose(Program* program)
 {
     Object* object = static_cast<Object*>(programStackPopPointer(program));
+    scriptDoorTrace(program, "close", object);
 
     if (object != nullptr) {
         objectClose(object);
@@ -4774,7 +4907,17 @@ static void opCritterSetFleeState(Program* program)
 static void opTerminateCombat(Program* program)
 {
     if (isInCombat()) {
-        _game_user_wants_to_quit = 1;
+        // ⚠️ IN REALTIME THIS FLAG IS "QUIT THE GAME" (fallout1-ce 2026-10-04; Fallout 2 Realtime
+        // 2026-10-24, the Deck: "zase hra spadla po unarmed combatu s typkem"). Vanilla's turn-based
+        // loop reads _game_user_wants_to_quit == 1 as "end this fight", ends it and zeroes the flag.
+        // Under combat_rt that loop never runs, so nobody consumed it: mainLoop saw a quit request and
+        // the game left the map and closed -- Cameron's combat_p_proc calls it the moment he is beaten
+        // at the end of the Temple of Trials (ACTemVil.int, f2_trace_2026-10-24_130740 s=135.07).
+        if (combat_rt_enabled()) {
+            combat_rt_terminate_from_script();
+        } else {
+            _game_user_wants_to_quit = 1;
+        }
         Object* self = scriptGetSelf(program);
         if (self != nullptr) {
             if (PID_TYPE(self->pid) == OBJ_TYPE_CRITTER) {

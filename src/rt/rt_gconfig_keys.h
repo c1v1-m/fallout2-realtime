@@ -3,7 +3,7 @@
 
 // The cfg keys the realtime build adds, copied verbatim from fallout1-ce src/game/gconfig.h
 // (everything our commits added there). Keep the two in step: a key added in F1 goes here too.
-// Included at the end of game_config.h, inside namespace fallout.
+// Included at the end of game_config.h.
 
 // Global animation-speed multiplier (anim_speed_scale): scales every critter/object
 // animation's per-frame duration symmetrically (dude and NPCs alike). < 1 = faster
@@ -52,9 +52,16 @@
 // reloading in cover, searching the last known position, taking a much nearer foe, minding allies in
 // the line of fire (combat_rt.cc, rt_tactical_ai). 1 = on (his call, 2026-10-17), 0 = vanilla rules only.
 #define GAME_CONFIG_TACTICAL_AI_KEY "tactical_ai"
+// Bullets, bolts and balls FLY and a sidestep makes them miss (combat_rt.cc, rt_projectiles; his design,
+// 2026-10-18). 1 = on (his pick), 0 = vanilla: a shot hits or misses the moment it is fired.
+#define GAME_CONFIG_PROJECTILES_KEY "projectiles"
 // The body part the weapon slot's AIMED mode fires at (gamepad_ui, gpui_aim_last_part): written
 // whenever a part is bound in the called-shot window, read back at start. HIT_LOCATION_* (0-7).
 #define GAME_CONFIG_AIM_PART_KEY "aim_part"
+// The weapon slot's firing mode the player last picked (interface.cc, intface_fire_mode_store): an
+// INTERFACE_ITEM_ACTION_* value, 1 plain .. 4 aimed secondary. Every weapon that lands in a hand starts
+// on it when it has it. Absent = vanilla's plain primary.
+#define GAME_CONFIG_FIRE_MODE_KEY "fire_mode"
 // FREE MOVEMENT: the body is integrated from a velocity and obj->tile is re-anchored to whichever
 // cell it has moved into, instead of the body following a chain of whole tile steps. The engine
 // goes on reading obj->tile, which never stops being a real walkable tile, so nothing else in the

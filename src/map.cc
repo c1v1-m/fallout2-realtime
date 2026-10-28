@@ -43,6 +43,12 @@
 #include "window_manager_private.h"
 #include "worldmap.h"
 
+// Realtime (fallout1-ce's map.cc changes, ported).
+#include "rt/game/autotest.h"
+#include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
+#include "rt/rt_hooks.h"
+
 namespace fallout {
 
 static char* mapBuildPath(char* name);
@@ -65,6 +71,7 @@ static void _map_place_dude_and_mouse();
 static void square_init();
 static void _square_reset();
 static int _square_load(File* stream, int a2);
+static void map_reset_background();
 static int mapHeaderWrite(MapHeader* ptr, File* stream);
 static int mapHeaderRead(MapHeader* ptr, File* stream);
 
@@ -327,6 +334,8 @@ void isoEnable()
             _gmouse_enable();
         }
         tickersAdd(_object_animate);
+        // Right behind the stepper: the glides read the positions it just wrote (Smooth movement).
+        tickersAdd(anim_smooth_tick);
         tickersAdd(_dude_fidget);
         _scr_enable_critters();
         gIsoEnabled = true;
@@ -342,6 +351,7 @@ bool isoDisable()
 
     _scr_disable_critters();
     tickersRemove(_dude_fidget);
+    tickersRemove(anim_smooth_tick);
     tickersRemove(_object_animate);
     _gmouse_disable(0);
     textObjectsDisable();
@@ -913,6 +923,9 @@ static int mapLoad(File* stream)
         goto err;
     }
 
+    // New floor, new background: the filler is worked out again on first use.
+    map_reset_background();
+
     if (_square_load(stream, gMapHeader.flags) != 0) {
         goto err;
     }
@@ -927,7 +940,11 @@ static int mapLoad(File* stream)
         goto err;
     }
 
-    if ((gMapHeader.flags & 1) == 0) {
+    // ⚠️ IN REALTIME ON EVERY LOAD, NOT ONLY A FRESH MAP (fallout1-ce 2026-10-11 crash in obj_save).
+    // Vanilla skips this for a SAVED map because its turn-based combatLoad turns the saved whoHitMeCid
+    // back into a pointer. Realtime never does, so a critter that had been fighting when the map was
+    // left came back with the cid sitting in the low half of the 8-byte pointer: whoHitMe = 0x1.
+    if ((gMapHeader.flags & 1) == 0 || combat_rt_enabled()) {
         _map_fix_critter_combat_data();
     }
 
@@ -966,7 +983,7 @@ static int mapLoad(File* stream)
 
     scriptsEnable();
 
-    if (gMapHeader.scriptIndex > 0) {
+    if (gMapHeader.scriptIndex > 0 && autotest_map_script_allowed()) {
         error = "Error creating new map script";
         if (scriptAdd(&gMapSid, SCRIPT_TYPE_SYSTEM) == -1) {
             goto err;
@@ -1001,6 +1018,11 @@ static int mapLoad(File* stream)
 
 err:
 
+    // STAGES (fallout1-ce 2026-10-17, "infinite loading"): a map load that never finished left nothing
+    // to say how far it got. One line here and one at the end.
+    trace_event(TRACE_FLOW, "map-load-stage", "body name=%s error=%s script=%d", gMapHeader.name,
+        error != nullptr ? error : "-", gMapHeader.scriptIndex);
+
     if (error != nullptr) {
         char message[100]; // TODO: Size is probably wrong.
         snprintf(message, sizeof(message), "%s while loading map.", error);
@@ -1015,6 +1037,7 @@ err:
     interfaceBarShow();
     _proto_dude_update_gender();
     _map_place_dude_and_mouse();
+    trace_event(TRACE_FLOW, "map-load-stage", "done name=%s rc=%d", gMapHeader.name, rc);
     fileSetReadProgressHandler(nullptr, 0);
     gMapLoading = false;
     svga_vsync_suspend(false);
@@ -1228,6 +1251,29 @@ int _map_target_load_area()
     return city;
 }
 
+// Cancel a queued map transition without performing it (the realtime escape logic).
+void map_clear_pending_transition()
+{
+    memset(&gMapTransition, 0, sizeof(gMapTransition));
+}
+
+// Queue "open the world map" the same way an exit grid queues a destination: mapHandleTransition
+// performs it from the main loop. ⚠️ Deliberately only ARMS the transition -- a load still unwinding
+// its own call stack must not open a modal screen from in there.
+void map_request_world_map()
+{
+    memset(&gMapTransition, 0, sizeof(gMapTransition));
+    gMapTransition.map = -2;
+    trace_event(TRACE_FLOW, "wm-armed", "map=%d", gMapTransition.map);
+}
+
+// True while a map transition is stored but not yet performed (mapHandleTransition runs it only once
+// combat is over). Lets the realtime escape timer notice a queued destination -- rt_update_map_exit.
+bool map_has_pending_transition()
+{
+    return gMapTransition.map != 0;
+}
+
 // 0x4835B4
 int mapSetTransition(MapTransition* transition)
 {
@@ -1242,7 +1288,18 @@ int mapSetTransition(MapTransition* transition)
     }
 
     if (isInCombat()) {
-        _game_user_wants_to_quit = 1;
+        // ⚠️ VANILLA LETS YOU LEAVE MID-COMBAT, AND THIS IS HOW: the flag makes _combat_input break
+        // out of your turn, the fight ends and mapHandleTransition performs the transition. Realtime
+        // has no _combat_input loop to consume that flag, so the same flag meant "quit to the main
+        // menu". Instead combat_rt ends the fight on its next frame so mapHandleTransition (gated on
+        // !isInCombat()) loads the destination -- immediately, like vanilla.
+        if (combat_rt_enabled()) {
+            // Not standing on an exit grid = a SCRIPTED transition (stairs, ladder, elevator,
+            // load_map): it must not wait for one (see rt_map_exit_scripted).
+            combat_rt_arm_map_exit(!obj_dude_on_exit_grid());
+        } else {
+            _game_user_wants_to_quit = 1;
+        }
     }
 
     return 0;
@@ -1317,7 +1374,12 @@ static void _map_fix_critter_combat_data()
             continue;
         }
 
-        if (object->data.critter.combat.whoHitMeCid == -1) {
+        // whoHitMe / whoHitMeCid are a UNION: on x64 the pointer is 8 bytes but the cid is 4, so a
+        // loaded critter whose saved cid != -1 has only the LOW 4 bytes set from disk and whoHitMe is
+        // a garbage pointer that crashes _apply_damage's retaliation in realtime. Who-hit-me is
+        // meaningless out of combat (re-established when a fight starts), so NULL it unconditionally.
+        // (Turn-based keeps vanilla's rule: combatLoad turns the cid back into a pointer.)
+        if (combat_rt_enabled() || object->data.critter.combat.whoHitMeCid == -1) {
             object->data.critter.combat.whoHitMe = nullptr;
         }
     }
@@ -1449,6 +1511,12 @@ int _map_save_in_game(bool a1)
         return 0;
     }
 
+    // Saving without leaving (a1 false): the map stays, so its decorative loops come back after the
+    // write -- see anim_forever_snapshot. Leaving the map tears everything down anyway.
+    Object* foreverOwners[32];
+    int foreverAnims[32];
+    int foreverCount = a1 ? 0 : anim_forever_snapshot(foreverOwners, foreverAnims, 32);
+
     animationStop();
     _partyMemberSaveProtos();
 
@@ -1485,6 +1553,8 @@ int _map_save_in_game(bool a1)
         strcpy(name, gMapHeader.name);
         _strmfe(gMapHeader.name, name, "SAV");
         if (_map_save() == -1) {
+            strcpy(gMapHeader.name, name);
+            anim_forever_restore(foreverOwners, foreverAnims, foreverCount);
             return -1;
         }
 
@@ -1501,7 +1571,105 @@ int _map_save_in_game(bool a1)
         }
     }
 
+    anim_forever_restore(foreverOwners, foreverAnims, foreverCount);
+
     return 0;
+}
+
+// THE MAP'S BLACK BACKGROUND (fallout1-ce 2026-10-06, "utíkal a utíkal přes konec mapy černou část").
+// A map sits in a sea of black, laid in one of two ways: no floor art at all (id 1), or one very dark
+// filler tile painted over everything outside the rooms. Nothing stops a body walking on it, and
+// vanilla never needed anything to: turn-based combat ended before a runner could be chased out there.
+// Realtime can chase one, so this is the one place that knows what "off the map" means.
+//
+// The filler is an elevation's MOST COMMON floor art when that art is near-black (average palette
+// brightness under 27 of 189). -1 = none, -2 = not worked out yet.
+static int map_background_floor[ELEVATION_COUNT] = { -2, -2, -2 };
+
+static void map_reset_background()
+{
+    for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
+        map_background_floor[elevation] = -2;
+    }
+}
+
+static int map_compute_background_floor(int elevation)
+{
+    if (_square[elevation] == nullptr) {
+        return -1;
+    }
+
+    static int counts[4096];
+    memset(counts, 0, sizeof(counts));
+    for (int index = 0; index < SQUARE_GRID_SIZE; index++) {
+        counts[_square[elevation]->field_0[index] & 0xFFF]++;
+    }
+
+    int top = -1;
+    int topCount = 0;
+    for (int id = 0; id < 4096; id++) {
+        if (counts[id] > topCount) {
+            topCount = counts[id];
+            top = id;
+        }
+    }
+
+    if (top == 1) {
+        return 1; // the empty floor IS the background
+    }
+    if (top < 0) {
+        return -1;
+    }
+
+    CacheEntry* handle;
+    Art* art = artLock(buildFid(OBJ_TYPE_TILE, top, 0, 0, 0), &handle);
+    if (art == nullptr) {
+        return -1;
+    }
+
+    unsigned char* pixels = artGetFrameData(art, 0, 0);
+    int width = artGetWidth(art, 0, 0);
+    int height = artGetHeight(art, 0, 0);
+    long sum = 0;
+    long lit = 0;
+    for (int index = 0; pixels != nullptr && index < width * height; index++) {
+        if (pixels[index] != 0) {
+            // _cmap holds 6-bit components (0-63), as fallout1-ce's getColorPaletteEntry does.
+            sum += _cmap[pixels[index] * 3] + _cmap[pixels[index] * 3 + 1] + _cmap[pixels[index] * 3 + 2];
+            lit++;
+        }
+    }
+    artUnlock(handle);
+
+    return (lit > 0 && sum < 27 * lit) ? top : -1;
+}
+
+// Is `tile` out on the black -- empty floor or the elevation's background filler? Used by the realtime
+// flee (combatai_flee_tile) so a runner is cornered at the edge of the map instead of running out
+// across the dark. The square is found the way the renderer finds it: the hex's foot on screen.
+bool map_tile_is_background(int tile, int elevation)
+{
+    if (elevation < 0 || elevation >= ELEVATION_COUNT || !hexGridTileIsValid(tile) || _square[elevation] == nullptr) {
+        return false;
+    }
+
+    if (map_background_floor[elevation] == -2) {
+        map_background_floor[elevation] = map_compute_background_floor(elevation);
+    }
+
+    int x;
+    int y;
+    if (tileToScreenXY(tile, &x, &y, elevation) != 0) {
+        return false;
+    }
+
+    int squareIndex = squareTileFromScreenXY(x + 16, y + 8, elevation);
+    if (squareIndex < 0 || squareIndex >= SQUARE_GRID_SIZE) {
+        return false;
+    }
+
+    int floor = _square[elevation]->field_0[squareIndex] & 0xFFF;
+    return floor == 1 || floor == map_background_floor[elevation];
 }
 
 // 0x483E28

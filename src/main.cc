@@ -43,8 +43,12 @@
 #include "word_wrap.h"
 #include "worldmap.h"
 
+#include "rt/rt_version.h"
+#include "rt/game/autotest.h"
+#include "rt/game/combat_rt.h"
 #include "rt/game/game_trace.h"
 #include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
 
 namespace fallout {
 
@@ -79,12 +83,24 @@ static bool _main_death_voiceover_done;
 // 0x48099C
 int falloutMain(int argc, char** argv)
 {
-    if (!autorunMutexCreate()) {
+    // --autotest: the game plays a scripted fight by itself and quits (rt/game/autotest.cc). It runs
+    // beside a normal game, so it does not take the single-instance mutex.
+    bool autotest = autotest_init(argc, argv);
+
+    if (!autotest && !autorunMutexCreate()) {
         return 1;
     }
 
     if (!falloutInit(argc, argv)) {
         return 1;
+    }
+
+    if (autotest) {
+        randomSeedPrerandom(autotest_seed());
+        _main_load_new(autotest_map());
+        autotest_setup_world();
+        mainLoop();
+        autotest_finish();
     }
 
     // SFALL: Allow to skip intro movies
@@ -190,6 +206,49 @@ int falloutMain(int argc, char** argv)
                     mainMenuWindowInit();
                 }
                 break;
+            case MAIN_MENU_CONTINUE:
+                // Realtime build (fallout1-ce): the newest save with no load screen in between -- the
+                // LOAD GAME case's shape exactly (cover, fades, the new/unload/reset pairing), which the
+                // slot load needs, not the screen.
+                if (1) {
+                    int win = windowCreate(0, 0, screenGetWidth(), screenGetHeight(), _colorTable[0], WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+                    mainMenuWindowHide(true);
+                    mainMenuWindowFree();
+
+                    // NOTE: Uninline.
+                    main_loadgame_new();
+
+                    colorPaletteLoad("color.pal");
+                    paletteFadeTo(_cmap);
+                    int continueRc = LoadGameNewest();
+                    if (continueRc > 0) {
+                        windowDestroy(win);
+                        win = -1;
+                        mainLoop();
+                    }
+                    paletteFadeTo(gPaletteWhite);
+                    if (win != -1) {
+                        windowDestroy(win);
+                    }
+
+                    // NOTE: Uninline.
+                    main_unload_new();
+
+                    // NOTE: Uninline.
+                    main_reset_system();
+
+                    if (_main_show_death_scene != 0) {
+                        showDeath();
+                        _main_show_death_scene = 0;
+                    }
+                    mainMenuWindowInit();
+
+                    // Nothing to resume (0) or the load failed (-1): say so rather than a silent menu.
+                    if (continueRc <= 0) {
+                        soundPlayFile("iisxxxx1");
+                    }
+                }
+                break;
             case MAIN_MENU_TIMEOUT:
                 debugPrint("Main menu timed-out\n");
                 // FALLTHROUGH
@@ -236,13 +295,16 @@ int falloutMain(int argc, char** argv)
 // 0x480CC0
 static bool falloutInit(int argc, char** argv)
 {
-    if (gameInitWithOptions("FALLOUT II", false, 0, 0, argc, argv) == -1) {
+    // Realtime build: our own window title, which is also how the installer recognises this exe in
+    // Steam's Fallout2Launcher.exe place (rt/rt_version.h).
+    if (gameInitWithOptions(RT_GAME_TITLE, false, 0, 0, argc, argv) == -1) {
         return false;
     }
 
     // Realtime build: the flight recorder -- trace log + crash handler, now that the config is
-    // loaded (cfg trace_log). No heartbeat snapshot yet: that is combat_rt's, and it arrives with it.
+    // loaded (cfg trace_log). combat_rt provides the heartbeat snapshot (realtime state + health checks).
     trace_init();
+    trace_set_snapshot_fn(combat_rt_trace_snapshot);
 
     return true;
 }
@@ -410,15 +472,40 @@ static void mainLoop()
         // SFALL: MainLoopHook.
         sfall_gl_scr_process_main();
 
-        // ⚠️ NOT YET: gamepad_ui_handle_key (the keyboard as a controller -- arrows walk, Space uses,
-        // Q/E switch target). It swallows the arrows, and without the realtime layer (phase 2)
-        // nothing would walk: the arrows would simply stop scrolling the map.
-        if (keyCode >= 0) {
-            trace_event(TRACE_INPUT, "key", "code=%d", keyCode);
+        // Debug: F11 toggles a red ring at 15 hex tiles around the dude (the gunshot-hearing
+        // distance). Development build only.
+#ifndef FALLOUT_RELEASE
+        if (keyCode == KEY_F11) {
+            tile_debug_ring_set(tile_debug_ring_get() > 0 ? 0 : 15);
         }
-        gameHandleKey(keyCode, false);
+#endif
 
-        // Realtime build: flight-recorder pump (frame counter, coalesce ageing).
+        // The keyboard as a controller first: arrows, Space, Q/E, H, R, F, V and G belong to the pad
+        // layer (gamepad_ui_handle_key). Then realtime combat (the optional mouse aim and its
+        // right-click called shot); anything left falls through to vanilla.
+        bool rtConsumed = gamepad_ui_handle_key(&keyCode) || combat_rt_handle_input(keyCode);
+        if (keyCode != -1) {
+            trace_event(TRACE_INPUT, "key", "code=%d rt=%d", keyCode, rtConsumed ? 1 : 0);
+        }
+        if (!rtConsumed) {
+            gameHandleKey(keyCode, false);
+        }
+
+        // Realtime combat: the whole world's realtime step (AI, attacks, AP, reactions, camera).
+        combat_rt_update(rtDelta);
+
+        autotest_tick(rtDelta); // the bot's pad for the next frame, and the end of a self-played run
+
+        // While the debug ring is up, refresh fully when the dude changes tile so it never ghosts.
+        if (tile_debug_ring_get() > 0 && gDude != nullptr) {
+            static int ringPrevTile = -1;
+            if (gDude->tile != ringPrevTile) {
+                ringPrevTile = gDude->tile;
+                tileWindowRefresh();
+            }
+        }
+
+        // Realtime build: flight-recorder pump (frame counter, heartbeat snapshot, coalesce ageing).
         trace_tick(rtDelta);
         main_frame_meter();
 
@@ -429,6 +516,56 @@ static void mainLoop()
         scriptsHandleRequests();
 
         mapHandleTransition();
+
+        // Realtime build (fallout1-ce): AUTOSAVE on entering a new location and on any quest step -- here,
+        // with the map settled and outside the map-load machinery (a save re-enters map saving). Not
+        // the map change a load causes (LoadSaveConsumeJustLoaded), not the first map of a session,
+        // never in a fight or while a body is still falling (a save stops every animation and would
+        // drop it flat). The triggers are LATCHED: one that comes due in a fight waits for its end
+        // instead of being lost.
+        {
+            bool justLoaded = LoadSaveConsumeJustLoaded();
+            bool canAutosave = gDude != nullptr && !isInCombat() && !combat_rt_death_anim_pending() && !autotest_active();
+
+            static bool autosavePendingLocation = false;
+            static bool autosavePendingQuest = false;
+
+            static int autosaveLastMap = -1;
+            int currentMap = mapGetCurrentMap();
+            if (currentMap >= 0 && currentMap != autosaveLastMap) {
+                bool first = autosaveLastMap == -1;
+                autosaveLastMap = currentMap;
+                if (!first && !justLoaded) {
+                    autosavePendingLocation = true;
+                }
+            }
+
+            static unsigned int autosaveLastQuest = 0;
+            static bool autosaveQuestSeeded = false;
+            if (gDude != nullptr) {
+                unsigned int currentQuest = pipboy_quest_state_hash();
+                if (!autosaveQuestSeeded || justLoaded) {
+                    autosaveLastQuest = currentQuest;
+                    autosaveQuestSeeded = true;
+                } else if (currentQuest != autosaveLastQuest) {
+                    autosaveLastQuest = currentQuest;
+                    autosavePendingQuest = true;
+                }
+            }
+
+            // One autosave a frame at most, the location first.
+            if (autosavePendingLocation) {
+                if (canAutosave) {
+                    autosavePendingLocation = false;
+                    AutoSaveLocation();
+                }
+            } else if (autosavePendingQuest) {
+                if (canAutosave) {
+                    autosavePendingQuest = false;
+                    AutoSaveQuest();
+                }
+            }
+        }
 
         if (_main_game_paused != 0) {
             _main_game_paused = 0;

@@ -27,6 +27,8 @@ extern int gInterfaceBarWindow;
 extern bool gInterfaceBarMode;
 extern int gInterfaceBarWidth;
 extern bool gInterfaceBarIsCustom;
+// Realtime build: the IFACE_BAR_WIDTH asked for when svga.cc narrowed the bar for the LB / RB slots.
+extern int gInterfaceBarSourceWidth;
 extern int gInterfaceBarContentOffset;
 extern int gInterfaceSidePanelsImageId;
 extern bool gInterfaceSidePanelsExtendFromScreenEdge;

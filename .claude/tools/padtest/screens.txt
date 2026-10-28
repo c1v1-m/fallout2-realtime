@@ -1,0 +1,51 @@
+# Phase 3 screens, every one driven by the pad (shots: see the drive.ps1 steps beside it in the
+# Fallout 2 Realtime notes). Main menu: the highlight starts on NEW GAME; down twice -> OPTIONS.
+7.0 tap DOWN
+7.6 tap DOWN
+9.0 tap A
+# preferences from the main menu: frame on GAME DIFFICULTY, RIGHT -> the switch column, RB steps it,
+# B cancels (restores)
+11.0 tap RIGHT
+12.2 tap RB
+13.5 tap B
+# main menu again: up twice -> NEW GAME
+15.0 tap UP
+15.6 tap UP
+16.2 tap A
+# selector: frame on TAKE; right x3 -> MODIFY, A
+19.0 tap RIGHT
+19.5 tap RIGHT
+20.0 tap RIGHT
+21.0 tap A
+# character editor (creation): frame on STRENGTH; down -> PE; X gives a point back; Y spends it again
+23.5 tap DOWN
+24.0 tap X
+25.2 tap Y
+# B cancels the editor, back on the selector: left x3 -> TAKE, A
+27.0 tap B
+29.0 tap LEFT
+29.5 tap LEFT
+30.0 tap LEFT
+30.6 tap A
+# the intro movie
+35.0 tap A
+37.0 tap A
+# world: START = pause menu; down x2 -> PREFERENCES, A; B back; B closes
+42.0 tap START
+44.0 tap DOWN
+44.5 tap DOWN
+45.0 tap A
+47.0 tap B
+48.5 tap B
+# character sheet: hold DOWN; down a skill; B
+50.0 btn DOWN 1
+50.7 btn DOWN 0
+53.0 tap DOWN
+54.5 tap B
+# Pip-Boy: hold UP; B
+56.5 btn UP 1
+57.2 btn UP 0
+60.0 tap B
+# inventory: BACK; BACK
+62.0 tap BACK
+64.5 tap BACK
