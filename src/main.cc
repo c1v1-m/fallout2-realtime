@@ -296,8 +296,8 @@ int falloutMain(int argc, char** argv)
 static bool falloutInit(int argc, char** argv)
 {
     // Realtime build: our own window title, which is also how the installer recognises this exe in
-    // Steam's Fallout2Launcher.exe place (rt/rt_version.h).
-    if (gameInitWithOptions(RT_GAME_TITLE, false, 0, 0, argc, argv) == -1) {
+    // Steam's Fallout2Launcher.exe place (rt/rt_version.h). " (dev)" on the development build.
+    if (gameInitWithOptions(RT_WINDOW_TITLE, false, 0, 0, argc, argv) == -1) {
         return false;
     }
 

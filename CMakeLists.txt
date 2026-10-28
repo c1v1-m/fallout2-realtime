@@ -33,6 +33,12 @@ set(CMAKE_CXX_EXTENSIONS NO)
 
 option(FALLOUT_VENDORED "Use vendored third-party libraries" ON)
 option(ASAN "Enable address sanitizer" OFF)
+# Fallout 2 Realtime: the PUBLIC build (fallout1-ce's switch). Same source as the development build;
+# the diagnostics stay compiled in but default OFF (trace_log=1 in fallout2.cfg still turns the flight
+# recorder on for a bug report), no DEV label, no F11 ring, and the exe is named fallout2-realtime.
+# Configure it into its own tree:
+#   cmake -S . -B build-release -G "Visual Studio 18 2026" -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DFALLOUT_RELEASE=ON
+option(FALLOUT_RELEASE "Fallout 2 Realtime public build: diagnostics default off" OFF)
 
 if(ANDROID)
     add_library(${EXECUTABLE_NAME} SHARED)
@@ -338,6 +344,15 @@ target_include_directories(${EXECUTABLE_NAME} PRIVATE
 
 # Which game the shared modules are built for (see mods_page.cc).
 target_compile_definitions(${EXECUTABLE_NAME} PRIVATE FALLOUT_RT_GAME=2)
+
+# The release tree packs this exe into Fallout2-Realtime-Setup.exe and the Deck package expects it by
+# name (installer/install-steamdeck.sh). The dev tree keeps fallout2-ce.exe for the test tooling.
+if(FALLOUT_RELEASE)
+    target_compile_definitions(${EXECUTABLE_NAME} PRIVATE FALLOUT_RELEASE=1)
+    if(NOT APPLE)
+        set_target_properties(${EXECUTABLE_NAME} PROPERTIES OUTPUT_NAME "fallout2-realtime")
+    endif()
+endif()
 
 if(IOS)
     target_sources(${EXECUTABLE_NAME} PUBLIC

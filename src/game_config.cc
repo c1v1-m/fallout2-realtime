@@ -122,7 +122,7 @@ bool gameConfigInit(bool isMapper, int argc, char** argv)
     configSetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_MEDIC_ALLY_TILES_KEY, 3);
     configSetDouble(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_MEDIC_COOLDOWN_KEY, 6.0);
 #ifdef FALLOUT_RELEASE
-    // The public build records nothing unless asked (trace_log=1 in fallout.cfg, for a bug report).
+    // The public build records nothing unless asked (trace_log=1 in fallout2.cfg, for a bug report).
     configSetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_TRACE_LOG_KEY, 0);
 #else
     configSetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_TRACE_LOG_KEY, 1);

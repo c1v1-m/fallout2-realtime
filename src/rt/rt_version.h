@@ -11,4 +11,12 @@
 #define REALTIME_VERSION "0.1.0"
 #define RT_GAME_TITLE "Fallout 2 Realtime"
 
+// The window title. The development build says so, so the two can sit side by side; both still
+// contain RT_GAME_TITLE, the installer's marker.
+#ifdef FALLOUT_RELEASE
+#define RT_WINDOW_TITLE RT_GAME_TITLE
+#else
+#define RT_WINDOW_TITLE RT_GAME_TITLE " (dev)"
+#endif
+
 #endif /* FALLOUT_RT_VERSION_H_ */

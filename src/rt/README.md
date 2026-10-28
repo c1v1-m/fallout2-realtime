@@ -256,8 +256,20 @@ install. Uninstall restores the launcher and keeps the backups. CLI for tests:
 once got installed there by a stray Enter — Install is no longer a default button and asks first.
 `installer/install-steamdeck.sh` does the same on a Deck (next to it: `fallout2-realtime.exe`).
 
-The game is identified by its window title, `RT_GAME_TITLE` in `rt/rt_version.h` ("Fallout 2
-Realtime"); `REALTIME_VERSION` there is the installer's version. The whole build links the C/C++
+**The public build** is its own tree (fallout1-ce's switch):
+`cmake -S . -B build-release -G "Visual Studio 18 2026" -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DFALLOUT_RELEASE=ON`
+(the `FETCHCONTENT_SOURCE_DIR_*` of `build/_deps` save the download), then
+`cmake --build build-release --config Release --target fallout2-realtime-setup` →
+`build-release/Release/fallout2-realtime.exe` + `Fallout2-Realtime-Setup.exe` with it inside. It
+records nothing unless `trace_log=1` stands in `fallout2.cfg` (no `rt_walk.log` either), shows no DEV
+in the main menu corner, has no F11 ring, and its window title has no " (dev)". ⚠️ Package only from
+`build-release` — the dev tree's Setup carries the dev exe (that one is for his own Steam / Deck). The
+upstream GitHub Actions are removed: `release.yml` built the plain configuration on every published
+release and would have attached a dev build to ours.
+
+The game is identified by the text "Fallout 2 Realtime" in the exe, `RT_GAME_TITLE` in
+`rt/rt_version.h` (`RT_WINDOW_TITLE` adds " (dev)" on the dev build); `REALTIME_VERSION` there is the
+installer's version. The whole build links the C/C++
 runtime statically (top of CMakeLists.txt), so the exe needs no Visual C++ redistributable.
 
 ## Self-played fights
