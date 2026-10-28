@@ -32,11 +32,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 
 option(FALLOUT_VENDORED "Use vendored third-party libraries" ON)
+option(ASAN "Enable address sanitizer" OFF)
 
 if(ANDROID)
     add_library(${EXECUTABLE_NAME} SHARED)
 else()
     add_executable(${EXECUTABLE_NAME} WIN32 MACOSX_BUNDLE)
+endif()
+
+# Same switch as fallout1-ce (see its CMakeLists): only OUR target is instrumented, MSVC needs /Zi and
+# no incremental linking; the sanitizer runtime is linked automatically.
+if(ASAN AND MSVC)
+    target_compile_options(${EXECUTABLE_NAME} PRIVATE /fsanitize=address /Zi)
+    target_link_options(${EXECUTABLE_NAME} PRIVATE /INCREMENTAL:NO /DEBUG)
 endif()
 
 target_sources(${EXECUTABLE_NAME} PUBLIC

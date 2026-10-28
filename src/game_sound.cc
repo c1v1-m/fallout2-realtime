@@ -602,7 +602,12 @@ int backgroundSoundLoad(const char* fileName, int a2, int a3, int a4)
     _background_storage_requested = a3;
     _background_loop_requested = a4;
 
-    strcpy(gBackgroundSoundFileName, fileName);
+    // backgroundSoundEnable passes gBackgroundSoundFileName itself -- a strcpy onto ITSELF, undefined
+    // behaviour that AddressSanitizer halts on (strcpy-param-overlap; same fix as fallout1-ce gsound).
+    if (fileName != gBackgroundSoundFileName) {
+        strncpy(gBackgroundSoundFileName, fileName, sizeof(gBackgroundSoundFileName) - 1);
+        gBackgroundSoundFileName[sizeof(gBackgroundSoundFileName) - 1] = '\0';
+    }
 
     if (!gGameSoundInitialized) {
         return -1;

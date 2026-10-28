@@ -156,6 +156,17 @@ each one that SEES him turns on him again (`[FLOW/fled-reaggro]`), one already f
 dropped (`fled-forget why=hostile`), older ones are forgotten (`fled-expired`). Travels through saves
 in `RTFM`. `rtfled-*.txt` (leave and return, expired, random map, save away + load and return).
 
+**AddressSanitizer build** (2026-10-27, fallout1-ce's recipe): `option(ASAN)` in CMakeLists.txt;
+configure `build-asan` with `-DASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5` and the three
+`FETCHCONTENT_SOURCE_DIR_*` pointing into `build/_deps`, copy the exe to
+`build/Release/fallout2-ce-asan.exe` beside `clang_rt.asan_dynamic-x86_64.dll`, run with
+`ASAN_OPTIONS=log_path=asan.log:halt_on_error=1` (a RELATIVE path; the report is `asan.log.<pid>`).
+It found the 0xC0000374 crash of every scripted mid-fight map exit in the self-played runs — the
+harness's own `at_give` left a given item in the map's object list as well as in the inventory, so the
+next map change freed it twice (fixed: `obj_disconnect`, as vanilla `add_obj_to_inven`) — plus two
+vanilla tolls it halts on: `fileNameListInit`'s memmove read one entry past the list (`db.cc`), and
+`backgroundSoundLoad` strcpy'd its file name onto itself (`game_sound.cc`, fixed as in fallout1-ce).
+
 **Resyncing from fallout1-ce** (last: 99edef7 → 0be4c88, v0.1.0, 2026-10-23): the modules by a three-way
 merge — `git merge-file -L F2 -L F1-old -L F1-new <ours> <F1 old> <F1 new>`, the two F1 copies taken with
 `git -C ../fallout1-ce show <rev>:src/game/<file>` — then `git -C ../fallout1-ce diff <old> <new> -- src/game src/int`
