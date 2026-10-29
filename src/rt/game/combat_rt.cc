@@ -2318,6 +2318,14 @@ static bool rt_is_combatant(Object* obj)
     return stat_level(obj, STAT_CURRENT_HIT_POINTS) > 0;
 }
 
+// A critter a script has put on the player's team (Smiley in the Toxic Caves, a dog that joins him) -- an
+// ally in vanilla's combat without being a party member. Dereferences `obj`: a live registry object only.
+static bool rt_on_dudes_team(Object* obj)
+{
+    return obj != NULL && obj_dude != NULL && obj != obj_dude && rt_is_critter(obj)
+        && obj->data.critter.combat.team == obj_dude->data.critter.combat.team;
+}
+
 // The dude or a follower the registry knows -- by POINTER ONLY, never dereferencing `obj`, so it is safe on
 // a raw whoHitMe (an x64 union that can hold cid garbage) or on a target gone stale since the last build.
 static bool rt_is_player_side_ptr(Object* obj)
@@ -10760,7 +10768,14 @@ static void rt_refresh_registry()
         // Party members / followers fight FOR the dude (target the dude's enemies in
         // rt_update_actor) instead of just standing there. Stable per object, so recompute
         // fresh each refresh. A critter is never both friendly and hostile-to-the-dude.
-        a->friendly = !a->hostile && isPartyMember(obj);
+        //
+        // ⚠️ ...AND WHOEVER IS ON HIS TEAM (2026-10-29, his "Ano, jako ve vanille"): Smiley in the Toxic Caves
+        // just watched the geckos chase him ("ally jen tak koukal na enemyho"). His script puts him on the
+        // player's team at his first combat turn (KCSMILEY combat_p_proc: critter_add_trait(self, 1, 6, 0)),
+        // and in vanilla that is all it takes: he fights the dude's enemies, and they go for him too ("lorewise
+        // ho naháněli geckos"). Not a party member, so he does not FOLLOW like one (the IDLE branch): his
+        // script walks him.
+        a->friendly = !a->hostile && (isPartyMember(obj) || rt_on_dudes_team(obj));
 
         // "Fought him" latches here for whatever the per-frame code did since the last build: a seed (whoHitMe
         // on the player's side -- the sweep above made it safe to read) or a chase / attack on the player's
@@ -10815,12 +10830,21 @@ static void rt_refresh_registry()
             if (!anchorIsSeed) {
                 continue;
             }
+            // ⚠️ NEVER FROM THE DUDE'S OWN TEAM (review 2026-10-29). A team-mate he hit by mistake -- a grenade on
+            // geckos chewing Smiley -- can turn on him (vanilla's retaliation roll), but its "team" is his party:
+            // spreading from it made Sulik, Vic and the rest hunt him. In vanilla the party never targets the dude.
+            if (rt_on_dudes_team(anchor)) {
+                continue;
+            }
             for (int j = 0; j < freshCount; j++) {
                 if (fresh[j].hostile || !rt_is_combatant(fresh[j].obj)) {
                     continue;
                 }
 
                 Object* onlooker = fresh[j].obj;
+                if (isPartyMember(onlooker)) {
+                    continue; // nor a party member, whatever team it is on
+                }
                 // Same-team critter joins if it can SEE the seed fight (vanilla, sight-primary
                 // is_within_perception) OR HEAR its gunfire through a wall (earshot scaled by
                 // Perception). Both only from a seed anchor (guarded above), so aggro doesn't
@@ -14592,7 +14616,8 @@ static void rt_update_actor(RtActor* a, float dt)
     // guard-threat for 2608/2614 at all). While a fight is on, a walking guard-type still looks;
     // if its own are fighting, the walk ends here and the IDLE branch takes it into the fight
     // on the next frame -- the realtime half of vanilla's anim_stop at combat_begin.
-    if (rt_engaged && a->state == RT_IDLE && !a->hostile && !a->friendly && anim_busy(npc) != 0
+    // (Same gate as the guard-join below: a team-mate that is no party member still defends its own.)
+    if (rt_engaged && a->state == RT_IDLE && !a->hostile && !(a->friendly && isPartyMember(npc)) && anim_busy(npc) != 0
         && !critter_is_prone(npc)) {
         int at = FID_ANIM_TYPE(npc->fid);
         if ((at == ANIM_WALK || at == ANIM_RUNNING) && rt_is_guard_type(npc)
@@ -14732,7 +14757,8 @@ static void rt_update_actor(RtActor* a, float dt)
         // Resolved ONCE into a local: the scan ends in a line-of-sight test, which is far too
         // expensive to run twice per idle guard per frame just to keep an else-if chain tidy.
         Object* guardThreat = NULL;
-        if (!a->hostile && !a->friendly && rt_is_guard_type(npc) && rt_clock >= a->sealed_until) {
+        // (A team-mate that is no party member -- friendly since 2026-10-29 -- still defends its own, as before.)
+        if (!a->hostile && !(a->friendly && isPartyMember(npc)) && rt_is_guard_type(npc) && rt_clock >= a->sealed_until) {
             guardThreat = rt_guard_danger_source(npc);
             // Not from a holding pen (rt_sealed_from): it would chase a fight it can never reach.
             // Asked again in 5 s, the dude may have moved where it can shoot him.
@@ -14891,7 +14917,15 @@ static void rt_update_actor(RtActor* a, float dt)
                 a->target = enemy;
                 a->state = RT_CHASE;
                 a->unperceived_since = -1.0f;
-            } else if (!ranAway && rt_engaged && rt_is_combatant(obj_dude)
+            } else if (!ranAway && !isPartyMember(npc) && rt_is_combatant(a->engine_target)) {
+                // A team-mate that is no party member still hits back at whoever is after IT (review 2026-10-29):
+                // an NPC fighting Smiley, a rival gang on Tyler's men, is no enemy of the dude and never shows in
+                // rt_nearest_hostile, and the engine_target branch below -- how it used to fight back -- is not
+                // reached from here. Party members keep their own rule (only real fights).
+                a->target = a->engine_target;
+                a->state = RT_CHASE;
+                a->unperceived_since = -1.0f;
+            } else if (!ranAway && rt_engaged && rt_is_combatant(obj_dude) && isPartyMember(npc)
                 && obj_dist(npc, obj_dude) > RT_FOLLOW_TILES) {
                 // ⚠️ A FOLLOWER IN A FIGHT MUST NEVER JUST STAND THERE -- and before this it did:
                 // "dogmeat jen čumí a nepříjde na pomoc, když je daleko". TWO THINGS LOCKED TOGETHER.
@@ -19450,7 +19484,7 @@ static bool rt_fight_near(Object* who, int reach)
             || o->elevation != who->elevation || obj_dist(who, o) > reach) {
             continue;
         }
-        if (a->target == obj_dude || (a->target != NULL && isPartyMember(a->target))) {
+        if (a->target == obj_dude || (a->target != NULL && (isPartyMember(a->target) || rt_is_player_side_ptr(a->target)))) {
             return true;
         }
     }
@@ -21080,7 +21114,7 @@ bool combat_rt_is_engaging(Object* obj)
         if (!a->hostile || a->state == RT_IDLE || !rt_is_combatant(obj)) {
             return false;
         }
-        if (a->target != obj_dude && !(a->target != NULL && isPartyMember(a->target))) {
+        if (a->target != obj_dude && !(a->target != NULL && (isPartyMember(a->target) || rt_is_player_side_ptr(a->target)))) {
             return false;
         }
         return is_within_perception(obj, obj_dude);
@@ -21151,7 +21185,7 @@ static bool rt_dude_in_fight()
         if (!a->hostile || a->state == RT_IDLE || !rt_is_combatant(a->obj)) {
             continue;
         }
-        if (a->target == obj_dude || (a->target != NULL && isPartyMember(a->target))) {
+        if (a->target == obj_dude || (a->target != NULL && (isPartyMember(a->target) || rt_is_player_side_ptr(a->target)))) {
             return true;
         }
     }
@@ -21175,7 +21209,7 @@ bool combat_rt_under_threat()
         }
         // After US specifically -- a critter busy with a scripted brawl against another NPC is
         // not a threat to the player and must not lock him out of talking or of his own scripts.
-        if (a->target != obj_dude && !(a->target != NULL && isPartyMember(a->target))) {
+        if (a->target != obj_dude && !(a->target != NULL && (isPartyMember(a->target) || rt_is_player_side_ptr(a->target)))) {
             continue;
         }
         if (!is_within_perception(a->obj, obj_dude)) {
@@ -21437,12 +21471,18 @@ void combat_rt_notify_victim(Object* attacker, Object* victim)
         }
     }
 
+    // ⚠️ Not a victim from the dude's own team (review 2026-10-29): its "team" is his party. Killing Smiley, or a
+    // companion, with a stray made the rest of the party witnesses and turned them on him.
+    if (rt_on_dudes_team(victim)) {
+        return;
+    }
+
     int team = victim->data.critter.combat.team;
 
     for (int i = 0; i < rt_actor_count; i++) {
         RtActor* a = &rt_actors[i];
         Object* onlooker = a->obj;
-        if (a->hostile || onlooker == victim || !rt_is_combatant(onlooker)) {
+        if (a->hostile || onlooker == victim || !rt_is_combatant(onlooker) || isPartyMember(onlooker)) {
             continue;
         }
 

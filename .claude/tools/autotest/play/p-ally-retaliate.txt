@@ -1,0 +1,21 @@
+# F2 (2026-10-29, review of "Smiley is an ally"): a team-mate that is no party member (team 0, like Smiley once his
+# script puts him on the dude's team) must still hit back at an NPC group that goes for HIM and not for the dude.
+# Those raiders are no enemies of the dude, so they never show in rt_nearest_hostile; the ally takes them on through
+# its engine_target. The dude stands well out of it.
+name p-ally-retaliate
+map DESERT1.MAP
+seed 1
+duration 25
+dude tile 15100 rot 2
+dude hp 300
+
+spawn 16777313 21110 rot 2 wield 5 team 0 hp 120
+spawn 16777455 21118 rot 5 wield 4 team 51 hp 60
+spawn 16777455 21120 rot 5 wield 4 team 51 hp 60
+teamfight 0 51
+
+note 20000 end
+
+expect COMBAT/attack\] NPC aid=\d+ ->pid=16777455
+expect COMBAT/attack\] NPC aid=\d+ ->pid=16777313
+expect-not COMBAT/attack\] NPC .*->pid=16777216
