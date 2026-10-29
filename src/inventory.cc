@@ -6368,6 +6368,35 @@ static void barter_auto_offer()
         why != NULL ? why : "?", gap, dudeCaps, npcCaps);
 }
 
+// Y ON A SHORT OFFER EVENS IT FIRST (2026-10-29, his pick "Y doplní a nabídne"). He had evened the deal with X
+// to the cap, then pressed A on his own offer 44 times -- A takes an item back off it -- and Maida answered the
+// offer with "not good enough". When the caps can close the gap -- the trader's own off its table, then his --
+// Y now does what X would and offers; when they cannot, nothing moves and the trader refuses as before, the
+// SHORT readout above the tables saying by how much. An offer that pays over is offered as it stands.
+static void barter_even_if_short()
+{
+    if (gGameDialogSpeakerIsPartyMember) {
+        return; // a companion's "trade" weighs the piles, it does not price them
+    }
+
+    Object* npc = _target_stack[0];
+    int gap = _barter_compute_value(_inven_dude, npc) - objectGetCost(_ptable);
+    if (gap <= 0) {
+        return;
+    }
+
+    int dudeCaps = 0;
+    barter_find_money(_inven_dude, &dudeCaps);
+    int btableCaps = 0;
+    barter_find_money(_btable, &btableCaps);
+    if (dudeCaps + btableCaps < gap) {
+        trace_event(TRACE_INPUT, "barter-y-short", "gap=%d dudeCaps=%d btableCaps=%d", gap, dudeCaps, btableCaps);
+        return;
+    }
+
+    barter_auto_offer();
+}
+
 // Total item count and current scroll offset of trade column c (0 player inv, 1 player
 // offer, 2 NPC offer, 3 NPC inv). Used by the D-pad navigation to know how many items are
 // below/above the visible window so it can scroll only at the edge.
@@ -6701,8 +6730,10 @@ static int barter_gamepad_input()
         return -1;
     }
 
-    // Y offers the trade; B / BACK leave.
+    // Y offers the trade -- evening a SHORT offer with caps first when they can close it (barter_even_if_short);
+    // B / BACK leave.
     if (yEdge) {
+        barter_even_if_short();
         return KEY_LOWERCASE_M;
     }
     if (bEdge || backEdge) {
@@ -6895,7 +6926,14 @@ void inventoryOpenTrade(int win, Object* barterer, Object* playerTable, Object* 
             break;
         } else if (keyCode == KEY_LOWERCASE_M) {
             if (playerTable->data.inventory.length != 0 || _btable->data.inventory.length != 0) {
-                if (_barter_attempt_transaction(_inven_dude, playerTable, barterer, bartererTable) == 0) {
+                // Every offer and its answer, with both sides of the scale: a refused trade was invisible in
+                // the trace (the barmaid's "not good enough", 2026-10-29).
+                int want = gGameDialogSpeakerIsPartyMember ? -1 : _barter_compute_value(_inven_dude, barterer);
+                int give = gGameDialogSpeakerIsPartyMember ? -1 : objectGetCost(playerTable);
+                int offerRc = _barter_attempt_transaction(_inven_dude, playerTable, barterer, bartererTable);
+                trace_event(TRACE_FLOW, "barter-offer", "rc=%d want=%d give=%d gap=%d party=%d npc=%d",
+                    offerRc, want, give, want - give, gGameDialogSpeakerIsPartyMember ? 1 : 0, barterer->pid);
+                if (offerRc == 0) {
                     _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_TRADE);
                     _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_TRADE);
                     inventoryWindowRenderInnerInventories(win, playerTable, bartererTable, -1);

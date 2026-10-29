@@ -1,0 +1,30 @@
+# F2 (2026-10-29, the barmaid in Klamath downtown -- "chtěl jsem si nakoupit u barmanky a nešlo to, prej jsem
+# nedával ji dost money", the one who cries when Sulik leaves, pid 16777273 in KLADWTWN; his pick "Y doplní a
+# nabídne"): her trade on the pad. The dude carries only caps; one of her items goes onto her offer, so his empty
+# offer is SHORT, and Y must even it with his caps and close the deal (barter-auto-moved, then barter-offer rc=0).
+# The old build offered the short pile as it was and was refused.
+name m-barter-y
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 28
+dude tile 22879 rot 0
+dude item 41 2000
+
+talk 2000 16777273
+shot 5000
+tap 6000 Y
+shot 8000
+tap 9000 LB
+shot 10000
+tap 11000 A
+shot 12500
+tap 13500 Y
+shot 15500
+tap 17000 B
+tap 18500 B
+tap 20000 B
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect barter-offer\] rc=0
+expect-not barter-offer\] rc=-1
