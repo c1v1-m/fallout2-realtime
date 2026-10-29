@@ -36,6 +36,7 @@ void anim_quick_draw_begin(Object* obj);
 void anim_quick_draw_end();
 int anim_end_moves(Object* obj);
 int anim_busy_blocking(Object* a1);
+bool anim_owned_elsewhere(Object* obj);
 void anim_debug_blocking_dump(Object* a1, char* buf, size_t size);
 int make_path_capped(Object* object, int from, int to, unsigned char* rotations, int a5, int maxClosed);
 float anim_get_travel_speed();

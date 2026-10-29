@@ -1208,6 +1208,34 @@ int _check_registry(Object* obj)
     return 0;
 }
 
+// Would _check_registry refuse `obj` in the transaction being built? The same test with none of its side
+// effects (no _anim_set_end of an insignificant sequence, no trace): another live, significant sequence
+// holds a non-callback description owned by it. For a registration that is nice to have but must never
+// veto the shared transaction it joins -- _check_registry's -1 makes the register call _anim_cleanup, and
+// every later description in that transaction (an explosion's, a script's damage) is lost with it.
+bool anim_owned_elsewhere(Object* obj)
+{
+    if (obj == NULL) {
+        return false;
+    }
+
+    for (int seq = 0; seq < ANIMATION_SEQUENCE_LIST_CAPACITY; seq++) {
+        AnimationSequence* animationSequence = &(gAnimationSequences[seq]);
+        if (seq == gAnimationSequenceCurrentIndex || animationSequence->field_0 == -1000
+            || (animationSequence->flags & ANIM_SEQ_INSIGNIFICANT) != 0) {
+            continue;
+        }
+        for (int index = 0; index < animationSequence->length; index++) {
+            AnimationDescription* animationDescription = &(animationSequence->animations[index]);
+            if (animationDescription->owner == obj && animationDescription->kind != 11) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 // Returns -1 if object is playing some animation.
 //
 // 0x4139A8

@@ -360,6 +360,10 @@ void combat_rt_heal_return_after_save();
 // An enemy's trigger pull must not cut it (action_attack); only the commit decides what a new hit does.
 bool combat_rt_in_heavy_reaction(Object* critter);
 
+// Self-played tests only (autotest `sethp ... knock`): knock `critter` down the way a knockdown hit's commit
+// does -- the reaction layer's FALLING, DAM_KNOCKED_DOWN, the fall in its own sequence -- with no damage.
+void combat_rt_test_knockdown(Object* critter);
+
 // Empty a critter's realtime pool. The realtime stand-in for vanilla's "lose your turn" critical
 // failure: there are no turns, so the cost is paid as points plus the wait for them to come back.
 // Safe on anyone -- the dude, a tracked NPC, or a critter the registry has never heard of.

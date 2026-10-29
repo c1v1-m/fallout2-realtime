@@ -459,12 +459,25 @@ void _show_damage_to_object(Object* defender, int damage, int flags, Object* wea
                 sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_DIE);
                 animationRegisterPlaySoundEffect(defender, sfx_name, delay);
                 animationRegisterAnimate(defender, anim, 0);
-            } else if (!combat_rt_enabled()) {
-                // Realtime concurrent-hit fix: under focus-fire a critter is often knocked down by one
-                // hit and killed by the next before it can stand. It is already prone here, so the
-                // bloody re-fall would make it fall a SECOND time. Realtime lets it die where it lies;
-                // _show_death (below) still settles the corpse.
-                anim = _action_blood(defender, anim, delay);
+            } else {
+                // Killed where it lies (knocked down by one hit, killed by the next before it stood up --
+                // focus-fire in realtime does it all the time): vanilla's blood. ⚠️ NOT A SECOND FALL, as
+                // realtime used to believe and skipped it, so these corpses just went still with no blood
+                // ("nepřehrává se death animace", 2026-10-29). Every FALL_*_BLOOD art in critter.dat is the
+                // body LYING and a pool spreading under it: 3-7 frames, at most a few px of shuffle, its
+                // first frame the size the plain fall ends on (scan of all 76, 2026-10-29). His pick
+                // "Kaluž krve". A body already turned to its single-frame pose bleeds the same way.
+                if (anim == ANIM_FALL_BACK_SF) {
+                    anim = ANIM_FALL_BACK;
+                } else if (anim == ANIM_FALL_FRONT_SF) {
+                    anim = ANIM_FALL_FRONT;
+                }
+                // Never at the price of the transaction it joins (review 2026-10-29): a body some other live
+                // sequence still holds makes the registration fail, and that failure throws away everything
+                // else in a shared transaction -- a blast's, a script's damage. That one kill goes without.
+                if (!combat_rt_enabled() || !anim_owned_elsewhere(defender)) {
+                    anim = _action_blood(defender, anim, delay);
+                }
             }
         } else {
             return;

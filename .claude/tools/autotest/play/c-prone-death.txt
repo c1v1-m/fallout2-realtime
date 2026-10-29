@@ -1,0 +1,33 @@
+# F2 (2026-10-29, "nepřehrává se death animace"; his pick "Kaluž krve"): a critter killed while it lies knocked down
+# must bleed -- vanilla's _action_blood, the FALL_*_BLOOD art (the body lying, a pool spreading under it) -- not just
+# go still. Knockdowns come from criticals and blasts, so the test knocks each gecko down itself (sethp ... knock,
+# which also leaves it on a few HP) and the dude shoots it where it lies.
+# A prone death reads `->dying ... prone=1` and must settle `dying->dead ... anim=34|35` (the blood art); the old
+# build settled those as anim 20|21|48|49 (the plain fall pose, no blood).
+name c-prone-death
+map DESERT1.MAP
+seed 1
+duration 30
+dude tile 20100 rot 2
+dude stat PE 9
+dude stat AG 9
+dude hp 400
+dude armor 17
+dude skill small_guns 180
+dude wield 8
+dude item 29 6
+
+spawn 16777299 21100 rot 5 hostile
+spawn 16777299 21104 rot 5 hostile
+spawn 16777299 21500 rot 5 hostile
+
+sethp 16777299 10 1.5 knock
+sethp 16777299 10 8 knock
+sethp 16777299 10 15 knock
+
+at 0 fight
+
+expect test-knockdown\]
+expect dying why=lethal anim=\d+ busy=\d prone=1
+expect dying->dead why=settled anim=3[45]
+expect-not dying->dead why=settled anim=(20|21|4[89])

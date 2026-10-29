@@ -61,8 +61,9 @@ namespace fallout {
 //                                      master_patches folder: copy the player's save there), map scripts on; `map` still names
 //                                      a map to boot into first. The dude is the save's: no HP reset
 //   cleararea <tiles>                  every other critter within that many tiles of the dude is removed
-//   sethp <pid> <percent> <seconds>    at that time the first living critter of that pid on the dude's floor
-//                                      drops to that percent of its maximum HP (a boss's phases)
+//   sethp <pid> <percent> <seconds> [knock]  at that time the first living critter of that pid on the dude's floor
+//                                      drops to that percent of its maximum HP (a boss's phases); `knock`
+//                                      also knocks it down where it stands, as a knockdown hit does
 //   duration <seconds>                 hard stop (default 60)
 //   dude tile <t> [rot <0-5>]
 //   dude elevation <0-2>               the floor of the map (default: the map's entrance floor); the
@@ -276,6 +277,7 @@ typedef struct AtSetHp {
     int pct;
     float at;
     bool done;
+    bool knock; // and knocked down where it stands (combat_rt_test_knockdown)
 } AtSetHp;
 static AtSetHp at_sethp[AT_MAX_SETHP];
 static int at_sethp_count = 0;
@@ -743,6 +745,7 @@ static bool at_parse(const char* path)
             at_sethp[at_sethp_count].pct = atoi(tok[2]);
             at_sethp[at_sethp_count].at = (float)atof(tok[3]);
             at_sethp[at_sethp_count].done = false;
+            at_sethp[at_sethp_count].knock = n >= 5 && strcmp(tok[4], "knock") == 0;
             at_sethp_count++;
         } else if (strcmp(tok[0], "mapvar") == 0 && n >= 3 && at_mvar_count < AT_MAX_GVARS) {
             at_mvar_index[at_mvar_count] = atoi(tok[1]);
@@ -1665,6 +1668,9 @@ void autotest_tick(float dt)
                 int maxHp = stat_level(o, STAT_MAXIMUM_HIT_POINTS);
                 o->data.critter.hp = maxHp * at_sethp[i].pct / 100;
                 trace_event(TRACE_FLOW, "autotest", "sethp id=%d pid=%d hp=%d/%d", o->id, o->pid, o->data.critter.hp, maxHp);
+                if (at_sethp[i].knock) {
+                    combat_rt_test_knockdown(o);
+                }
                 break;
             }
         }

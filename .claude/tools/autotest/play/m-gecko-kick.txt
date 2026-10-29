@@ -1,0 +1,12 @@
+# F2 (2026-10-29, "nepřehrává se death animace"): his own autosave on arriving in the Klamath Toxic Caves (test
+# SLOT10), the bot fighting the little geckos with his kicks -- they go down often, and a gecko killed while it lies
+# there must bleed (FALL_*_BLOOD: the pool spreading under the body), not just go still. A death of a prone
+# critter shows as `none->dying ... prone=1` and must settle as `dying->dead ... anim=34|35` (the blood art).
+name m-gecko-kick
+map KLATOXCV.MAP
+loadslot 10
+seed 1
+duration 60
+dude hp 200
+
+at 0 fight

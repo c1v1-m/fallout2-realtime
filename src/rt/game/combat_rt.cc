@@ -5501,6 +5501,25 @@ static bool rt_reaction_heavy(Object* defender, int flags)
     return true;
 }
 
+// Self-played tests only (autotest `sethp ... knock`): what a knockdown hit's commit does to its defender --
+// the reaction layer's FALLING, DAM_KNOCKED_DOWN, the fall in its own sequence -- with no damage. Knockdowns
+// come from criticals and blasts, which a test cannot count on; "killed where it lies" needs one for sure.
+void combat_rt_test_knockdown(Object* critter)
+{
+    if (!rt_enabled || critter == NULL || !rt_is_critter(critter) || critter_is_dead(critter) || critter_is_prone(critter)) {
+        return;
+    }
+    if (!rt_reaction_heavy(critter, DAM_KNOCKED_DOWN)) {
+        return;
+    }
+    critter->data.critter.combat.results |= DAM_KNOCKED_DOWN;
+    if (rt_register_begin(ANIMATION_REQUEST_RESERVED, "test-knockdown")) {
+        register_object_animate(critter, ANIM_FALL_BACK, 0);
+        register_end();
+    }
+    trace_event(TRACE_FLOW, "test-knockdown", "id=%d pid=%d t=%.2f", critter->id, critter->pid, rt_clock);
+}
+
 // A LIGHT hit asks for a cosmetic stagger. Every refusal says WHY out loud -- these used to be
 // silent early-returns scattered through rt_play_hit_react, and a stagger that never plays is
 // indistinguishable from a hit that never landed.
