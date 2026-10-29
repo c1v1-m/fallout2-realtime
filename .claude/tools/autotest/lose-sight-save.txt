@@ -1,0 +1,27 @@
+# Lost-track through a save (2026-10-29, review of the lose-sight work): the radscorpion of lose-sight-corner
+# loses the dude round the building and he runs on up the street, out of its reach; once it has disengaged (after
+# an overwatch at the corner too: that holds up to 8 s), a quick save (START held). lose-sight-load loads it.
+# ⚠️ Overwrites the test SLOT01 (build/Release/data/SAVEGAME) -- back it up first.
+name lose-sight-save
+map KLADWTWN.MAP
+seed 1
+duration 31
+cleararea 300
+dude tile 25085 rot 4
+dude stat AG 10
+dude hp 300
+
+spawn 16777221 25077 rot 4 hostile
+
+walkto 2500 23090
+walkto 6500 21890
+# ...and on, past where its search can see him: a roam point 4 tiles out plus 10 tiles of PE 2 sight once
+# saw him at 21890 (dist 10) before the save, and the saved record had no lost bit (2026-10-29 batch).
+walkto 10000 19890
+pad 26500 start 1
+pad 27500 start 0
+note 30000 saved
+
+expect search-start\] id=\d+ pid=16777221
+expect fight-save\] map=\d+ elev=0 n=1
+expect save-slot\] slot=1 desc=Quick Save rc=

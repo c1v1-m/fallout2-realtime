@@ -1,0 +1,16 @@
+# Lost-track through a save (2026-10-29): load lose-sight-save's quick save. The radscorpion comes back
+# hostile with its lost_track (RTFH flags SEED|LOST, and FOUGHT: 0x9 or 0xd), so it does NOT run at the dude on its old
+# whoHitMe; it is back on him only when it sees him (engage why=sight). Before, the load brought the instant
+# blind re-chase back (lost_track was not saved).
+name lose-sight-load
+map KLADWTWN.MAP
+loadslot 1
+seed 1
+duration 14
+
+note 500 loaded
+
+expect \[FLOW/autotest\] loadslot 1 rc=0
+expect fight-restore\] id=\d+ pid=16777221 flags=0x[9d]
+expect-not FLOW/engage\] .*why=hurt-by
+expect-not fight-restore-left

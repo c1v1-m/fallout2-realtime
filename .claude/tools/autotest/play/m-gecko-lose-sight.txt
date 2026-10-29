@@ -1,0 +1,21 @@
+# F2 (2026-10-29, "gecko mě pronásledoval i po skončení boje ... geckon fakt běžel až za roh, to mně nemohl
+# tak najít ne přirozeně. Prostě věděl"): his own autosave on arriving in the Klamath Toxic Caves (Steam
+# SLOT04 "Autosave 3", copied to the test folder as SLOT10; the old SLOT10 is SLOT10.before-gecko-2026-10-29).
+# He walks in the way he did (to 20518), the little geckos come, and he runs back out past the bend to
+# 18139 (18144/18145 is the cave's exit grid: do not walk onto it). Nobody may come back at him blind: every
+# re-engagement after losing him must be by sight.
+name m-gecko-lose-sight
+map KLATOXCV.MAP
+loadslot 10
+seed 1
+duration 40
+
+walkto 500 20518
+shot 6000
+walkto 9000 18139
+shot 14000
+shot 25000
+shot 38000
+
+expect FLOW/engage\] .*why=sight
+expect-not FLOW/engage\] .*why=hurt-by lost=1

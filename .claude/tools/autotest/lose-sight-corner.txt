@@ -1,0 +1,32 @@
+# Losing him round a corner (2026-10-29, his "geckon fakt běžel až za roh, to mně nemohl tak najít ne
+# přirozeně. Prostě věděl"; picks "Jen volný výhled" + 30 s search): Klamath downtown, emptied. A
+# radscorpion (PE 2: 10 tiles in its facing cone) sees the dude on the sidewalk in front of the big brick
+# building, 8 tiles off; he runs round the building's corner to its west door and in. Out of sight it must
+# run to where it last saw him (lost-sight-move), not to where he is; then disengage, search and roam
+# there -- and never come at him on the old whoHitMe (engage why=hurt-by with lost=1 is the bug).
+# The old exe (vanilla sight: a cone, no walls) keeps on him through the building.
+name lose-sight-corner
+map KLADWTWN.MAP
+seed 1
+duration 50
+cleararea 300
+dude tile 25085 rot 4
+dude stat AG 10
+dude hp 300
+
+spawn 16777221 25077 rot 4 hostile
+
+shot 1200
+walkto 2500 23090
+shot 6000
+walkto 7000 23084
+shot 11000
+shot 20000
+shot 32000
+shot 46000
+
+expect FLOW/engage\] id=\d+ pid=16777221 why=sight
+expect lost-sight-move\] id=\d+ pid=16777221
+expect search-start\] id=\d+ pid=16777221
+expect search-roam\] id=\d+ pid=16777221
+expect-not FLOW/engage\] .*why=hurt-by lost=1

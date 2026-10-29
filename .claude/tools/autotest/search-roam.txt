@@ -1,0 +1,26 @@
+# Search after losing sight (2026-10-29, his "hledá mě ... chodí sem a tam, takovej alert mode", 30 s):
+# a radscorpion (PE 2: it sees 10 tiles at best) sees the dude and comes; he runs off across the open
+# desert until it loses him. It must run to where it last saw him (lost-sight-move), disengage, search
+# there and roam round that spot (search-roam) -- and NOT come straight at him again on the old
+# whoHitMe (an engage line with why=hurt-by and lost=1 is the bug).
+name search-roam
+map DESERT1.MAP
+seed 1
+duration 50
+dude tile 20100 rot 2
+dude stat AG 10
+dude hp 300
+
+spawn 16777221 21300 rot 0 hostile
+
+shot 1500
+walkto 3000 20130
+shot 20000
+shot 30000
+shot 45000
+
+expect FLOW/engage\] id=\d+ pid=16777221 why=sight
+expect search-start\] id=\d+ pid=16777221
+expect search-roam\] id=\d+ pid=16777221
+expect search-end\] id=\d+ pid=16777221
+expect-not FLOW/engage\] .*why=hurt-by lost=1
