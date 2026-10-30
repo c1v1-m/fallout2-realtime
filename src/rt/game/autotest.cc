@@ -42,6 +42,10 @@
 #include "plib/gnw/input.h"
 #include "plib/gnw/winmain.h"
 
+#if FALLOUT_RT_GAME == 2
+#include "queue.h" // a lit flare's timer (at_give)
+#endif
+
 namespace fallout {
 
 // --- THE SCENARIO FILE -----------------------------------------------------------------------------
@@ -912,6 +916,14 @@ static Object* at_give(Object* owner, int pid, int qty)
     // there (vanilla add_obj_to_inven disconnects it too) -- else the next map change frees it twice,
     // once with its owner's inventory and once from the list (heap corruption, 0xC0000374).
     obj_disconnect(item, NULL);
+#if FALLOUT_RT_GAME == 2
+    // A LIT flare burns, as one a player threw and picked back up does: its timer is what makes a trader refuse it
+    // (m-barter-lit). _obj_use_flare's own two steps, without its message.
+    if (pid == PROTO_ID_LIT_FLARE) {
+        objectSetLight(item, 8, 0x10000, NULL);
+        queueAddEvent(72000, item, NULL, EVENT_TYPE_FLARE);
+    }
+#endif
     return item;
 }
 

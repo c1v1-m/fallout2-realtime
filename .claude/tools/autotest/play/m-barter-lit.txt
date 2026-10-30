@@ -1,0 +1,27 @@
+# F2 (2026-10-30, "problém bylo, že nechtěl koupit hořící světlice"; his pick "Jasná hláška"): a lit flare (or anything
+# armed or switched on) must not go onto the player's offer -- the buzzer and Maida's "No deal: the Flare is lit."
+# instead of a refused deal later with vanilla's "not good enough". The dude carries a burning flare (`dude item 205`
+# is lit with its timer, as one thrown and picked back up), talks to Maida, opens the trade (Y) and presses A on the
+# first two rows of his own column (caps and the flare, in whichever order). The flare must be refused as
+# `barter-active-item pid=205 state=lit` and never reach the offer.
+name m-barter-lit
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 26
+dude tile 22879 rot 0
+dude item 41 300
+dude item 205 1
+
+talk 2500 16777273
+tap 6000 Y
+shot 8500
+tap 9000 A
+tap 10500 DOWN
+tap 12000 A
+shot 13500
+tap 15000 B
+tap 16500 B
+tap 18000 B
+
+expect barter-active-item\] pid=205 state=lit

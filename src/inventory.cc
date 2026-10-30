@@ -36,6 +36,7 @@
 #include "platform_compat.h"
 #include "proto.h"
 #include "proto_instance.h"
+#include "queue.h"
 #include "random.h"
 #include "reaction.h"
 #include "scripts.h"
@@ -5550,6 +5551,60 @@ static int _barter_compute_value(Object* dude, Object* npc)
     return rounded;
 }
 
+// An item a trader will not take while it is ACTIVE -- a lit flare, an armed explosive, anything with a timer running
+// on it (OBJECT_QUEUED) -- `obj` itself or anything inside it, containers included (vanilla's itemIsQueued test).
+static Object* barter_active_item(Object* obj)
+{
+    if (obj == nullptr) {
+        return nullptr;
+    }
+    if ((obj->flags & OBJECT_QUEUED) != 0) {
+        return obj;
+    }
+    Inventory* inventory = &(obj->data.inventory);
+    for (int index = 0; index < inventory->length; index++) {
+        Object* item = inventory->items[index].item;
+        if ((item->flags & OBJECT_QUEUED) != 0) {
+            return item;
+        }
+        if (itemGetType(item) == ITEM_TYPE_CONTAINER) {
+            Object* inner = barter_active_item(item);
+            if (inner != nullptr) {
+                return inner;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// ⚠️ SAY WHY (2026-10-30, his "problém bylo, že nechtěl koupit hořící světlice" -- he had picked up a flare he had
+// thrown, it burns on for two game hours in the pack, and Maida answered his offer with "not good enough", the line
+// vanilla uses for too little money; his pick "Jasná hláška"). The trader names the item: "No deal: the Flare is lit."
+//
+// ⚠️ FROM THE LIVE EVENT, NOT FROM OBJECT_QUEUED (review 2026-10-30). That flag only says an event was ever queued
+// for the item -- nothing clears it, not a removed event, not a load -- so a Geiger counter or a Stealth Boy switched
+// off long ago still carries it, and vanilla still refuses it. "is on" would be a lie that sends him to switch it on
+// again (and spend a charge); such an item "has been used", which is what vanilla's refusal means.
+static void barter_say_active_item(Object* item)
+{
+    const char* state = NULL;
+    if (queueHasEvent(item, EVENT_TYPE_FLARE)) {
+        state = "lit";
+    } else if (queueHasEvent(item, EVENT_TYPE_EXPLOSION) || queueHasEvent(item, EVENT_TYPE_EXPLOSION_FAILURE)) {
+        state = "armed";
+    } else if (queueHasEvent(item, EVENT_TYPE_ITEM_TRICKLE)) {
+        state = "on";
+    }
+    char text[160];
+    if (state != NULL) {
+        snprintf(text, sizeof(text), "No deal: the %s is %s.", itemGetName(item), state);
+    } else {
+        snprintf(text, sizeof(text), "No deal: the %s has been used.", itemGetName(item));
+    }
+    gameDialogRenderSupplementaryMessage(text);
+    trace_event(TRACE_FLOW, "barter-active-item", "pid=%d state=%s", item->pid, state != NULL ? state : "used");
+}
+
 // 0x474C50
 static int _barter_attempt_transaction(Object* dude, Object* offerTable, Object* npc, Object* barterTable)
 {
@@ -5577,12 +5632,14 @@ static int _barter_attempt_transaction(Object* dude, Object* offerTable, Object*
         }
     } else {
         bool badOffer = false;
+        Object* activeItem = nullptr;
         if (offerTable->data.inventory.length == 0) {
             badOffer = true;
         } else {
             if (itemIsQueued(offerTable)) {
                 if (offerTable->pid != PROTO_ID_GEIGER_COUNTER_I || miscItemTurnOff(offerTable) == -1) {
                     badOffer = true;
+                    activeItem = barter_active_item(offerTable);
                 }
             }
         }
@@ -5592,6 +5649,12 @@ static int _barter_attempt_transaction(Object* dude, Object* offerTable, Object*
             if (_barter_compute_value(dude, npc) > cost) {
                 badOffer = true;
             }
+        }
+
+        // An active item is not a price question: the trader says what is wrong with it (barter_say_active_item).
+        if (activeItem != nullptr) {
+            barter_say_active_item(activeItem);
+            return -1;
         }
 
         if (badOffer) {
@@ -6086,6 +6149,17 @@ static void barter_transfer_slot(int listId, int row, BarterAmount amount)
 
     if (item == NULL || qty <= 0) {
         return;
+    }
+
+    // Nothing lit or armed goes onto the player's offer: the trader would refuse the whole deal over it. The refusal
+    // buzzer and the trader's line, at once, instead of a puzzling "not good enough" at the offer (his "Jasná hláška").
+    if (dst == _ptable && !gGameDialogSpeakerIsPartyMember) {
+        Object* active = barter_active_item(item);
+        if (active != NULL) {
+            soundPlayFile("iisxxxx1");
+            barter_say_active_item(active);
+            return;
+        }
     }
 
     // ⚠️ A MOVES ONE, LT+A MOVES THE LOT, LT+A HELD ASKS. His call: "Ačko přidá jeden item a LT
