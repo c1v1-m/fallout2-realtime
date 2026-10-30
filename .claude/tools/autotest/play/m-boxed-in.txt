@@ -1,0 +1,26 @@
+# F2 (2026-10-30, the Deck: four radscorpions closed every side around him; his pick „Stát a AP nebrat“): with
+# the stick and X held and nowhere to go, the dude must STAND -- not run on the spot, which played the run
+# art and so drained AP and paused the regen. Six bystanders (a neutral team) on the six hexes round him,
+# a hostile radscorpion out in the open so the fight is on; the stick pushes east with X for 4 s.
+name m-boxed-in
+map DESERT1.MAP
+seed 1
+duration 13
+dude tile 15100 rot 1
+dude hp 300
+
+spawn 16777262 15099 rot 4 team 50
+spawn 16777262 15299 rot 5 team 50
+spawn 16777262 15300 rot 5 team 50
+spawn 16777262 15301 rot 0 team 50
+spawn 16777262 15101 rot 1 team 50
+spawn 16777262 14900 rot 2 team 50
+spawn 16777222 16300 rot 5 hostile team 123
+
+pad 3000 x 1
+axis 3000 LX 32767
+axis 7000 LX 0
+pad 7000 x 0
+note 10000 end
+
+expect fm-boxed\] tile=15100

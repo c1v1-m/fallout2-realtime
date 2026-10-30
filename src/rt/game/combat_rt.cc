@@ -580,6 +580,11 @@ typedef struct RtActor {
     bool script_combatant;   // joined this fight -- sticky until it ends, as vanilla's combat list is
     int script_turns;        // events its script has had in this fight, for the trace
 
+    // TOOK DAMAGE IN THIS FIGHT (combat_rt_note_hurt), until the fight ends. damageLastTurn cannot say it:
+    // every script turn zeroes it, as vanilla's combat_turn does, so it only remembers the hits since the
+    // critter's last turn. rt_next_danger_source asks this one.
+    bool hurt_in_fight;
+
     // FLEEING (rt_flee_step): cornered last time it looked -- the next look is a turn later, as in vanilla.
     float flee_retry_at;
     bool fleeing;      // rt_flee_step owns it: it pays for its legs the way the DUDE pays (no reserve)
@@ -6351,6 +6356,55 @@ static bool rt_hears_gunfire(Object* onlooker, Object* anchor);
 
 // Is this teammate fighting RIGHT NOW (not just carrying an old whoHitMe)? The dude by
 // rt_dude_in_fight; anyone else by its actor state, or a hit taken since its last turn.
+// The dude's half of RtActor.hurt_in_fight: he is not in the registry.
+static bool rt_dude_hurt_in_fight = false;
+
+// Was `critter` hurt in the fight that is going on? See RtActor.hurt_in_fight. damageLastTurn still counts
+// for a critter the registry has not taken in yet.
+//
+// ⚠️ NOT THE DUDE'S damageLastTurn (review 2026-10-30): realtime never zeroes it -- every fight end walks the
+// registry, and he is not in it -- so after his first wound it would have said "hurt in this fight" for the
+// rest of the game.
+static bool rt_hurt_this_fight(Object* critter)
+{
+    if (critter == obj_dude) {
+        return rt_dude_hurt_in_fight;
+    }
+    for (int i = 0; i < rt_actor_count; i++) {
+        if (rt_actors[i].obj == critter) {
+            return rt_actors[i].hurt_in_fight || critter->data.critter.combat.damageLastTurn > 0;
+        }
+    }
+    return critter->data.critter.combat.damageLastTurn > 0;
+}
+
+// The fight is over: nobody has been hurt in the next one yet.
+static void rt_forget_fight_hurts()
+{
+    rt_dude_hurt_in_fight = false;
+    for (int i = 0; i < rt_actor_count; i++) {
+        rt_actors[i].hurt_in_fight = false;
+    }
+}
+
+// _damage_object, at the same moment it adds to damageLastTurn: `critter` took damage.
+void combat_rt_note_hurt(Object* critter)
+{
+    if (!rt_enabled || critter == NULL) {
+        return;
+    }
+    if (critter == obj_dude) {
+        rt_dude_hurt_in_fight = true;
+        return;
+    }
+    for (int i = 0; i < rt_actor_count; i++) {
+        if (rt_actors[i].obj == critter) {
+            rt_actors[i].hurt_in_fight = true;
+            return;
+        }
+    }
+}
+
 static bool rt_is_fighting_now(Object* critter)
 {
     if (critter == obj_dude) {
@@ -6445,23 +6499,30 @@ static Object* rt_guard_danger_source(Object* guard)
 // so this is the same list over the realtime registry, plus the dude, who is not in it.
 //
 // ⚠️ ONLY THIS FIGHT'S HITS COUNT. Realtime keeps whoHitMe across fights on purpose (hostility is
-// sticky), so an old grudge must not pick the next target. damageLastTurn is the per-fight record
-// -- the combat-exit pass zeroes it, as vanilla's combat_over did -- so a relation counts when its
-// victim was hurt in this fight or the one it points at is fighting right now.
+// sticky), so an old grudge must not pick the next target. A relation counts when its victim was hurt
+// in this fight (rt_hurt_this_fight) or the one it points at is fighting right now.
+//
+// ⚠️ NOT damageLastTurn, which this once read as the per-fight record: every script turn zeroes it (vanilla's
+// combat_turn does), so a hit counted only until the victim's next turn, ~5 s. On the Deck (2026-10-30,
+// CAVE2) the caravan guards killed their first scorpion and then stood 12-16 s watching five more maul the
+// player: the hit one of them had landed was already forgotten.
 static Object* rt_next_danger_source(Object* critter)
 {
     int team = critter->data.critter.combat.team;
 
     // 1. Whoever hit me, while he lives -- vanilla returns him at once, seen or not.
     Object* whoHitMe = critter->data.critter.combat.whoHitMe;
-    bool hurtThisFight = critter->data.critter.combat.damageLastTurn > 0;
+    bool hurtThisFight = rt_hurt_this_fight(critter);
     if (whoHitMe != NULL && whoHitMe != critter && rt_is_combatant(whoHitMe)
         && (hurtThisFight || rt_is_fighting_now(whoHitMe))) {
         return whoHitMe;
     }
-    // ...and if he is dead, his team is still here.
+    // ...and if he is dead, his team is still here. Hurt or not: this is only ever asked by a critter whose
+    // target just died in the fight it is in, and only a member of that team who is fighting now can be
+    // the answer, so an old grudge cannot start anything. Vanilla asks no more than the dead attacker's
+    // team. It is the rule that keeps the caravan's guards on the scorpions their team fight gave them.
     int deadAttackerTeam = -1;
-    if (whoHitMe != NULL && whoHitMe != critter && hurtThisFight
+    if (whoHitMe != NULL && whoHitMe != critter
         && (whoHitMe->data.critter.combat.results & DAM_DEAD) != 0
         && whoHitMe->data.critter.combat.team != team) {
         deadAttackerTeam = whoHitMe->data.critter.combat.team;
@@ -6477,7 +6538,7 @@ static Object* rt_next_danger_source(Object* critter)
 
         Object* candidate = NULL;
         Object* cHitBy = c->data.critter.combat.whoHitMe;
-        bool cHurt = c->data.critter.combat.damageLastTurn > 0;
+        bool cHurt = rt_hurt_this_fight(c);
         int cTeam = c->data.critter.combat.team;
 
         if (deadAttackerTeam != -1 && cTeam == deadAttackerTeam && rt_is_fighting_now(c)) {
@@ -8856,6 +8917,7 @@ static void rt_cut_walk_in_place()
 // polygon-in-hex approximation.
 #define RT_FM_MAX_STEP_PX 12.0f // never cross more than one cell in a frame, whatever dt says
 #define RT_FM_FACING_HYST 12.0f // degrees a new facing must beat the current one by
+#define RT_FM_BOXED_STAND_SECONDS 0.12f // pushed and going nowhere this long: he stands (rt_fm_drive)
 
 static bool rt_free_move = false; // cfg free_move / MODS row "Free movement"
 // This frame's dt. combat_rt_poll_gamepad runs from inside combat_rt_update, which has it; the
@@ -8865,6 +8927,9 @@ static bool rt_fm_active = false; // we are driving the body this frame
 static float rt_fm_x = 0.0f; // sub-pixel position, of which obj->x/y is the rounded shadow
 static float rt_fm_y = 0.0f;
 static float rt_fm_frame = 0.0f; // walk-cycle accumulator, in frames
+// rt_clock since which the stick has been pushing the body nowhere (boxed in, or into a wall dead on);
+// -1 while it moves. See the stand rule in rt_fm_drive.
+static float rt_fm_boxed_since = -1.0f;
 static int rt_fm_facing = -1; // index into rt_hex_ccw, not a rotation
 // The tile rt_fm_x/y are measured from -- what combat_rt_dude_rest_offset checks before handing them
 // to dude_stand. -1 = no rest spot (map load, reset).
@@ -8944,6 +9009,7 @@ static void rt_fm_release()
     rt_fm_active = false;
     rt_stick_active = false;
     rt_fm_frame = 0.0f;
+    rt_fm_boxed_since = -1.0f;
     rt_move_stuck_since = -1.0f; // input released: nothing is being refused any more
 
     if (obj_dude == NULL) {
@@ -9084,6 +9150,8 @@ static void rt_fm_drive(float angle, bool run, float dt)
         rt_fm_y = (float)obj_dude->y;
     }
     rt_fm_rest_tile = obj_dude->tile;
+    float fromX = rt_fm_x;
+    float fromY = rt_fm_y;
 
     float rad = angle * 0.0174532925f;
     float dx = cosf(rad);
@@ -9180,8 +9248,9 @@ static void rt_fm_drive(float angle, bool run, float dt)
         // held stick would otherwise log it sixty times a second -- and it is the signature to
         // grep for if he reports being stuck on something he should have slid past.
         if (!crossed) {
+            // ⚠️ A stamp ahead of the clock is from before a load (rt_clock starts again at 0): expired.
             static float rt_fm_blocked_traced = -1.0f;
-            if (rt_clock - rt_fm_blocked_traced >= 0.5f) {
+            if (rt_clock - rt_fm_blocked_traced >= 0.5f || rt_fm_blocked_traced > rt_clock) {
                 rt_fm_blocked_traced = rt_clock;
                 int rot = rt_fm_rot(di, dj);
                 Object* blocker = rot >= 0
@@ -9208,6 +9277,33 @@ static void rt_fm_drive(float angle, bool run, float dt)
         cj = -0.5f;
     }
     rt_fm_pixels(ci, cj, &nx, &ny);
+
+    // ⚠️ BOXED IN, HE STANDS (2026-10-30, his pick „Stát a AP nebrat“). Four radscorpions closed every side
+    // around him; with the stick held the body ran on the spot, and since the run AP drain and the paused
+    // regen both read the RUN art, standing still cost him AP. When the push gets him nowhere -- no tile
+    // crossed and the body did not move within its cell either -- he stands, turned to the stick, and
+    // everything that asks "is he moving" reads the stand. The short wait keeps a passing brush against
+    // something from blinking the run off for a frame; any movement at all puts it straight back.
+    float pushLen = sqrtf(mx * mx + my * my);
+    float movedLen = sqrtf((nx - fromX) * (nx - fromX) + (ny - fromY) * (ny - fromY));
+    bool pushedNowhere = spatialTile < 0 && movedLen < 0.05f * pushLen;
+    if (!pushedNowhere) {
+        rt_fm_boxed_since = -1.0f;
+    } else if (rt_fm_boxed_since < 0.0f || rt_fm_boxed_since > rt_clock) {
+        rt_fm_boxed_since = rt_clock;
+    }
+    bool boxedStand = pushedNowhere && rt_clock - rt_fm_boxed_since >= RT_FM_BOXED_STAND_SECONDS;
+    if (boxedStand) {
+        if (FID_ANIM_TYPE(obj_dude->fid) != ANIM_STAND) {
+            trace_event(TRACE_INPUT, "fm-boxed", "tile=%d ang=%.0f run=%d ap=%d t=%.2f",
+                obj_dude->tile, angle, run ? 1 : 0, rt_player_ap, rt_clock);
+        }
+        anim = ANIM_STAND;
+        // ...and stands STILL: the few per cent a stick a hair off the wall's line still slides would glide
+        // the standing body along the edge (review 2026-10-30).
+        nx = fromX;
+        ny = fromY;
+    }
 
     rt_fm_x = nx;
     rt_fm_y = ny;
@@ -9253,8 +9349,10 @@ static void rt_fm_drive(float angle, bool run, float dt)
 
     // The legs run off the DISTANCE COVERED, not off a timer: that is the same relationship the
     // step mover has (its tile lasts exactly frames-per-tile frames), so the walk cycle stays in
-    // step with the ground at any speed and in any direction.
-    rt_fm_frame += fps * dt;
+    // step with the ground at any speed and in any direction. Standing boxed in, there is none.
+    if (!boxedStand) {
+        rt_fm_frame += fps * dt;
+    }
     while (rt_fm_frame >= 1.0f) {
         rt_fm_frame -= 1.0f;
         obj_inc_frame(obj_dude, &r);
@@ -9275,7 +9373,7 @@ static void rt_fm_drive(float angle, bool run, float dt)
     // mover's state.
     rt_fm_active = true;
     rt_stick_active = true;
-    rt_stick_running = run;
+    rt_stick_running = run && !boxedStand;
 
     // ⚠️ LAST, AND NOTHING OF OURS AFTER IT. A spatial script can do anything -- open the elevator
     // panel, start a fight, change the map -- and it runs to completion inside this call, so every
@@ -10445,6 +10543,7 @@ static void rt_refresh_registry()
             a->script_fighting = prev->script_fighting;
             a->script_combatant = prev->script_combatant;
             a->script_turns = prev->script_turns;
+            a->hurt_in_fight = prev->hurt_in_fight;
             a->flee_retry_at = prev->flee_retry_at;
             a->fleeing = prev->fleeing;
             a->flee_blocked = prev->flee_blocked;
@@ -10566,6 +10665,7 @@ static void rt_refresh_registry()
             a->script_fighting = false;
             a->script_combatant = false;
             a->script_turns = 0;
+            a->hurt_in_fight = false;
             a->flee_retry_at = 0.0f;
             a->fleeing = false;
             a->flee_blocked = false;
@@ -15801,6 +15901,8 @@ static void rt_abandon_encounter()
     rt_inflight_count = 0;
     rt_actor_count = 0;
     rt_engaged = false;
+    rt_dude_hurt_in_fight = false; // the actors' halves go with the registry
+    rt_fm_boxed_since = -1.0f;
     // A shot on the map being left is not a noise on the next one (the tile would be meaningless
     // there), and the clock it was stamped with may restart.
     rt_noise_clock = -1000.0f;
@@ -15837,6 +15939,7 @@ static void rt_abandon_encounter()
     rt_fm_y = 0.0f;
     rt_fm_rest_tile = -1;
     rt_fm_frame = 0.0f;
+    rt_fm_boxed_since = -1.0f;
     rt_fm_facing = -1;
     rt_stick_dest = -1;
     rt_stick_last_sector = -1;
@@ -15861,6 +15964,7 @@ static void rt_reset_session_state()
 {
     rt_map_update_on_exit = false;
     rt_dude_last_attack = -1000.0f;
+    rt_dude_hurt_in_fight = false;
     rt_last_no_ammo_click = -1000.0f;
     // Stray-hit forgiveness is per map visit (rt_forgive_stray), and ids are only unique per map.
     rt_forgiven_count = 0;
@@ -20560,6 +20664,9 @@ void combat_rt_update(float dt)
                 c->data.critter.combat.damageLastTurn = 0;
             }
         }
+        if (!engaged) {
+            rt_forget_fight_hurts();
+        }
 
         if (engaged) {
             rt_balance_begin();
@@ -21377,6 +21484,7 @@ bool combat_rt_end_combat()
             a->obj->data.critter.combat.damageLastTurn = 0;
         }
     }
+    rt_forget_fight_hurts();
 
     rt_engaged = false;
     combat_state &= ~COMBAT_STATE_0x01;
@@ -21410,7 +21518,14 @@ void combat_rt_terminate_from_script()
             a->lost_track = true;
         }
         a->target_unseen = false;
+        // Nobody was hurt in the next fight yet, as combat_over has it: neither the hit that made the script
+        // end this one nor any other may pick a target in a later fight (review 2026-10-30). The engaged ->
+        // idle edge that forgets them for a natural end never sees this one: rt_engaged is cleared below.
+        if (a->obj != NULL) {
+            a->obj->data.critter.combat.damageLastTurn = 0;
+        }
     }
+    rt_forget_fight_hurts();
 
     rt_engaged = false;
     combat_state &= ~COMBAT_STATE_0x01;
@@ -21854,6 +21969,7 @@ void combat_rt_end_for_map_exit()
             c->data.critter.combat.damageLastTurn = 0;
         }
     }
+    rt_forget_fight_hurts();
 
     combat_clear_pending_attack();
     rt_inflight_count = 0;

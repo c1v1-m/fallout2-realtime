@@ -1,0 +1,36 @@
+# F2 (2026-10-30, the Deck: CAVE2 "docházelo ke chybám"): more than 16 critters walking at once. The walk
+# smoother had 16 slots handed out round-robin, so with a crowd every walker's slot was stolen, its ramp
+# restarted and it jogged on one hex. Twenty-two mole rats close on the dude from two sides at once; each
+# must reach him, none may stand on one tile with its walk playing (see crowdwalk.js).
+name m-crowd-walk
+map DESERT1.MAP
+seed 1
+duration 22
+dude tile 15100 rot 2
+dude hp 999
+spawn 16777333 13690 rot 2 hostile
+spawn 16777333 13692 rot 2 hostile
+spawn 16777333 13694 rot 2 hostile
+spawn 16777333 13696 rot 2 hostile
+spawn 16777333 13698 rot 2 hostile
+spawn 16777333 13700 rot 2 hostile
+spawn 16777333 13702 rot 2 hostile
+spawn 16777333 13704 rot 2 hostile
+spawn 16777333 13706 rot 2 hostile
+spawn 16777333 13708 rot 2 hostile
+spawn 16777333 13710 rot 2 hostile
+spawn 16777333 16490 rot 5 hostile
+spawn 16777333 16492 rot 5 hostile
+spawn 16777333 16494 rot 5 hostile
+spawn 16777333 16496 rot 5 hostile
+spawn 16777333 16498 rot 5 hostile
+spawn 16777333 16500 rot 5 hostile
+spawn 16777333 16502 rot 5 hostile
+spawn 16777333 16504 rot 5 hostile
+spawn 16777333 16506 rot 5 hostile
+spawn 16777333 16508 rot 5 hostile
+spawn 16777333 16510 rot 5 hostile
+
+at 0 idle
+
+expect COMBAT/attack\] NPC aid=\d+ ->pid=16777216

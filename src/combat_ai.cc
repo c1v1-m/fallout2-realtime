@@ -1888,12 +1888,35 @@ int aiTeamCombatInitAtElevation(int elevation)
 
     Object** critters = nullptr;
     int count = objectListCreate(-1, elevation, OBJ_TYPE_CRITTER, &critters);
+
+    // ⚠️ _caiTeamCombatInit finds each critter's foe in _curr_crit_list, and only _combat_begin fills that
+    // (through _combat_ai_begin). Without it the search finds no one and writes NULL into the whoHitMe of
+    // every critter of both teams, the pair wmSetupRandomEncounter had set included: on the Deck
+    // (2026-10-30, CAVE2 "a merchant party fending off some radscorpions") not one scorpion went for the
+    // caravan, they all turned on the player and Sulik. So the list is built for this one call, the way
+    // _combat_begin builds it, and given back at once, since realtime has no turn loop to hold it.
+    bool ownList = _curr_crit_num == 0 && count > 0;
+    if (ownList) {
+        _combat_ai_begin(count, critters);
+    }
     _caiTeamCombatInit(critters, count);
+    if (ownList) {
+        _combat_ai_over();
+    }
+
+    int paired = 0;
+    for (int index = 0; index < count; index++) {
+        int team = critters[index]->data.critter.combat.team;
+        if ((team == attackerTeam || team == defenderTeam) && critters[index]->data.critter.combat.whoHitMe != nullptr) {
+            paired++;
+        }
+    }
+
     if (critters != nullptr) {
         objectListFree(critters);
     }
 
-    trace_event(TRACE_FLOW, "team-combat", "atkTeam=%d defTeam=%d critters=%d elev=%d", attackerTeam, defenderTeam, count, elevation);
+    trace_event(TRACE_FLOW, "team-combat", "atkTeam=%d defTeam=%d critters=%d paired=%d elev=%d", attackerTeam, defenderTeam, count, paired, elevation);
     return count;
 }
 

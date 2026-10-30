@@ -1,0 +1,31 @@
+# F2 (2026-10-30, the Deck: CAVE2 "A merchant party fending off some radscorpions", "docházelo ke chybám"):
+# the encounter's two groups must fight EACH OTHER. In realtime the team set-up searched a critter list only
+# turn-based fills, found no one and wrote NULL into every whoHitMe of both teams, so no scorpion ever went
+# for the caravan; and the guards stood down once their first scorpion died, because a hit counted only until
+# the victim's next script turn. Seven radscorpions (team 123) against two guards and the Caravan Master
+# (team 92), set up as wmSetupRandomEncounter does; the dude well out of it.
+name m-caravan-scorpions
+map DESERT1.MAP
+seed 1
+duration 40
+dude tile 15100 rot 2
+dude hp 300
+
+spawn 16777262 21110 rot 2 wield 10 team 92
+spawn 16777262 21114 rot 2 wield 10 team 92
+spawn 16777274 21312 rot 2 wield 9 team 92
+spawn 16777222 23106 rot 5 team 123
+spawn 16777222 23110 rot 5 team 123
+spawn 16777222 23114 rot 5 team 123
+spawn 16777222 23118 rot 5 team 123
+spawn 16777222 23506 rot 5 team 123
+spawn 16777222 23512 rot 5 team 123
+spawn 16777222 23518 rot 5 team 123
+teamfight 123 92
+
+note 34000 end
+
+expect team-combat\] atkTeam=\d+ defTeam=\d+ critters=\d+ paired=10
+expect COMBAT/hit\] att=\d+ attPid=16777222 def=\d+ defPid=(16777262|16777274)
+expect retarget\] id=\d+ pid=(16777262|16777274)
+expect-not COMBAT/attack\] NPC .*->pid=16777216
