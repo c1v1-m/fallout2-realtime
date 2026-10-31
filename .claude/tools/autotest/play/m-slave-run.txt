@@ -1,0 +1,16 @@
+# F2 (2026-10-31, the Den's slave run, his save at the start of it, copied to test slot 9): the dude fights the
+# armed tribals and then hunts the runaways with his fists -- a fist or a club on a runaway catches it
+# (slave-capture), the way the slavers' club does, and must not set the slavers shooting at it. The slavers must
+# keep catching the rest (anim 42 swings) until none is loose.
+name m-slave-run
+map DESERT1.MAP
+loadslot 9
+seed 1
+duration 170
+dude hp 400
+dude curhp 400
+
+at 0 idle
+at 16 hunt
+
+expect slave-capture\]

@@ -110,6 +110,8 @@ namespace fallout {
 //        healhold                      hold LB down for the whole phase
 //        rthold                        hold RT down for the whole phase with NO lock (no LT): the
 //                                      unlocked attack picks its own target
+//        hunt                          walk (pathfinder) at the nearest enemy and fight it; with none left,
+//                                      (F2) run down the nearest slave-run runaway and strike it
 //        aimother [tile]               hold LT and RT, and flick the RIGHT stick from the locked critter
 //                                      toward the tile (or the nearest other enemy) every 0.6 s
 //                                      (pre-aiming at one peeking round a corner)
@@ -195,9 +197,10 @@ enum {
     AT_HEAL_HOLD,
     AT_RT_HOLD,
     AT_AIM_OTHER,
+    AT_HUNT,
 };
 
-static const char* const at_policy_names[] = { "idle", "fight", "advance", "kite", "goto", "shoot", "throw", "throwfree", "strafe", "dodge", "shootmove", "heal", "use", "healhold", "rthold", "aimother" };
+static const char* const at_policy_names[] = { "idle", "fight", "advance", "kite", "goto", "shoot", "throw", "throwfree", "strafe", "dodge", "shootmove", "heal", "use", "healhold", "rthold", "aimother", "hunt" };
 
 typedef struct AtItem {
     int pid;
@@ -1066,8 +1069,10 @@ void autotest_setup_world()
     if (at_load_slot <= 0) {
         obj_dude->data.critter.hp = stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS);
     }
-    if (at_dude_curhp > 0 && at_dude_curhp < obj_dude->data.critter.hp) {
-        obj_dude->data.critter.hp = at_dude_curhp;
+    // A loaded save keeps its own hit points, so curhp may also RAISE them (a slave run from his save, 2026-10-31).
+    if (at_dude_curhp > 0 && (at_dude_curhp < obj_dude->data.critter.hp || at_load_slot > 0)) {
+        int maxHp = stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS);
+        obj_dude->data.critter.hp = at_dude_curhp < maxHp ? at_dude_curhp : maxHp;
     }
     if (at_dude_sneak) {
         pc_flag_on(PC_FLAG_SNEAKING); // rolls the skill at once, as the Skilldex toggle does
@@ -1410,6 +1415,46 @@ static void at_fight(Object* enemy, int dist)
         at_rt_next = at_elapsed + 0.3f;
     }
 }
+
+// "hunt": the way there along the pathfinder's route, as a click walks it (the stick goes straight and stops at
+// the first wall), asked again every half second for a target that moves.
+static float at_hunt_path_next = 0.0f;
+static Object* at_hunt_path_target = NULL;
+
+static void at_path_to(Object* target)
+{
+    at_stick_still();
+    if (target == at_hunt_path_target && at_elapsed < at_hunt_path_next) {
+        return;
+    }
+    at_hunt_path_target = target;
+    at_hunt_path_next = at_elapsed + 0.5f;
+    if (make_path(obj_dude, obj_dude->tile, target->tile, NULL, 0) > 0 && register_begin(ANIMATION_REQUEST_RESERVED) == 0) {
+        register_object_run_to_tile(obj_dude, target->tile, obj_dude->elevation, -1, 0);
+        register_end();
+    }
+}
+
+#if FALLOUT_RT_GAME == 2
+// The nearest slave-run runaway still on its feet (Fallout 2, the Den's slave run).
+static Object* at_nearest_runaway(int* distOut)
+{
+    Object* best = NULL;
+    int bestDist = 9999;
+    for (Object* o = obj_find_first_at(obj_dude->elevation); o != NULL; o = obj_find_next_at()) {
+        if (!scriptIsSlaveRunaway(o) || scriptSlaveRunawayDown(o)) {
+            continue;
+        }
+        int d = obj_dist(obj_dude, o);
+        if (d < bestDist) {
+            best = o;
+            bestDist = d;
+        }
+    }
+    *distOut = bestDist;
+    return best;
+}
+#endif
 
 static void at_end(const char* why, float delay)
 {
@@ -1763,6 +1808,35 @@ void autotest_tick(float dt)
             } else {
                 at_fight(enemy, dist);
             }
+            break;
+        case AT_HUNT:
+            // Enemies first, walked to along the route; then (Fallout 2) the slave run's runaways, run down and
+            // struck with whatever is in hand -- a fist or a club catches them (slaveRunCapture).
+            if (enemy != NULL && dist <= 10) {
+                if (dist > at_weapon_range()) {
+                    at_axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT, -32768);
+                    at_path_to(enemy);
+                } else {
+                    at_fight(enemy, dist);
+                }
+                break;
+            }
+#if FALLOUT_RT_GAME == 2
+            {
+                int runDist = 9999;
+                Object* runaway = at_nearest_runaway(&runDist);
+                if (runaway != NULL) {
+                    if (runDist > 1) {
+                        at_axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT, -32768);
+                        at_path_to(runaway);
+                    } else {
+                        at_fight(runaway, runDist);
+                    }
+                    break;
+                }
+            }
+#endif
+            at_fight(enemy, dist);
             break;
         case AT_KITE:
             if (enemy != NULL && dist <= 4) {
