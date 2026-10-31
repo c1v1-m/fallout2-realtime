@@ -1,0 +1,12 @@
+# F2 (2026-10-31, "nepřehrává se animace smrti … dude"): the dude's death animation must play before the death
+# scene. The main loop went to it the frame DAM_DEAD was set, with the death animation still queued. A raider
+# with a gun against a dude on 3 HP.
+name m-dude-death
+map DESERT1.MAP
+seed 1
+duration 15
+dude tile 15100 rot 2
+dude curhp 3
+spawn 16777454 15700 rot 5 wield 8 item 29 4 hostile
+at 0 idle
+expect react\] pid=16777216 id=18000 none->dying

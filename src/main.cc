@@ -571,7 +571,14 @@ static void mainLoop()
             _main_game_paused = 0;
         }
 
-        if ((gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+        // Trigger the death scene only once the dude is dead/knocked out AND his death/knockout animation has
+        // finished (from fallout1-ce; Fallout 2 Realtime 2026-10-31, "nepřehrává se animace smrti … dude"). Under
+        // combat_rt the lethal hit is committed at swing-connect, so DAM_DEAD is set while the death animation is
+        // still only queued; bailing the instant the flag appears skipped the animation entirely (the dude just
+        // stood there, then the death-scene fade). Turn-based is unaffected: its damage commits at sequence-end,
+        // where the dude is already idle.
+        if ((gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0
+            && animationIsBusy(gDude) == 0) {
             endgameSetupDeathEnding(ENDGAME_DEATH_ENDING_REASON_DEATH);
             _main_show_death_scene = 1;
             _game_user_wants_to_quit = 2;
