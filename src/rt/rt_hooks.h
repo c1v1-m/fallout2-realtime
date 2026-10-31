@@ -94,6 +94,7 @@ bool combat_commit_pending_attack();
 void combat_take_pending_snapshot(Attack* out, bool* outCallDisplay);
 bool combat_commit_snapshot(const Attack* snap, bool callDisplay);
 bool combat_late_lethal_upgrade(Attack* attack);
+bool combat_attack_is_slave_capture(const Attack* attack);
 int combat_called_shot_pick(Object* critter, int hitMode, int initialLocation);
 extern int combat_forced_throw_tile;
 char* combat_get_loc_name(Object* critter, int hitLocation);

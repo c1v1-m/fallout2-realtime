@@ -3593,6 +3593,17 @@ int _combat_attack(Object* attacker, Object* defender, int hitMode, int hitLocat
         return -1;
     }
 
+    // A catching blow at a slave-run runaway (slaveRunCapture) is decided here, before the swing's animations
+    // are registered from these results: no damage and no critical's knockdown. A kick's crit knocked one into a
+    // real fall, the realtime stood it up again a second later, and it ran on (self-played run 2026-10-31).
+    if (combat_attack_is_slave_capture(&_main_ctd)) {
+        _main_ctd.defenderDamage = 0;
+        _main_ctd.defenderFlags &= ~(DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_CRIP | DAM_DEAD | DAM_BLIND
+            | DAM_ON_FIRE | DAM_LOSE_TURN | DAM_DROP | DAM_EXPLODE | DAM_DESTROY | DAM_BACKWASH | DAM_LOSE_AMMO
+            | DAM_RANDOM_HIT | DAM_CRITICAL);
+        _main_ctd.defenderKnockback = 0;
+    }
+
     if (_gcsd != nullptr) {
         _main_ctd.defenderDamage += _gcsd->damageBonus;
 
@@ -5554,6 +5565,65 @@ void combat_clear_pending_attack()
     _combat_turn_running = 0;
 }
 
+// ⚠️ THE PLAYER CATCHES A RUNAWAY THE WAY THE SLAVERS DO (Fallout 2 Realtime 2026-10-31, the Den's slave run:
+// "nemůžu je prostě přitom huntu taky lovit? že bych je prostě omračoval melee a bez zbraně?"). The slavers'
+// club does not hurt a runaway: dcRnSlvr plays its swing and sets the runaway's own timer with param 5, and
+// dcRunSlv's timed_event_p_proc then drops it (anim 48/49; its critter_injure(self, 2) is masked to nothing) --
+// lying in that pose for good, which is what "caught" is in these scripts (the pay counts the living runaways,
+// caught or not). A hit of the player's with a fist, a kick or a melee weapon on a runaway now does the drop,
+// and nothing else: no damage, no grudge (so it does not fight back and the slavers do not take it for an enemy).
+//
+// The player's fist, kick or club at a slave-run runaway still on its feet, hit or miss. combat_rt asks it before
+// the hit's reactions are chosen: a catching blow plays no flinch -- the flinch took the body, the script's fall
+// never played, and the runaway ran on with "You knock … down." on the screen (trace 2026-10-31_191119 s=132).
+bool combat_attack_is_slave_capture(const Attack* attack)
+{
+    Object* defender = attack->defender;
+    if (!combat_rt_enabled() || attack->attacker != gDude || defender == nullptr
+        || !scriptIsSlaveRunaway(defender) || scriptSlaveRunawayDown(defender)) {
+        return false;
+    }
+    int attackType = weaponGetAttackTypeForHitMode(attack->weapon, attack->hitMode);
+    return attackType == ATTACK_TYPE_UNARMED || attackType == ATTACK_TYPE_MELEE;
+}
+
+// A miss makes no enemy either: before, a missed kick set its whoHitMe to the player, and it came back at him.
+static bool slaveRunCapture(Attack* attack)
+{
+    if (!combat_attack_is_slave_capture(attack)) {
+        return false;
+    }
+
+    Object* defender = attack->defender;
+    bool hit = (attack->attackerFlags & DAM_HIT) != 0;
+    if (hit) {
+        // The club's drop itself, as dcRunSlv's timed_event_p_proc(5) does it: whatever it was doing stops and it
+        // lies down in the fall pose (critter_state reads that pose as PRONE, so it runs no more). Played here,
+        // not through that timer: the script refuses in a fight (combat_is_initialized), and a fight is usually on
+        // -- in the self-played run one runaway took 37 such blows with the armed tribals still up and never fell.
+        reg_anim_clear(defender);
+        reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+        animationRegisterAnimate(defender, randomBetween(0, 1) == 1 ? ANIM_FALL_BACK_SF : ANIM_FALL_FRONT_SF, -1);
+        reg_anim_end();
+    }
+
+    if (gDude->data.critter.combat.whoHitMe == defender) {
+        gDude->data.critter.combat.whoHitMe = nullptr;
+    }
+    if (defender->data.critter.combat.whoHitMe == gDude) {
+        defender->data.critter.combat.whoHitMe = nullptr;
+    }
+
+    if (hit) {
+        char text[160];
+        snprintf(text, sizeof(text), "You knock %s down.", objectGetName(defender));
+        displayMonitorAddMessage(text);
+    }
+    trace_event(TRACE_FLOW, "slave-capture", "id=%d pid=%d mode=%d hit=%d", defender->id, defender->pid,
+        attack->hitMode, hit ? 1 : 0);
+    return true;
+}
+
 // Commits the pending attack's damage immediately -- the same ammo / display / _apply_damage /
 // _scr_end_combat cleanup _combat_anim_finished runs when _combat_turn_running drains to 0 -- and
 // returns true if there was one to commit. Realtime keeps the warm bit set continuously, so that
@@ -5578,6 +5648,17 @@ bool combat_commit_pending_attack()
                 _intface_update_ammo_lights();
             }
         }
+    }
+
+    // A slave-run runaway struck with a fist or a club: caught, and nothing else of the hit happens (a miss still
+    // says so).
+    if (slaveRunCapture(&_main_ctd)) {
+        if (_combat_call_display && (_main_ctd.attackerFlags & DAM_HIT) == 0) {
+            _combat_display(&_main_ctd);
+        }
+        _combat_call_display = false;
+        attackInit(&_main_ctd, _main_ctd.attacker, nullptr, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
+        return true;
     }
 
     if (_combat_call_display) {

@@ -208,6 +208,10 @@ int scriptsSkipGameGlobalVars(File* stream);
 int scriptSaveAll(File* stream);
 int scriptLoadAll(File* stream);
 int scriptGetScript(int sid, Script** script);
+
+// The Den's slave run: is this critter one of its runaways (script dcRunSlv)?
+bool scriptIsSlaveRunaway(Object* critter);
+bool scriptSlaveRunawayDown(Object* critter);
 int scriptAdd(int* sidPtr, int scriptType);
 int scriptRemove(int index);
 int _scr_remove_all();

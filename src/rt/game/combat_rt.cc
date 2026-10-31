@@ -6458,6 +6458,13 @@ static Object* rt_guard_danger_source(Object* guard)
         if (attacker->data.critter.combat.team == team) {
             continue; // an inside scuffle -- not ours to police
         }
+#if FALLOUT_RT_GAME == 2
+        // The player going after a slave-run runaway is the hunt, not a fight (slaveRunCapture, combat.cc): his
+        // fellow slavers must not take it for an enemy and cut it down while he catches it.
+        if (victim == obj_dude && !rt_is_hostile(attacker) && scriptIsSlaveRunaway(attacker)) {
+            continue;
+        }
+#endif
 
         // ⚠️ SEEING ITS OWN FIGHTING IS ENOUGH (2026-10-15, his call after the Skum Pitt ambush: "udělej
         // to tedy"). The test used to be "can it see the ATTACKER", and two Skulz walking away from
@@ -20564,6 +20571,15 @@ void combat_rt_update(float dt)
             if (combat_late_lethal_upgrade(&f->ctd)) {
                 heavyReaction = true;
             }
+#if FALLOUT_RT_GAME == 2
+            // The player catching a slave-run runaway (combat.cc slaveRunCapture): no damage and no reaction of
+            // ours -- the runaway's own script plays its fall, and a flinch here would take the body first.
+            if (combat_attack_is_slave_capture(&f->ctd)) {
+                f->ctd.defenderDamage = 0;
+                f->ctd.defenderFlags = 0;
+                heavyReaction = false;
+            }
+#endif
 
             // Capture before the commit + slot-compaction below invalidate f, so the
             // decoupled hit-react (E) can fire from the right attacker/defender/result.

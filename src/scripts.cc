@@ -721,27 +721,71 @@ static bool scriptIsProgram(Script* script, const char* name)
     return compat_strnicmp(base, name, len) == 0 && (base[len] == '.' || base[len] == '\0');
 }
 
-// ⚠️ THE SLAVE RUN'S RUNAWAYS STOP RUNNING FROM YOU ONCE THE ARMED ONES ARE DOWN (Fallout 2 Realtime 2026-10-31,
-// "proč nechytají zbytek? … co když hráč udělá stejnou věc jako já?", his pick "Neutíkají před tebou"). The
-// slavers club the runaways one at a time (dcRnSlvr walks to the one that put itself up as club_slave_object),
-// but dcRunSlv's critter_p_proc runs from the player whenever he is within 8 tiles or in its sight -- so with him
-// anywhere near, the slaver chased the next one round the camp and never caught it: 3 of 11 in his run, then
-// "Kickass." and the slavers came back to him with eight still loose. Vanilla does the same; a player standing
-// by the slavers is the normal case. So once no armed tribal (dcAtkSlv) is standing on his floor, a runaway's
-// heartbeat no longer runs: it cowers where it is, and the slavers come for it.
-static bool slaveRunFightersStanding(int elevation)
+// A runaway of the Den's slave run (dcRunSlv): what the slavers club, and what the player may now catch the same
+// way (see slaveRunCapture, combat.cc).
+bool scriptIsSlaveRunaway(Object* critter)
 {
+    if (critter == nullptr || critter->sid == -1 || PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+        return false;
+    }
+    Script* script;
+    return scriptGetScript(critter->sid, &script) != -1 && scriptIsProgram(script, "dcRunSlv");
+}
+
+// Down, as these scripts mean it (critter_state's PRONE): lying in the fall pose the club leaves, or out cold.
+bool scriptSlaveRunawayDown(Object* critter)
+{
+    if (critterIsDead(critter) || !critterIsActive(critter)) {
+        return true;
+    }
+    int anim = FID_ANIM_TYPE(critter->fid);
+    return anim >= ANIM_FALL_BACK_SF && anim <= ANIM_FALL_FRONT_SF;
+}
+
+// The runaway a slaver is going for: the map script's export club_slave_object (dnslvrun), checked against the
+// floor's objects before it is believed, since it is only a pointer a script wrote.
+static Object* slaveRunClubTarget(Program* program, int elevation)
+{
+    ProgramValue value;
+    if (program == nullptr || externalVariableGetValue(program, "club_slave_object", value) != 0
+        || (value.opcode & VALUE_TYPE_MASK) != (VALUE_TYPE_PTR & VALUE_TYPE_MASK) || value.pointerValue == nullptr) {
+        return nullptr;
+    }
     for (Object* obj = objectFindFirstAtElevation(elevation); obj != nullptr; obj = objectFindNextAtElevation()) {
-        if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER || obj->sid == -1 || critterIsDead(obj)
-            || (obj->data.critter.combat.results & DAM_KNOCKED_OUT) != 0) {
-            continue;
-        }
-        Script* script;
-        if (scriptGetScript(obj->sid, &script) != -1 && scriptIsProgram(script, "dcAtkSlv")) {
-            return true;
+        if (obj == value.pointerValue) {
+            return obj;
         }
     }
-    return false;
+    return nullptr;
+}
+
+// ⚠️ THE SLAVE RUN'S HUNT, MADE CATCHABLE (Fallout 2 Realtime 2026-10-31, "proč nechytají zbytek?", then "to by zase
+// museli začít utíkat … a musel bys opravit to že je přestanou … lovit"). The slavers club one runaway at a time:
+// the one that put itself up as club_slave_object (dcRunSlv map_update_p_proc), and only when it and the slaver
+// both stand still. But a runaway runs from the player on every heartbeat while he is within 8 tiles or in its
+// sight, so with him anywhere near, the slaver ran after it round the camp and never landed the blow -- and the
+// next one put itself up only at the next map update, up to 30 s later. The runaways still run from him (he can
+// hunt them himself now, slaveRunCapture). Two things change, both through the scripts' own code:
+//   - the one the slaver is coming for cowers instead of running (its heartbeat waits), so the blow lands;
+//   - when nobody is up -- no claim, or the one claimed is down -- a runaway's heartbeat runs its own
+//     map_update_p_proc, which is exactly vanilla's claim, so the next one is up at once instead of in 30 s.
+// Returns the proc this runaway's heartbeat should run, or -1 to let this beat pass.
+static int slaveRunHeartbeatProc(Script* script)
+{
+    Object* self = script->owner;
+    if (self == nullptr || scriptSlaveRunawayDown(self)) {
+        return SCRIPT_PROC_CRITTER;
+    }
+    Object* target = slaveRunClubTarget(script->program, self->elevation);
+    if (target == self) {
+        return -1;
+    }
+    if (target == nullptr || scriptSlaveRunawayDown(target)) {
+        trace_event(TRACE_FLOW, "slave-run-claim", "id=%d prev=%d prevDown=%d", self->id,
+            target != nullptr ? target->id : -1, target != nullptr ? 1 : 0);
+        return SCRIPT_PROC_MAP_UPDATE;
+    }
+    return SCRIPT_PROC_CRITTER;
 }
 
 // 0x4A3CA0
@@ -800,9 +844,10 @@ static void _script_chk_critters()
                 Script* script = &(scriptListExtent->scripts[scriptIndex]);
                 // ...and not for a critter that is itself in the fight (combat_rt_critter_fighting):
                 // vanilla gave no fighter a heartbeat, and its errands would pull it out of the fight.
-                bool cowers = combat_rt_enabled() && script->owner != nullptr && scriptIsProgram(script, "dcRunSlv")
-                    && !slaveRunFightersStanding(script->owner->elevation);
-                if (!combat_rt_critter_fighting(script->owner) && !cowers) {
+                if (combat_rt_enabled() && scriptIsProgram(script, "dcRunSlv")) {
+                    proc = slaveRunHeartbeatProc(script);
+                }
+                if (proc != -1 && !combat_rt_critter_fighting(script->owner)) {
                     scriptExecProc(script->sid, proc);
                 }
             }
