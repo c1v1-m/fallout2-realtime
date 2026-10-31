@@ -705,6 +705,45 @@ static void _doBkProcesses()
     }
 }
 
+// Is this script the program `name` (e.g. "dcRunSlv")? Program names carry their folder and extension.
+static bool scriptIsProgram(Script* script, const char* name)
+{
+    if (script == nullptr || script->program == nullptr || script->program->name == nullptr) {
+        return false;
+    }
+    const char* base = script->program->name;
+    for (const char* p = base; *p != '\0'; p++) {
+        if (*p == '\\' || *p == '/') {
+            base = p + 1;
+        }
+    }
+    size_t len = strlen(name);
+    return compat_strnicmp(base, name, len) == 0 && (base[len] == '.' || base[len] == '\0');
+}
+
+// ⚠️ THE SLAVE RUN'S RUNAWAYS STOP RUNNING FROM YOU ONCE THE ARMED ONES ARE DOWN (Fallout 2 Realtime 2026-10-31,
+// "proč nechytají zbytek? … co když hráč udělá stejnou věc jako já?", his pick "Neutíkají před tebou"). The
+// slavers club the runaways one at a time (dcRnSlvr walks to the one that put itself up as club_slave_object),
+// but dcRunSlv's critter_p_proc runs from the player whenever he is within 8 tiles or in its sight -- so with him
+// anywhere near, the slaver chased the next one round the camp and never caught it: 3 of 11 in his run, then
+// "Kickass." and the slavers came back to him with eight still loose. Vanilla does the same; a player standing
+// by the slavers is the normal case. So once no armed tribal (dcAtkSlv) is standing on his floor, a runaway's
+// heartbeat no longer runs: it cowers where it is, and the slavers come for it.
+static bool slaveRunFightersStanding(int elevation)
+{
+    for (Object* obj = objectFindFirstAtElevation(elevation); obj != nullptr; obj = objectFindNextAtElevation()) {
+        if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER || obj->sid == -1 || critterIsDead(obj)
+            || (obj->data.critter.combat.results & DAM_KNOCKED_OUT) != 0) {
+            continue;
+        }
+        Script* script;
+        if (scriptGetScript(obj->sid, &script) != -1 && scriptIsProgram(script, "dcAtkSlv")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x4A3CA0
 static void _script_chk_critters()
 {
@@ -761,7 +800,9 @@ static void _script_chk_critters()
                 Script* script = &(scriptListExtent->scripts[scriptIndex]);
                 // ...and not for a critter that is itself in the fight (combat_rt_critter_fighting):
                 // vanilla gave no fighter a heartbeat, and its errands would pull it out of the fight.
-                if (!combat_rt_critter_fighting(script->owner)) {
+                bool cowers = combat_rt_enabled() && script->owner != nullptr && scriptIsProgram(script, "dcRunSlv")
+                    && !slaveRunFightersStanding(script->owner->elevation);
+                if (!combat_rt_critter_fighting(script->owner) && !cowers) {
                     scriptExecProc(script->sid, proc);
                 }
             }
