@@ -1,0 +1,18 @@
+# F2 (2026-10-31, the slave run): the last hostile still fighting is knocked down. The fight must stay on while it
+# lies there (no combat-exit), so its critter script gets no heartbeat -- dcAtkSlv's floated a new threat five
+# times a second over the body on the ground. A raider after the dude, knocked down at 5 s.
+name m-knocked-down-fight
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 15100 rot 2
+dude hp 400
+
+spawn 16777454 15700 rot 5 wield 8 item 29 4 hostile
+sethp 16777454 90 5 knock
+
+at 0 idle
+
+expect combat-enter\]
+expect react\] .*none->falling why=knockdown
+expect-not combat-exit\]

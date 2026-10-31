@@ -20792,6 +20792,20 @@ void combat_rt_update(float dt)
             engaged = true;
             break;
         }
+        // ⚠️ A HOSTILE KNOCKED DOWN IS STILL IN THE FIGHT (Fallout 2 Realtime 2026-10-31, the slave run: "přišla mi
+        // broken"). The last tribal fighting went down to a kick, its FSM dropped to IDLE on the ground, and the
+        // fight ended under it. Out of a fight its heartbeat ran again -- dcAtkSlv's critter_p_proc floats a
+        // threat and calls attack(dude), which a body on the ground cannot make -- so a new line popped over it
+        // five times a second until it was dead. In vanilla the fight goes on while a combatant lies knocked
+        // down, and no fighter gets a heartbeat. Only DOWN, and only to keep a fight that is on: an unconscious
+        // body (knocked OUT) ends a fight in vanilla too, and the slave run's capture runs on those.
+        Object* c = rt_actors[i].obj;
+        if (rt_engaged && rt_actors[i].hostile && c != NULL && rt_is_critter(c)
+            && (c->data.critter.combat.results & DAM_KNOCKED_DOWN) != 0
+            && (c->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) == 0) {
+            engaged = true;
+            break;
+        }
     }
 
     if (engaged != rt_engaged) {
