@@ -247,6 +247,12 @@ void combat_rt_notify_victim(Object* attacker, Object* victim);
 // remembers it until the fight ends, because damageLastTurn itself is zeroed at every script turn.
 void combat_rt_note_hurt(Object* critter);
 
+// Fallout 2: an encounter's two groups are set on each other (_caiSetupTeamCombat, from wmSetupRandomEncounter).
+// combat_rt keeps the two teams for this map, writes them into the save, and combat_rt_rearm_team_fight -- run
+// once a load is complete -- sets them on each other again, since nothing else in a save keeps that set-up.
+void combat_rt_note_team_fight(Object* attackerTeam, Object* defenderTeam);
+void combat_rt_rearm_team_fight();
+
 // Hook from obj_remove_all() (object.cc) right before a map teardown frees every object.
 // Abandons any in-flight realtime attack and drops all object pointers combat_rt holds
 // (rt_resolving, the actor registry, lock/intent/loot, the engine's pending main_ctd) so a

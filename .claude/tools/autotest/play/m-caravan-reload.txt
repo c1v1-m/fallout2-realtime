@@ -1,0 +1,15 @@
+# F2 (2026-10-31): load m-caravan-save's quick save. The caravan and the radscorpions must be set on each other
+# again (team-fight-rearm, then the team set-up pairs them) and the caravan must shoot scorpions -- before RTTF
+# the load brought them back as bystanders, each side waiting for the other.
+name m-caravan-reload
+map DESERT1.MAP
+loadslot 1
+seed 1
+duration 30
+
+note 28000 end
+
+expect team-fight-load\] map=0 cur=0 elev=0 atkTeam=\d+ defTeam=\d+ apply=1
+expect team-fight-rearm\] map=0 elev=0
+expect team-combat\] atkTeam=\d+ defTeam=\d+ critters=\d+ paired=([5-9]|1\d)
+expect COMBAT/hit\] att=\d+ attPid=(16777262|16777274) def=\d+ defPid=16777222

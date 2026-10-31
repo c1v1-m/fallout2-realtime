@@ -1834,6 +1834,9 @@ int _caiSetupTeamCombat(Object* attackerTeam, Object* defenderTeam)
     _attackerTeamObj = attackerTeam;
     _targetTeamObj = defenderTeam;
 
+    // Realtime keeps which two teams these are, so a save made before the fight starts carries it.
+    combat_rt_note_team_fight(attackerTeam, defenderTeam);
+
     return 0;
 }
 
@@ -1899,7 +1902,29 @@ int aiTeamCombatInitAtElevation(int elevation)
     if (ownList) {
         _combat_ai_begin(count, critters);
     }
+
+    // ⚠️ ...BUT NOT OVER A FIGHT WITH THE PLAYER (review 2026-10-31). After a load the realtime save chunk has
+    // already given back whoHitMe = the dude to everyone who was fighting him (RTFH), and the re-armed team fight
+    // (combat_rt_rearm_team_fight) comes straight after: the nearest critter of the other group must not take
+    // him out of that fight. On a first visit nobody has him there yet.
+    bool* keptDude = count > 0 ? (bool*)internal_malloc(sizeof(bool) * count) : nullptr;
+    if (keptDude != nullptr) {
+        for (int index = 0; index < count; index++) {
+            keptDude[index] = critters[index]->data.critter.combat.whoHitMe == gDude;
+        }
+    }
+
     _caiTeamCombatInit(critters, count);
+
+    if (keptDude != nullptr) {
+        for (int index = 0; index < count; index++) {
+            if (keptDude[index]) {
+                critters[index]->data.critter.combat.whoHitMe = gDude;
+            }
+        }
+        internal_free(keptDude);
+    }
+
     if (ownList) {
         _combat_ai_over();
     }

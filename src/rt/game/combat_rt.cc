@@ -6807,6 +6807,26 @@ typedef struct RtFightRestore {
 static RtFightRestore rt_fight_restore[RT_MAX_ACTORS];
 static int rt_fight_restore_count = 0;
 
+// ⚠️ AN ENCOUNTER'S TEAM FIGHT RIDES IN THE SAVE (Fallout 2 Realtime 2026-10-31, "Proč ti borci na mě jen
+// koukají? Nemají se taky přidat do potičky?"). wmSetupRandomEncounter sets an encounter's two groups on each
+// other when it places them -- a whoHitMe pair, the two teams for _caiSetupTeamCombat, a combat request --
+// and a save keeps none of it: the world map even forgets which encounter it was the moment it closes. Our
+// location autosave lands on arrival, one frame before that request is handled, so CONTINUE brought back
+// "a merchant party fending off some radscorpions" with the caravan standing and watching while the
+// scorpions' own scripts went for him. So the two teams are kept here for the map they were set up on
+// (combat_rt_note_team_fight), written as RTTF while both still have someone standing, and set on each other
+// again once a load is complete (combat_rt_rearm_team_fight), the way the first visit set them.
+#define RT_SAVE_TEAMFIGHT_TAG 0x52545446 // 'RTTF'
+#define RT_TEAMFIGHT_BYTES 16 // map, elevation, attacker team, defender team
+typedef struct RtTeamFight {
+    int map; // -1 = none
+    int elevation;
+    int attackerTeam;
+    int defenderTeam;
+} RtTeamFight;
+
+static RtTeamFight rt_team_fight = { -1, -1, -1, -1 };
+
 // ⚠️ THE FLED-ENEMY MEMORY (Fallout 2 Realtime, HIS DESIGN 2026-10-26 -- a deliberate change from vanilla:
 // "když uprostřed boje utečeš z mapy a vrátíš se" -> "Zůstane nepřítel"; vanilla's combat_over forgets the
 // fight on a map exit, and the canyon robot's one-shot KCRob script then stood passive). Leave a map in the
@@ -7134,6 +7154,123 @@ static int rt_fled_section_read(DB_FILE* stream, int len)
     return used;
 }
 
+// Did the save that is being loaded record this critter as fighting the dude (RTFH, not yet taken back)?
+static bool rt_fight_restore_pending(const Object* obj)
+{
+    for (int r = 0; r < rt_fight_restore_count; r++) {
+        if (rt_fight_restore[r].pid == obj->pid && rt_fight_restore[r].id == obj->id
+            && rt_fight_restore[r].elevation == obj->elevation) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The first living member of `team` on `elevation`: not the dude, not one of his party (the encounter's groups
+// never are). Knocked out counts -- it is still a group to fight. `free`: on its feet, and not in a fight with
+// the dude that the load is bringing back (RTFH), so the re-armed pair cannot take it out of that fight.
+static Object* rt_team_fight_member(int team, int elevation, bool free)
+{
+    for (Object* obj = obj_find_first_at(elevation); obj != NULL; obj = obj_find_next_at()) {
+        if (obj == obj_dude || !rt_is_critter(obj) || critter_is_dead(obj) || isPartyMember(obj)
+            || obj->data.critter.combat.team != team) {
+            continue;
+        }
+        if (free && (!rt_is_combatant(obj) || obj->data.critter.combat.whoHitMe == obj_dude
+                || rt_fight_restore_pending(obj))) {
+            continue;
+        }
+        return obj;
+    }
+    return NULL;
+}
+
+void combat_rt_note_team_fight(Object* attackerTeam, Object* defenderTeam)
+{
+    if (!rt_enabled || attackerTeam == NULL || defenderTeam == NULL
+        || attackerTeam == obj_dude || defenderTeam == obj_dude) {
+        return;
+    }
+    rt_team_fight.map = rt_cur_map_index();
+    rt_team_fight.elevation = attackerTeam->elevation;
+    rt_team_fight.attackerTeam = attackerTeam->data.critter.combat.team;
+    rt_team_fight.defenderTeam = defenderTeam->data.critter.combat.team;
+    trace_event(TRACE_FLOW, "team-fight-note", "map=%d elev=%d atkTeam=%d defTeam=%d",
+        rt_team_fight.map, rt_team_fight.elevation, rt_team_fight.attackerTeam, rt_team_fight.defenderTeam);
+}
+
+// Worth keeping in a save: set up on this map, and both groups still have someone standing.
+static bool rt_team_fight_live()
+{
+    return rt_team_fight.map != -1 && rt_team_fight.map == rt_cur_map_index()
+        && rt_team_fight.attackerTeam != rt_team_fight.defenderTeam
+        && rt_team_fight_member(rt_team_fight.attackerTeam, rt_team_fight.elevation, false) != NULL
+        && rt_team_fight_member(rt_team_fight.defenderTeam, rt_team_fight.elevation, false) != NULL;
+}
+
+// RTTF at load: the two teams, kept for the map the save is on.
+static int rt_team_fight_section_read(DB_FILE* stream, int len)
+{
+    if (len < RT_TEAMFIGHT_BYTES) {
+        return 0;
+    }
+    RtTeamFight tf;
+    if (!rt_save_read_int(stream, &tf.map) || !rt_save_read_int(stream, &tf.elevation)
+        || !rt_save_read_int(stream, &tf.attackerTeam) || !rt_save_read_int(stream, &tf.defenderTeam)) {
+        return -1;
+    }
+    bool apply = tf.map == rt_cur_map_index() && tf.elevation >= 0 && tf.elevation < RT_SAVE_ELEVATIONS;
+    if (apply) {
+        rt_team_fight = tf;
+    }
+    trace_event(TRACE_STATE, "team-fight-load", "map=%d cur=%d elev=%d atkTeam=%d defTeam=%d apply=%d",
+        tf.map, rt_cur_map_index(), tf.elevation, tf.attackerTeam, tf.defenderTeam, apply ? 1 : 0);
+    return RT_TEAMFIGHT_BYTES;
+}
+
+void combat_rt_rearm_team_fight()
+{
+#if FALLOUT_RT_GAME == 2
+    if (!rt_enabled || isInCombat() || !rt_team_fight_live()) {
+        return;
+    }
+
+    int elevation = rt_team_fight.elevation;
+
+    // The team set-up itself, at once: every member of each group gets the nearest of the other, as the first
+    // visit's _combat_begin gave them -- except whoever the save brought back fighting the dude, who keeps him
+    // (aiTeamCombatInitAtElevation). Done here, not left to the combat request below, so the set-up does not
+    // hang on that request being handled (review 2026-10-31).
+    Object* attacker = rt_team_fight_member(rt_team_fight.attackerTeam, elevation, false);
+    Object* defender = rt_team_fight_member(rt_team_fight.defenderTeam, elevation, false);
+    _caiSetupTeamCombat(attacker, defender);
+    int count = aiTeamCombatInitAtElevation(elevation);
+
+    // ...and the locked combat request the first visit made, between two members that are free -- on their feet
+    // and not in the dude's fight. It is what keeps a critter script's attack(dude) out on the first frame
+    // (_scripts_request_combat_locked), before the registry has put the groups in each other's way. No free
+    // pair: the fight with the dude is what the load brings back, and the request is not needed.
+    Object* first = rt_team_fight_member(rt_team_fight.defenderTeam, elevation, true);
+    Object* second = rt_team_fight_member(rt_team_fight.attackerTeam, elevation, true);
+    if (first != NULL && second != NULL) {
+        CombatStartData combat;
+        combat.attacker = first;
+        combat.defender = second;
+        combat.actionPointsBonus = 0;
+        combat.accuracyBonus = 0;
+        combat.damageBonus = 0;
+        combat.minDamage = 0;
+        combat.maxDamage = 500;
+        combat.overrideAttackResults = 0;
+        _scripts_request_combat_locked(&combat);
+    }
+
+    trace_event(TRACE_FLOW, "team-fight-rearm", "map=%d elev=%d critters=%d request=%d a=%d b=%d restores=%d",
+        rt_team_fight.map, elevation, count, first != NULL && second != NULL ? 1 : 0,
+        first != NULL ? first->id : -1, second != NULL ? second->id : -1, rt_fight_restore_count);
+#endif
+}
+
 int combat_rt_medic_optout_save(DB_FILE* stream)
 {
     if (db_fwriteInt(stream, rt_medic_optout_count) == -1) {
@@ -7215,6 +7352,22 @@ int combat_rt_medic_optout_save(DB_FILE* stream)
     }
     trace_event(TRACE_STATE, "fled-save", "n=%d", rt_fled_count);
 
+    // (C) RTTF -- an encounter's two groups set on each other, while both still stand. Only then: an older
+    // build skips the section it does not know by its length, and one that has none is no fight to re-arm.
+    if (rt_team_fight_live()) {
+        if (db_fwriteInt(stream, RT_SAVE_TEAMFIGHT_TAG) == -1
+            || db_fwriteInt(stream, RT_SAVE_SECTION_VERSION) == -1
+            || db_fwriteInt(stream, RT_TEAMFIGHT_BYTES) == -1
+            || db_fwriteInt(stream, rt_team_fight.map) == -1
+            || db_fwriteInt(stream, rt_team_fight.elevation) == -1
+            || db_fwriteInt(stream, rt_team_fight.attackerTeam) == -1
+            || db_fwriteInt(stream, rt_team_fight.defenderTeam) == -1) {
+            return -1;
+        }
+        trace_event(TRACE_STATE, "team-fight-save", "map=%d elev=%d atkTeam=%d defTeam=%d", rt_team_fight.map,
+            rt_team_fight.elevation, rt_team_fight.attackerTeam, rt_team_fight.defenderTeam);
+    }
+
     // The end of the sections: a loader stops here, even if a handler is ever appended behind this one.
     if (db_fwriteInt(stream, RT_SAVE_END_TAG) == -1
         || db_fwriteInt(stream, RT_SAVE_SECTION_VERSION) == -1
@@ -7236,6 +7389,7 @@ int combat_rt_medic_optout_load(DB_FILE* stream)
     // own teardown runs after PrepLoad's reset) may outlive it.
     rt_fight_restore_count = 0;
     rt_fled_count = 0;
+    rt_team_fight.map = -1;
 
     int count;
     if (!rt_save_read_int(stream, &count)) {
@@ -7315,6 +7469,8 @@ int combat_rt_medic_optout_load(DB_FILE* stream)
                 used = rt_fight_section_read(stream, secLen);
             } else if (secTag == RT_SAVE_FLED_TAG) {
                 used = rt_fled_section_read(stream, secLen);
+            } else if (secTag == RT_SAVE_TEAMFIGHT_TAG) {
+                used = rt_team_fight_section_read(stream, secLen);
             }
         }
         if (used < 0 || !rt_save_skip(stream, secLen - used)) {
@@ -15953,6 +16109,8 @@ static void rt_abandon_encounter()
     // survive exactly these teardowns.
     rt_fight_restore_count = 0;
     rt_lost_memory_count = 0; // pointers only: the bodies are being freed by the caller
+    // An encounter's team fight belongs to its map as well (same order: cleared, filled by the chunk, re-armed).
+    rt_team_fight.map = -1;
 }
 
 // Full per-session state reset, shared by init / exit / game-reset so every teardown path

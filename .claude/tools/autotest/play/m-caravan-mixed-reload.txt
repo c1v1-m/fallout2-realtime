@@ -1,0 +1,16 @@
+# F2 (2026-10-31, review of the saved team fight): load m-caravan-mixed-save. The scorpion that was after the dude
+# must come back after the DUDE (its RTFH record taken back, not skipped as an NPC fight), while the rest of the
+# two groups are set on each other again and the caravan shoots scorpions.
+name m-caravan-mixed-reload
+map DESERT1.MAP
+loadslot 1
+seed 1
+duration 25
+
+note 23000 end
+
+expect team-fight-rearm\] map=0 elev=0 critters=\d+ request=1
+expect fight-restore\] id=\d+ pid=16777222
+expect-not fight-restore-skip\] .*why=npc-fight
+expect COMBAT/hit\] att=\d+ attPid=(16777262|16777274) def=\d+ defPid=16777222
+expect COMBAT/attack\] NPC aid=\d+ ->pid=16777216

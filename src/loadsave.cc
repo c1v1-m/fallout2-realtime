@@ -2182,6 +2182,9 @@ static int lsgLoadGameInSlot(int slot)
     debugPrint("LOADSAVE: Total load data read: %ld bytes.\n", fileTell(_flptr));
     fileClose(_flptr);
 
+    // Every handler is in: the map's critters and the realtime chunk with its record of an encounter's team fight.
+    combat_rt_rearm_team_fight();
+
     // SFALL: Load sfallgv.sav.
     snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
     strcat(_gmpath, "sfallgv.sav");

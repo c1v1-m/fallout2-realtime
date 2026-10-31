@@ -1,0 +1,28 @@
+# F2 (2026-10-31, review of the saved team fight): the caravan-vs-radscorpions arena, plus one radscorpion of the
+# same team already after the dude, and a quick save while both are going on. The save must hold both the fight
+# with the dude (RTFH) and the team fight (RTTF); m-caravan-mixed-reload loads it.
+name m-caravan-mixed-save
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 15100 rot 2
+dude hp 400
+
+spawn 16777262 21110 rot 2 wield 10 team 92
+spawn 16777262 21114 rot 2 wield 10 team 92
+spawn 16777274 21312 rot 2 wield 9 team 92
+spawn 16777222 23106 rot 5 team 123
+spawn 16777222 23110 rot 5 team 123
+spawn 16777222 23114 rot 5 team 123
+spawn 16777222 23506 rot 5 team 123
+spawn 16777222 23512 rot 5 team 123
+spawn 16777222 15700 rot 2 hostile team 123
+teamfight 123 92
+
+pad 4500 start 1
+pad 5500 start 0
+note 10000 saved
+
+expect fight-save\] map=0 elev=0 n=[1-9]
+expect team-fight-save\] map=0 elev=0
+expect save-slot\] slot=1 desc=Quick Save rc=0
