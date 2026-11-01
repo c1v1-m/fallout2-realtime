@@ -1,0 +1,21 @@
+# F2 (2026-11-01, review of the scene-lock fixes): the clock jumping under a scene's lock is not time held.
+# Davin's and Miria's bedroom scenes in Modoc game_time_advance to noon right after their game_ui_disable;
+# a watchdog reading game_time() minus a stamp took that for hours held and let go on the next frame. Here
+# GAMMOVIE plays with the stick pushed away, and six hours jump in the middle: the lock must hold to the
+# script's own game_ui_enable, and the dude must still be walked in.
+name m-gammovie-clock
+map GAMMOVIE.MAP
+mapscript on
+seed 1
+duration 40
+dude tile 24916 rot 0
+
+axis 300 LY 32767
+clock 6000 6
+note 38000 end
+
+expect script-ui-lock\] on=1 fresh=1
+expect DUDE pid=16777216 tile=22307
+expect Kill them all
+expect script-ui-lock\] on=0 fresh=0
+expect-not script-ui-lock-release

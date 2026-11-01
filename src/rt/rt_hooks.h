@@ -66,6 +66,7 @@ bool anim_get_smooth_motion();
 void anim_set_smooth_motion(bool on);
 void anim_smooth_tick();
 void anim_smooth_reset();
+unsigned int anim_dude_reg_serial();
 typedef struct AnimSmoothStats {
     int pathSearches;
     double pathMs;

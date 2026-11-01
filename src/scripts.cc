@@ -1021,6 +1021,9 @@ int scriptEventProcess(Object* obj, void* data)
 
     script->fixedParam = scriptEvent->fixedParam;
 
+    // Realtime: a scene under a script's UI lock is still going (its idle watchdog).
+    combat_rt_note_scene_progress();
+
     scriptExecProc(scriptEvent->sid, SCRIPT_PROC_TIMED);
 
     return 0;

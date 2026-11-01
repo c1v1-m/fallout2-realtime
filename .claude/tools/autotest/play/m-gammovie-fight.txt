@@ -1,0 +1,16 @@
+# F2 (2026-11-01, his „oprav všech 5“, hole 3): a fight ends a script's scene lock, as vanilla's dude turn did.
+# GAMMOVIE with a hostile gecko coming at the dude while the scene holds him: the lock must be released
+# (threat or hit) and the bot must then fight back, not stand frozen and bitten.
+name m-gammovie-fight
+map GAMMOVIE.MAP
+mapscript on
+seed 1
+duration 30
+dude tile 24916 rot 0
+spawn 16777296 25520 rot 5 hostile team 50
+
+at 0 fight
+
+expect FLOW/script-ui-lock\] on=1 fresh=1
+expect script-ui-lock-release\] why=(threat|hit|fight)
+expect COMBAT/attack] DUDE aid=18000

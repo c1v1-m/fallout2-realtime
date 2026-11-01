@@ -3234,6 +3234,8 @@ static void opFloatMessage(Program* program)
     if (string != nullptr && *string != '\0') {
         trace_event(TRACE_STATE, "float", "prog=%s pid=%d id=%d text=%.80s", program != nullptr && program->name != nullptr ? program->name : "?",
             obj->pid, obj->id, string);
+        // Realtime: a scene under a script's UI lock is still going (its idle watchdog).
+        combat_rt_note_scene_progress();
     }
 
     if (string == nullptr || *string == '\0') {
@@ -4283,9 +4285,10 @@ static void opObjectClose(Program* program)
 // 0x45B3D0
 static void opGameUiDisable(Program* program)
 {
-    gameUiDisable(0);
     // Realtime: the pad, the stick and the follow camera stand aside too (combat_rt_script_ui_locked).
+    // Told first, so it can see whether the UI was still on (a fresh lock).
     combat_rt_note_script_ui_lock(true);
+    gameUiDisable(0);
 }
 
 // game_ui_enable
@@ -4311,6 +4314,7 @@ static void opGameFadeOut(Program* program)
 
     if (data != 0) {
         paletteFadeTo(gPaletteBlack);
+        combat_rt_note_script_fade(true);
     } else {
         scriptPredefinedError(program, "gfade_out", SCRIPT_ERROR_OBJECT_IS_NULL);
     }
@@ -4324,6 +4328,7 @@ static void opGameFadeIn(Program* program)
 
     if (data != 0) {
         paletteFadeTo(_cmap);
+        combat_rt_note_script_fade(false);
     } else {
         scriptPredefinedError(program, "gfade_in", SCRIPT_ERROR_OBJECT_IS_NULL);
     }

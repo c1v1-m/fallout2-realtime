@@ -5074,7 +5074,7 @@ static void _damage_object(Object* a1, int damage, bool animated, int a4, Object
     }
 
     a1->data.critter.combat.damageLastTurn += damage;
-    combat_rt_note_hurt(a1);
+    combat_rt_note_hurt(a1, a5);
 
     if (!a4) {
         // TODO: Not sure about this one.

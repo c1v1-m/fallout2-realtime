@@ -3955,9 +3955,11 @@ static void gpui_run_to_exit()
         pc_flag_off(PC_FLAG_SNEAKING);
     }
 
+    unsigned int serialBefore = anim_dude_reg_serial();
     register_begin(ANIMATION_REQUEST_RESERVED);
     register_object_run_to_tile(obj_dude, best->tile, obj_dude->elevation, -1, 0);
     int rc = register_end();
+    combat_rt_note_player_walk(serialBefore); // a script's scene that begins on the way stops it
 
     trace_event(TRACE_ACTION, "exit-nav", "tile=%d dist=%d rc=%d", best->tile, bestDist, rc);
 
@@ -4291,7 +4293,11 @@ static void gpui_qt_tick()
         return;
     }
     case GPUI_QT_DRAWING:
-        if (anim_busy(obj_dude) == 0 || elapsed_time(gpui_qt_since) > 1500) {
+        // A screen -- or a script's scene, which turns the bar off -- ends it here too, as in READY:
+        // a throw tapped a moment before must not fly under the scene.
+        if (screenUp) {
+            gpui_qt_set(GPUI_QT_RESTORE);
+        } else if (anim_busy(obj_dude) == 0 || elapsed_time(gpui_qt_since) > 1500) {
             gpui_qt_set(gpui_qt_release_seen ? GPUI_QT_THROW_REQ : GPUI_QT_READY);
         }
         return;
@@ -4307,6 +4313,10 @@ static void gpui_qt_tick()
         }
         return;
     case GPUI_QT_THROW_REQ: {
+        if (screenUp) {
+            gpui_qt_set(GPUI_QT_RESTORE);
+            return;
+        }
         Object* inHand = gpui_qt_hand_item();
         Object* target = inHand != NULL && inHand->pid == gpui_qt_pid ? combat_rt_quick_throw_target() : NULL;
         if (target == NULL) {
@@ -4326,6 +4336,13 @@ static void gpui_qt_tick()
         }
         return;
     case GPUI_QT_RESTORE: {
+        // Not under a script's scene: the swap back clears the dude's animations (the scene's own walk
+        // with them), and vanilla never animates a wield with the UI off. The wait for a free body
+        // starts again once the scene lets go.
+        if (combat_rt_script_ui_locked()) {
+            gpui_qt_since = get_time();
+            return;
+        }
         if (anim_busy(obj_dude) != 0 && elapsed_time(gpui_qt_since) < 2000) {
             return;
         }
@@ -8502,6 +8519,16 @@ static void gpui_trace_buttons(SDL_GameController* pad)
 // a controller -- a keyboard player has none.
 static void gpui_drain_requests()
 {
+    // A heal or a quick slot pressed just before a script's scene began is not carried out under it
+    // (combat_rt_script_ui_locked) -- nor after it, where it would look like the game acting by itself.
+    if (combat_rt_script_ui_locked()) {
+        gpui_heal_pending = false;
+        gpui_qs_use_pending_slot = -1;
+        // ...and a shoulder held through its start: no drug waiting for AP, no chain of jabs.
+        gpui_ap_wait_slot = -1;
+        gpui_heal_chain_end("lock");
+    }
+
     // A jab cut before its frame gives its AP back -- before any new press is judged.
     gpui_inject_tick();
     gpui_heal_chain_tick();

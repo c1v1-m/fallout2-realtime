@@ -6378,6 +6378,8 @@ static bool rt_hurt_this_fight(Object* critter)
     return critter->data.critter.combat.damageLastTurn > 0;
 }
 
+static void rt_script_ui_lock_note_hit();
+
 // The fight is over: nobody has been hurt in the next one yet.
 static void rt_forget_fight_hurts()
 {
@@ -6387,14 +6389,20 @@ static void rt_forget_fight_hurts()
     }
 }
 
-// _damage_object, at the same moment it adds to damageLastTurn: `critter` took damage.
-void combat_rt_note_hurt(Object* critter)
+// _damage_object, at the same moment it adds to damageLastTurn: `critter` took damage from an attack
+// by `attacker`.
+void combat_rt_note_hurt(Object* critter, Object* attacker)
 {
     if (!rt_enabled || critter == NULL) {
         return;
     }
     if (critter == obj_dude) {
         rt_dude_hurt_in_fight = true;
+        // A critter's blow ends a script's lock (rt_script_ui_lock_tick). Trap and script damage do
+        // not come this way.
+        if (attacker != NULL && attacker != obj_dude && FID_TYPE(attacker->fid) == OBJ_TYPE_CRITTER) {
+            rt_script_ui_lock_note_hit();
+        }
         return;
     }
     for (int i = 0; i < rt_actor_count; i++) {
@@ -9615,52 +9623,310 @@ bool combat_rt_cancel_player_action()
 // Horrigan and the farmers, Deck 2026-11-01): the script walks the dude up to the farm and centres
 // the view on it -- he ran about on the stick instead, the camera stayed on him, and the whole scene
 // played out above the screen ("jsem dost pod nimi a nevidím je").
-#define RT_SCRIPT_UI_LOCK_MAX_MS 60000u
+//
+// ⚠️ AND FIVE MORE HOLES, from a read of all 70 vanilla scripts that lock the UI (same day, his „oprav
+// všech 5“), each handled below or where the input is consumed:
+// 1. A lock the ENGINE ends. Mines and pits (CIMine, IIMine, IIPit) disable the UI and leave the enable
+//    to critter_dmg / the explosion. The flag outlived it, so the next scene's disable started nothing
+//    and inherited a stale stamp. A disable over an ENABLED UI now always starts a fresh lock, and a
+//    flag found with the UI on is dropped (rt_script_ui_lock_tick).
+// 2. The watchdog was a minute of wall clock. Valerie and Vic's reunion (VCMainWk) is 135 game seconds
+//    and lost its lock every time; the boxing intro, the Modoc wedding and Father Tully's divorce were
+//    a few seconds short of it, and dialogue or a backgrounded window ate into it. It is GAME time now
+//    -- it stops where the scene's own timers stop -- and 180 s.
+// 3. A fight. Vanilla's dude turn turns the UI on, so in vanilla a fight ends any scene; here timers
+//    run in fights, so a scene could begin or stall mid-fight (the Vault City terminal used in one,
+//    Chris's door while he shoots, Coffin Willie's grave with a chase on, Grisham catching you with
+//    your bag) and hold a defenceless dude for a minute. A threat to the player or a blow from a
+//    critter ends the lock now, and gives back a screen the scene left black.
+// 4. Inputs that never asked: the A loot tap, a mouse click on an enemy, a heal or a quick slot pressed
+//    just before. Each is refused where it is consumed.
+// 5. A death inside a lock left the UI off into the next game (keyboard, world mouse and autosave
+//    dead). combat_rt_reset now has the first frame of the loaded map turn it back on.
+//
+// ⚠️ THE LOCK'S AGE IS SUMMED FROM SMALL STEPS, NOT game_time() MINUS A STAMP. A scene may move the
+// clock itself: Davin's and Miria's bedroom scenes in Modoc jump to noon (game_time_advance, hours)
+// right after their game_ui_disable, and Lee Anne's (nclabish) by minutes, and a plain difference
+// read that as a lock hours old and gave the player back the black screen on the next frame. A jump
+// of more than RT_SCRIPT_UI_LOCK_JUMP_TICKS in one frame is a jump, not time held.
+#define RT_SCRIPT_UI_LOCK_MAX_TICKS 1800u // 180 game seconds held at most
+#define RT_SCRIPT_UI_LOCK_IDLE_TICKS 300u // 30 game seconds with no line and no timer of any script
+#define RT_SCRIPT_UI_LOCK_JUMP_TICKS 20u
 
 static bool rt_script_ui_lock = false;
-static unsigned int rt_script_ui_lock_since = 0;
+static unsigned int rt_script_ui_lock_age = 0; // game ticks held
+static unsigned int rt_script_ui_lock_idle = 0; // game ticks since the last scene progress
+static unsigned int rt_script_ui_lock_last_gt = 0; // game_time() at the last tick
+static bool rt_script_ui_lock_hit = false; // a critter's blow landed on the dude under the lock
+static bool rt_script_ui_lock_saw_fight = false; // a fight was on at some point under the lock
+static bool rt_script_faded = false; // a script's gfade_out with no gfade_in yet
+static bool rt_ui_back_after_reset = false; // combat_rt_reset / a map left: the UI on again next frame
+// A fresh lock owes the player's walk and attack a cut, done once the lock has lasted
+// RT_SCRIPT_UI_LOCK_CUT_TICKS: a trap or a mine that any critter sets off locks for one queue drain,
+// and stopping his run on the plate for that was not vanilla's.
+#define RT_SCRIPT_UI_LOCK_CUT_TICKS 3u
+static bool rt_script_ui_lock_cut_pending = false;
+// A scene let go early (a fight) whose script has not given the UI back itself yet: its step counter is
+// a script variable, not in a save, so no autosave until it ends (combat_rt_scene_pending).
+static bool rt_script_scene_pending = false;
 
-// From op_game_ui_disable / op_game_ui_enable.
+// The player's own walk-then-act (the exit run, the A prompt, a loot tap, a click's walk), by the
+// dude's animation serial right after it was registered (combat_rt_note_player_walk).
+static bool rt_player_walk_set = false;
+static unsigned int rt_player_walk_serial = 0;
+
+static void rt_mouse_forget();
+
+// From op_game_ui_disable (BEFORE the UI goes off, so a fresh lock can be told from a repeat) and
+// op_game_ui_enable.
 void combat_rt_note_script_ui_lock(bool on)
 {
-    if (on && !rt_script_ui_lock && obj_dude != NULL) {
+    // A disable over an ENABLED UI starts a lock, whatever the flag says -- it may be left over from
+    // a lock the engine ended. So does one over a UI still off from the last map or game, which the
+    // next frame was going to turn back on (rt_ui_back_after_reset).
+    bool fresh = on && (!gameUiIsDisabled() || rt_ui_back_after_reset);
+
+    if (fresh && obj_dude != NULL) {
         // Let go of the stick NOW, before the script registers its own animation on him: from here on
         // a walk on the dude is the script's. A stick state left over from the previous map is what
         // cut the GAMMOVIE walk-in, the moment the new map's first poll saw the stick idle.
         rt_fm_release();
         rt_stick_stop();
         rt_stick_last_sector = -1;
+        rt_mouse_forget();
+
+        // ...and, if the lock lasts, a walk or an attack he set off on (rt_script_lock_cut_player).
+        rt_script_ui_lock_cut_pending = true;
     }
 
-    if (on != rt_script_ui_lock) {
-        trace_event(TRACE_FLOW, "script-ui-lock", "on=%d t=%.2f", on ? 1 : 0, rt_clock);
+    if (on != rt_script_ui_lock || fresh) {
+        trace_event(TRACE_FLOW, "script-ui-lock", "on=%d fresh=%d t=%.2f", on ? 1 : 0, fresh ? 1 : 0, rt_clock);
     }
 
-    if (on && !rt_script_ui_lock) {
-        rt_script_ui_lock_since = get_time();
+    if (fresh || (on && !rt_script_ui_lock)) {
+        rt_script_ui_lock_age = 0;
+        rt_script_ui_lock_idle = 0;
+        rt_script_ui_lock_last_gt = (unsigned int)game_time();
+        rt_script_ui_lock_hit = false;
+        rt_script_ui_lock_saw_fight = false;
+    }
+    if (!on) {
+        // The script's own enable: its scene is over, whatever we let go of earlier.
+        rt_script_ui_lock_cut_pending = false;
+        rt_script_scene_pending = false;
+    } else if (fresh) {
+        rt_script_scene_pending = false;
     }
     rt_script_ui_lock = on;
 }
 
+// A lock that has lasted: a walk the player SET OFF on (the exit run, the A prompt's walk-then-act, a
+// loot tap, a click) stops -- a run to an exit would otherwise carry him off the map mid-scene -- and so
+// does an attack or a throw asked for a moment before. The walk only while it is still the dude's latest
+// sequence: a script may have registered his walk since. Stopped where he stands, not frozen in a stride
+// (a ladder's walk-then-climb asks for no stand at its end).
+static void rt_script_lock_cut_player()
+{
+    if (obj_dude != NULL && rt_player_walk_set && rt_player_walk_serial == anim_dude_reg_serial()
+        && anim_busy(obj_dude) != 0) {
+        int keepX = obj_dude->x;
+        int keepY = obj_dude->y;
+        int anim = FID_ANIM_TYPE(obj_dude->fid);
+        if (anim_clear_pending(obj_dude) == 0) {
+            trace_event(TRACE_FLOW, "script-ui-lock-cut-walk", "anim=%d t=%.2f", anim, rt_clock);
+            anim = FID_ANIM_TYPE(obj_dude->fid);
+            if ((anim == ANIM_WALK || anim == ANIM_RUNNING) && anim_busy_blocking(obj_dude) == 0) {
+                dude_stand(obj_dude, obj_dude->rotation, -1);
+                rt_keep_offset(obj_dude, keepX, keepY);
+            }
+        }
+    }
+    rt_player_walk_set = false;
+
+    rt_player_intent_target = NULL;
+    rt_player_intent_ttl = 0.0f;
+    rt_player_intent_loc = HIT_LOCATION_UNCALLED;
+    rt_throw_waiting = false;
+    rt_player_far_target = NULL;
+}
+
+// The autosave waits (main.cc canAutosave): a scene we let go of early is still running.
+bool combat_rt_scene_pending()
+{
+    return rt_script_scene_pending;
+}
+
+// A script's timed event ran or a script floated a line: a scene under a lock is still going.
+void combat_rt_note_scene_progress()
+{
+    rt_script_ui_lock_idle = 0;
+}
+
+// The pad set the dude off on a walk-then-act of the player's own (see combat_rt_note_script_ui_lock):
+// `serialBefore` is anim_dude_reg_serial() from just before, so an action that registered nothing on
+// him (a look, a refusal) marks nothing.
+void combat_rt_note_player_walk(unsigned int serialBefore)
+{
+    // A talk can open a scene inside the action itself; whatever that registered is the script's.
+    unsigned int serial = anim_dude_reg_serial();
+    if (serial != serialBefore && !combat_rt_script_ui_locked()) {
+        rt_player_walk_set = true;
+        rt_player_walk_serial = serial;
+    }
+}
+
+// From op_gfade_out / op_gfade_in: whether a script left the screen black.
+void combat_rt_note_script_fade(bool black)
+{
+    rt_script_faded = black;
+}
+
+// combat_rt_note_hurt: a critter's blow landed on the dude.
+static void rt_script_ui_lock_note_hit()
+{
+    if (rt_script_ui_lock) {
+        rt_script_ui_lock_hit = true;
+    }
+}
+
 // True while a script's game_ui_disable holds: no pad, no stick, no use prompt, no follow camera.
+// A plain query -- the ending of a lock from our side lives in rt_script_ui_lock_tick.
 bool combat_rt_script_ui_locked()
 {
-    if (!rt_script_ui_lock || !gameUiIsDisabled()) {
-        return false;
+    return rt_script_ui_lock && gameUiIsDisabled();
+}
+
+// End a script's lock from our side: the UI on, and the screen back if the scene had faded it out.
+// `alive`: the scene goes on without its lock (a fight cut in) -- no autosave until it ends, which is
+// its own game_ui_enable, or quiet for as long as a lock may idle, or as long as one may last.
+static void rt_script_ui_lock_release(const char* why, bool alive)
+{
+    trace_event(TRACE_WARN, "script-ui-lock-release", "why=%s faded=%d held=%u idle=%u t=%.2f", why,
+        rt_script_faded ? 1 : 0, rt_script_ui_lock_age, rt_script_ui_lock_idle, rt_clock);
+    rt_script_ui_lock = false;
+    rt_script_ui_lock_hit = false;
+    rt_script_ui_lock_saw_fight = false;
+    rt_script_ui_lock_cut_pending = false;
+    rt_script_scene_pending = alive;
+    rt_script_ui_lock_age = 0;
+    rt_script_ui_lock_idle = 0;
+    if (gameUiIsDisabled()) {
+        game_ui_enable();
+        gmouse_3d_refresh();
+    }
+    if (rt_script_faded) {
+        rt_script_faded = false;
+        paletteSetEntries(_cmap);
+    }
+}
+
+// Something is fighting the player's side -- vanilla would have put the dude into that fight, and his
+// turn turns the UI on. No perception test (unlike combat_rt_under_threat): a shooter he sneaks past,
+// or a chaser that lost sight of him, is still in a fight with him.
+static bool rt_script_lock_fight_on_us()
+{
+    for (int i = 0; i < rt_actor_count; i++) {
+        RtActor* a = &rt_actors[i];
+        if (!a->hostile || a->state == RT_IDLE || !rt_is_combatant(a->obj)) {
+            continue;
+        }
+        if (a->target == obj_dude
+            || (a->target != NULL && (isPartyMember(a->target) || rt_is_player_side_ptr(a->target)))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Once a frame from combat_rt_update, ahead of the un-stick.
+static void rt_script_ui_lock_tick()
+{
+    // (5) The first frame of a freshly loaded or started game, or of the next map after a scene was
+    // left behind: a UI left off by it comes back -- unless a script of this map has just locked it for
+    // a scene of its own.
+    if (rt_ui_back_after_reset) {
+        rt_ui_back_after_reset = false;
+        if (gameUiIsDisabled() && !rt_script_ui_lock) {
+            trace_event(TRACE_WARN, "ui-back-after-load", "faded=%d t=%.2f", rt_script_faded ? 1 : 0, rt_clock);
+            game_ui_enable();
+            gmouse_3d_refresh();
+            if (rt_script_faded) {
+                rt_script_faded = false;
+                paletteSetEntries(_cmap);
+            }
+        }
     }
 
-    // ⚠️ NOT FOREVER. Vanilla waits for the script however long it takes, but a scene that waits on
-    // something realtime changed (a walk that never arrives) would then hold the player for good.
-    // Past a minute the pad comes back -- the un-stick then re-enables the bar -- and the script goes
-    // on by itself.
-    if (elapsed_time(rt_script_ui_lock_since) > RT_SCRIPT_UI_LOCK_MAX_MS) {
-        trace_event(TRACE_WARN, "script-ui-lock-expired", "ms=%u t=%.2f", elapsed_time(rt_script_ui_lock_since),
-            rt_clock);
+    // The clock, in steps: a jump (game_time_advance, a rest, travel) is not time held or idle.
+    unsigned int now = (unsigned int)game_time();
+    unsigned int step = now - rt_script_ui_lock_last_gt;
+    rt_script_ui_lock_last_gt = now;
+    if (step > RT_SCRIPT_UI_LOCK_JUMP_TICKS) {
+        step = 0;
+    }
+
+    if (!rt_script_ui_lock) {
+        // A scene let go early is over once it has been quiet, or running, as long as a lock may be.
+        if (rt_script_scene_pending) {
+            rt_script_ui_lock_age += step;
+            rt_script_ui_lock_idle += step;
+            if (rt_script_ui_lock_age > RT_SCRIPT_UI_LOCK_MAX_TICKS || rt_script_ui_lock_idle > RT_SCRIPT_UI_LOCK_IDLE_TICKS) {
+                trace_event(TRACE_FLOW, "script-scene-pending", "end age=%u idle=%u t=%.2f", rt_script_ui_lock_age,
+                    rt_script_ui_lock_idle, rt_clock);
+                rt_script_scene_pending = false;
+            }
+        }
+        return;
+    }
+
+    // (1) Someone else turned the UI on (critter_dmg, an explosion): that lock is over.
+    if (!gameUiIsDisabled()) {
+        trace_event(TRACE_FLOW, "script-ui-lock", "on=0 why=ui-on t=%.2f", rt_clock);
         rt_script_ui_lock = false;
-        return false;
+        rt_script_ui_lock_hit = false;
+        rt_script_ui_lock_saw_fight = false;
+        rt_script_ui_lock_cut_pending = false;
+        return;
     }
 
-    return true;
+    rt_script_ui_lock_age += step;
+    rt_script_ui_lock_idle += step;
+
+    // (4) The lock has lasted: the player's walk and attack stop now (rt_script_lock_cut_player).
+    if (rt_script_ui_lock_cut_pending && rt_script_ui_lock_age >= RT_SCRIPT_UI_LOCK_CUT_TICKS) {
+        rt_script_ui_lock_cut_pending = false;
+        rt_script_lock_cut_player();
+    }
+
+    // (3) A fight, as vanilla's dude turn would have ended it: a blow on him, anyone fighting his side,
+    // or -- as vanilla's combat_over turned the UI on whoever had fought -- a fight on the map ending.
+    // Under realtime a fight that is not his can still drop a scene's own enable: every scripted critter
+    // in sight gets its combat_p_proc, and Chris's at the gas station deletes his timers.
+    if (rt_script_ui_lock_hit) {
+        rt_script_ui_lock_release("hit", true);
+        return;
+    }
+    if (rt_script_lock_fight_on_us()) {
+        rt_script_ui_lock_release("fight", true);
+        return;
+    }
+    if (rt_engaged) {
+        rt_script_ui_lock_saw_fight = true;
+    } else if (rt_script_ui_lock_saw_fight) {
+        rt_script_ui_lock_release("fight-over", true);
+        return;
+    }
+
+    // (2) ⚠️ NOT FOREVER. Vanilla waits for the script however long it takes, but a scene that waits on
+    // something realtime changed (a walk that never arrives) would then hold the player for good. Held
+    // too long, or quiet too long -- no script's line and no script's timer for half a minute, which
+    // no scene's chain of 2-8 s steps comes near. Such a scene is stuck or dead: the autosave need not
+    // wait for it.
+    if (rt_script_ui_lock_age > RT_SCRIPT_UI_LOCK_MAX_TICKS) {
+        rt_script_ui_lock_release("expired", false);
+    } else if (rt_script_ui_lock_idle > RT_SCRIPT_UI_LOCK_IDLE_TICKS) {
+        rt_script_ui_lock_release("idle", false);
+    }
 }
 
 // True if obj is one of the critters currently tracked in the actor registry.
@@ -15901,7 +16167,9 @@ static void rt_resolve_attacks(float dt)
     int dudeSeq = stat_level(obj_dude, STAT_SEQUENCE);
     bool playerEligible = false;
     int dudeCost = 0;
-    if (rt_player_intent_target != NULL && rt_player_intent_ttl > 0.0f
+    // Nothing of his fires under a script's scene (combat_rt_script_ui_locked); the lock's start
+    // already dropped what was asked for before it.
+    if (rt_player_intent_target != NULL && rt_player_intent_ttl > 0.0f && !combat_rt_script_ui_locked()
         && rt_in_registry(rt_player_intent_target)
         && rt_is_targetable(rt_player_intent_target)
         && !rt_attacker_in_flight(obj_dude)
@@ -16654,9 +16922,16 @@ void combat_rt_reset()
     // bitten this project before.
     combat_rt_request_step_back(NULL);
 
-    // A script's scene lock belongs to the game that set it: after a load the un-stick may give the
-    // bar back again.
+    // A script's scene lock belongs to the game that set it. A UI it left off (a death inside the scene)
+    // comes back on the loaded map's first frame (rt_script_ui_lock_tick).
     rt_script_ui_lock = false;
+    rt_script_ui_lock_hit = false;
+    rt_script_ui_lock_saw_fight = false;
+    rt_script_ui_lock_cut_pending = false;
+    rt_script_scene_pending = false;
+    rt_script_faded = false;
+    rt_player_walk_set = false;
+    rt_ui_back_after_reset = true;
 }
 
 // Refresh rt_door_tiles for the dude's current tile. Usable, UNLOCKED doors only: pulling the
@@ -16852,6 +17127,15 @@ static bool rt_mouse_armed = false; // the current press began over the world, n
 // for the corpse on his own.
 static bool rt_mouse_hold_claimed = false;
 #define RT_MOUSE_AIM_RADIUS 24 // game pixels from a sprite's box that still count as "on" it
+
+// The mouse lets go of its target and its press: a script's scene began (rt_mouse_update does not run
+// under it, so the pointer would only go stale), or the map is being torn down.
+static void rt_mouse_forget()
+{
+    rt_mouse_target = NULL;
+    rt_mouse_armed = false;
+    rt_mouse_hold_claimed = false;
+}
 
 static bool rt_point_in_world(int x, int y)
 {
@@ -18193,7 +18477,9 @@ bool combat_rt_world_loot_available()
 
 bool combat_rt_try_world_loot()
 {
-    if (obj_dude == NULL) {
+    // Not under a script's scene: the tap reached past the lock (Miria's scene drops your gear at your
+    // feet, and picking the bag back up in the dark sent Grisham to his shotgun).
+    if (obj_dude == NULL || combat_rt_script_ui_locked()) {
         return false;
     }
 
@@ -20346,11 +20632,17 @@ void combat_rt_update(float dt)
     // Open a queued tap-A world-loot target here (main-loop context). These just
     // register an approach animation + open the loot window via callback -- safe
     // from here, but NOT from the input hook that queued it (modal re-entrancy).
+    // One queued just before a script's scene began is dropped: it would cut the scene's walk.
+    if (rt_pending_loot != NULL && combat_rt_script_ui_locked()) {
+        rt_pending_loot = NULL;
+        rt_pending_loot_kind = 0;
+    }
     if (rt_pending_loot != NULL) {
         Object* target = rt_pending_loot;
         int kind = rt_pending_loot_kind;
         rt_pending_loot = NULL;
         rt_pending_loot_kind = 0;
+        unsigned int serialBefore = anim_dude_reg_serial();
         if (kind == 1) {
             action_loot_container(obj_dude, target);
         } else if (kind == 2) {
@@ -20358,6 +20650,7 @@ void combat_rt_update(float dt)
             // object -> obj_use is scenery-only (returns -1 for an item), so containers never opened.
             action_get_an_object(obj_dude, target);
         }
+        combat_rt_note_player_walk(serialBefore);
     }
 
     if (rt_enabled) {
@@ -21203,7 +21496,9 @@ void combat_rt_update(float dt)
     // anim_busy_blocking, not anim_busy -- same reason as the attack-eligibility gate above.
     // Plain anim_busy stays set while an old sequence merely still LISTS the dude's spent swing,
     // so this un-stick stopped firing and the interface stayed disabled with the hourglass up.
-    // Never over a script's own lock (combat_rt_script_ui_locked): that one is not stuck, it is a scene.
+    // Never over a script's own lock (combat_rt_script_ui_locked): that one is not stuck, it is a scene,
+    // and rt_script_ui_lock_tick decides when it ends.
+    rt_script_ui_lock_tick();
     if (anim_busy_blocking(obj_dude) == 0 && !intface_is_enabled() && !combat_rt_script_ui_locked()) {
         game_ui_enable();
         gmouse_3d_refresh();
@@ -21408,6 +21703,12 @@ bool combat_rt_spend_ap(int cost)
 bool combat_rt_handle_input(int keyCode)
 {
     if (obj_dude == NULL || !rt_is_combatant(obj_dude)) {
+        return false;
+    }
+
+    // A script's scene has the dude (combat_rt_script_ui_locked). The keyboard is off there, but a mouse
+    // click still arrives: none of it is ours -- not the attack, the called shot or the Diablo walk.
+    if (keyCode == -2 && combat_rt_script_ui_locked()) {
         return false;
     }
 
@@ -22046,6 +22347,21 @@ void combat_rt_notify_objects_freed()
     // Snap the HP counter to the truth before the teardown. Safe here specifically because
     // obj_remove_all calls us at its TOP, before a single object is freed.
     intface_hp_roll_cancel();
+
+    // A script's scene left behind (a walk carried the dude off mid-scene): its enable goes with the
+    // map's timers (_queue_leaving_map). The next map's first frame gives the UI back, unless a scene
+    // of its own locks it first -- and that lock then starts fresh (combat_rt_note_script_ui_lock).
+    if (rt_script_ui_lock) {
+        trace_event(TRACE_WARN, "script-ui-lock", "on=0 why=map-leave t=%.2f", rt_clock);
+        rt_script_ui_lock = false;
+        rt_script_ui_lock_hit = false;
+        rt_script_ui_lock_saw_fight = false;
+        rt_ui_back_after_reset = true;
+    }
+    rt_script_ui_lock_cut_pending = false;
+    rt_script_scene_pending = false; // its timers go with the map
+    rt_player_walk_set = false;
+    rt_mouse_forget();
 }
 
 // Hook from obj_erase_object(): a SINGLE object is about to be freed (script destroy, a
@@ -22109,6 +22425,9 @@ void combat_rt_notify_critter_removed(Object* removed)
     if (rt_pending_loot == removed) {
         rt_pending_loot = NULL;
         rt_pending_loot_kind = 0;
+    }
+    if (rt_mouse_target == removed) {
+        rt_mouse_target = NULL;
     }
 
     // Remove it from the actor registry and clear any actor that was targeting it (both the

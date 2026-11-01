@@ -316,6 +316,13 @@ static int main_reset_system()
 {
     gameReset();
 
+    // Realtime: a game that ended inside a script's scene (a death mid-scene) left the UI off -- the
+    // keyboard too, so the death screen, the menu hotkeys and a new character's name would not type.
+    // Nothing can be locked here; a loaded game's own frame does the rest (rt_script_ui_lock_tick).
+    if (gameUiIsDisabled()) {
+        gameUiEnable();
+    }
+
     return 1;
 }
 
@@ -488,7 +495,13 @@ static void mainLoop()
             trace_event(TRACE_INPUT, "key", "code=%d rt=%d", keyCode, rtConsumed ? 1 : 0);
         }
         if (!rtConsumed) {
+            // A click's walk (the pad's A with the cursor shown, an armed crosshair, a real mouse) is the
+            // player's own: a script's scene that begins on the way stops it (combat_rt_note_player_walk).
+            unsigned int serialBefore = anim_dude_reg_serial();
             gameHandleKey(keyCode, false);
+            if (keyCode == -2) {
+                combat_rt_note_player_walk(serialBefore);
+            }
         }
 
         // Realtime combat: the whole world's realtime step (AI, attacks, AP, reactions, camera).
@@ -530,7 +543,7 @@ static void mainLoop()
         {
             bool justLoaded = LoadSaveConsumeJustLoaded();
             bool canAutosave = gDude != nullptr && !isInCombat() && !combat_rt_death_anim_pending() && !autotest_active()
-                && !gameUiIsDisabled();
+                && !gameUiIsDisabled() && !combat_rt_scene_pending();
 
             static bool autosavePendingLocation = false;
             static bool autosavePendingQuest = false;

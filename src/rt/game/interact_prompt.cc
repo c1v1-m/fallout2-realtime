@@ -1408,6 +1408,10 @@ void interact_prompt_tick()
         // See scr_load_before_first_event (the roped shaft that answered USE with "You see").
         scr_load_before_first_event(obj);
 
+        // The walk-then-act registered below is the player's own: a script's scene that begins on the
+        // way stops it (combat_rt_note_player_walk).
+        unsigned int serialBefore = anim_dude_reg_serial();
+
         int rc = -2;
         switch (kind) {
         case IP_USE:
@@ -1451,6 +1455,7 @@ void interact_prompt_tick()
         }
         trace_event(TRACE_ACTION, "interact-do", "kind=%d pid=%d objType=%d rc=%d",
             kind, obj->pid, FID_TYPE(obj->fid), rc);
+        combat_rt_note_player_walk(serialBefore);
         if (kind == IP_LOOT_CORPSE || kind == IP_LOOT_CONTAINER) {
             ip_recent_loot = obj;
             ip_recent_loot_at = get_time();

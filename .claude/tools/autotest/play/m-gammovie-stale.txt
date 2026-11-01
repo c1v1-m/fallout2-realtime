@@ -1,0 +1,22 @@
+# F2 (2026-11-01, his „oprav všech 5“, hole 1): a pit in the Raiders' caves locks the UI and the ENGINE gives it
+# back (critter_dmg), never the script. The leftover flag must be dropped, and the next scene (GAMMOVIE, by
+# a script's map change) must start a fresh lock and play out held, walked in, and released by its own script.
+name m-gammovie-stale
+map RAIDERS2.MAP
+mapscript on
+seed 1
+duration 60
+dude tile 15694 rot 4
+dude hp 999
+
+walkto 500 15692
+mapgo 8000 GAMMOVIE.MAP -1
+axis 9000 LY 32767
+note 58000 end
+
+expect script-ui-lock\] on=1 fresh=1
+expect script-ui-lock\] on=0 why=ui-on
+expect-count >=2 script-ui-lock\] on=1 fresh=1
+expect DUDE pid=16777216 tile=22307
+expect Kill them all
+expect script-ui-lock] on=0 fresh=0
