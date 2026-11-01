@@ -3851,6 +3851,11 @@ static void gpui_quick_use(int pid)
 static const int gpui_heal_order[] = {
     PROTO_ID_STIMPACK,
     PROTO_ID_SUPER_STIMPACK,
+#if FALLOUT_RT_GAME == 2
+    // Fallout 2's tribal medicine, last: it heals least and costs Perception for a while. Held, it
+    // chains like a stimpak (his „nastav powder jako u stimpacku, držím a healuje se jako estuska“).
+    PROTO_ID_HEALING_POWDER,
+#endif
 };
 
 // The healing item LB+B would reach for NEXT, and how many of it are carried. ONE selection

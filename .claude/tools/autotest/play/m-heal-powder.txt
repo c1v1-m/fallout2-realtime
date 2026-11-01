@@ -1,0 +1,20 @@
+# F2 (2026-11-02, his „nastav powder jako u stimpacku, držím a healuje se jako estuska z DS“): with no stimpak in
+# the pack, the heal button (RB) reaches for Healing Powder, and held it chains powder after powder like the
+# stimpak's estus chain. A hostile in view keeps the fight on, so the hit points come in through the heal pool.
+name m-heal-powder
+map DESERT1.MAP
+seed 4
+duration 10
+dude tile 20100 rot 2
+dude hp 71
+dude curhp 10
+dude stat AG 10
+dude item 273 5
+spawn 16777296 24100 rot 5 hostile
+
+at 0 idle
+at 1.0 healhold
+at 7.0 idle
+
+expect heal-chain\] next=1 pid=273
+expect heal-chain\] next=2 pid=273
