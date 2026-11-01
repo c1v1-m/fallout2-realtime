@@ -523,9 +523,14 @@ static void mainLoop()
         // never in a fight or while a body is still falling (a save stops every animation and would
         // drop it flat). The triggers are LATCHED: one that comes due in a fight waits for its end
         // instead of being lost.
+        // ⚠️ AND NOT WHILE THE UI IS DISABLED, which is a script's scene in progress: vanilla cannot save
+        // then at all, and the scene's own step counter (a script variable) is not in a save, so a load
+        // of one made mid-scene finds it dead. GAMMOVIE's autosave landed right after its map_enter
+        // started the Frank Horrigan sequence; the reload stood the farmers and the patrol still for good.
         {
             bool justLoaded = LoadSaveConsumeJustLoaded();
-            bool canAutosave = gDude != nullptr && !isInCombat() && !combat_rt_death_anim_pending() && !autotest_active();
+            bool canAutosave = gDude != nullptr && !isInCombat() && !combat_rt_death_anim_pending() && !autotest_active()
+                && !gameUiIsDisabled();
 
             static bool autosavePendingLocation = false;
             static bool autosavePendingQuest = false;

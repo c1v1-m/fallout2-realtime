@@ -1,0 +1,22 @@
+# F2 (2026-11-01, the Deck: "script nefungoval. Frank měl něco říct rodině a zabít je ... jsem dost pod nimi a
+# nevidím je"): GAMMOVIE, Frank Horrigan and the farmers. The bodyguard's script locks the UI (game_ui_disable),
+# walks the dude up to tile 22307 and centres the view on the farm (tile_set_center 20702), then plays the whole
+# scene out to the patrol leaving. The stick is pushed away from them the whole time: the dude must still be
+# walked there, the view must stay on the scene (the shot), and the lock must end with the script's game_ui_enable.
+name m-gammovie
+map GAMMOVIE.MAP
+mapscript on
+seed 1
+duration 40
+dude tile 24916 rot 0
+
+axis 300 LY 32767
+shot 9000
+axis 30000 LY 0
+note 38000 end
+
+expect FLOW/script-ui-lock\] on=1
+expect DUDE pid=16777216 tile=22307
+expect Kill them all
+expect none of your affair
+expect FLOW/script-ui-lock\] on=0

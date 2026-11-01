@@ -306,6 +306,9 @@ static int _anim_move(Object* obj, int tile, int elev, int a3, int anim, int a5,
 static int animateMoveObjectToTileStraight(Object* obj, int tile, int elevation, int anim, int animationSequenceIndex, int flags);
 static void _object_move(int index);
 static void _object_straight_move(int index);
+static void walk_retry_note(Object* obj, int tile, int elevation, int anim);
+static void walk_retry_forget(Object* obj);
+static void walk_retry_tick();
 static float walk_dir_slowdown(Object* object, int rotation);
 static float crippled_move_scale(Object* object);
 static float travel_speed_scale(Object* object);
@@ -3771,6 +3774,17 @@ static void _object_move(int index)
                     sad_entry->field_20 = 0;
                 } else {
                     sad_entry->field_20 = -1000;
+                    trace_event(TRACE_FLOW, "walk-refused", "id=%d pid=%d tile=%d next=%d dest=%d blocker=%d bpid=%d btile=%d",
+                        object->id, object->pid, object->tile, v10, sad_entry->field_24, v12->id, v12->pid, v12->tile);
+
+                    // Realtime: in a script's scene, refused by someone who is walking on -- tried again
+                    // in a moment (walk_retry_tick).
+                    int blockerAnim = FID_ANIM_TYPE(v12->fid);
+                    if (combat_rt_enabled() && object != gDude && combat_rt_script_ui_locked()
+                        && FID_TYPE(v12->fid) == OBJ_TYPE_CRITTER
+                        && (blockerAnim == ANIM_WALK || blockerAnim == ANIM_RUNNING)) {
+                        walk_retry_note(object, sad_entry->field_24, object->elevation, sad_entry->anim);
+                    }
                 }
                 v10 = -1;
             } else {
@@ -6183,8 +6197,106 @@ static void anim_smooth_settle(Object* obj, const Rect* before)
     tileWindowRefreshRect(&r, obj->elevation);
 }
 
+// --- A refused walk, tried again in a scene ------------------------------------------------------------
+//
+// ⚠️ A SCENE WAITS ON ARRIVALS, AND A NEIGHBOUR ON THE MOVE CAN REFUSE ONE (2026-11-01, GAMMOVIE). When
+// the next hex is taken, the step re-paths to its destination, and a re-path that fails ends the walk --
+// vanilla, word for word (_object_move). Frank Horrigan is multi-hex: walking off with his patrol he
+// covered the hex in front of a guard, the guard's walk ended one hex short of the tile the script
+// waits for, and the scene -- with its lock on the player -- never ended. Realtime re-times walks (per
+// facing, smoothed), so who meets whom on the way is not vanilla's timing; here it was 3 runs in 4. So
+// during a script's scene (combat_rt_script_ui_locked) a walk refused by a critter that is itself
+// walking is registered again a moment later, for a few seconds at most.
+#define WALK_RETRY_SLOTS 8
+#define WALK_RETRY_WAIT_MS 250u
+#define WALK_RETRY_GIVE_UP_MS 5000u
+
+typedef struct WalkRetry {
+    Object* obj;
+    int tile;
+    int elevation;
+    int anim;
+    unsigned int since; // the first refusal
+    unsigned int last; // the last refusal or attempt
+} WalkRetry;
+
+static WalkRetry walk_retry[WALK_RETRY_SLOTS];
+
+static void walk_retry_note(Object* obj, int tile, int elevation, int anim)
+{
+    int free = -1;
+    for (int i = 0; i < WALK_RETRY_SLOTS; i++) {
+        if (walk_retry[i].obj == obj) {
+            walk_retry[i].tile = tile;
+            walk_retry[i].elevation = elevation;
+            walk_retry[i].anim = anim;
+            walk_retry[i].last = getTicks();
+            return;
+        }
+        if (walk_retry[i].obj == nullptr && free == -1) {
+            free = i;
+        }
+    }
+
+    if (free != -1) {
+        walk_retry[free].obj = obj;
+        walk_retry[free].tile = tile;
+        walk_retry[free].elevation = elevation;
+        walk_retry[free].anim = anim;
+        walk_retry[free].since = getTicks();
+        walk_retry[free].last = walk_retry[free].since;
+    }
+}
+
+static void walk_retry_forget(Object* obj)
+{
+    for (int i = 0; i < WALK_RETRY_SLOTS; i++) {
+        if (walk_retry[i].obj == obj) {
+            walk_retry[i].obj = nullptr;
+        }
+    }
+}
+
+// Each frame, right behind the stepper (anim_smooth_tick).
+static void walk_retry_tick()
+{
+    for (int i = 0; i < WALK_RETRY_SLOTS; i++) {
+        WalkRetry* retry = &(walk_retry[i]);
+        Object* obj = retry->obj;
+        if (obj == nullptr) {
+            continue;
+        }
+
+        bool arrived = obj->tile == retry->tile;
+        if (arrived || obj->elevation != retry->elevation || !critterIsActive(obj) || !combat_rt_script_ui_locked()
+            || getTicksSince(retry->since) > WALK_RETRY_GIVE_UP_MS) {
+            trace_event(TRACE_FLOW, "walk-retry-end", "id=%d tile=%d dest=%d arrived=%d ms=%u", obj->id, obj->tile,
+                retry->tile, arrived ? 1 : 0, getTicksSince(retry->since));
+            retry->obj = nullptr;
+            continue;
+        }
+
+        // Still walking (the last attempt), or not long enough since the refusal.
+        if (animationIsBusy(obj) || getTicksSince(retry->last) < WALK_RETRY_WAIT_MS) {
+            continue;
+        }
+
+        retry->last = getTicks();
+        reg_anim_begin(ANIMATION_REQUEST_UNRESERVED);
+        if (retry->anim == ANIM_RUNNING) {
+            animationRegisterRunToTile(obj, retry->tile, retry->elevation, -1, 0);
+        } else {
+            animationRegisterMoveToTile(obj, retry->tile, retry->elevation, -1, 0);
+        }
+        int rc = reg_anim_end();
+        trace_event(TRACE_FLOW, "walk-retry", "id=%d tile=%d dest=%d rc=%d", obj->id, obj->tile, retry->tile, rc);
+    }
+}
+
 void anim_smooth_tick()
 {
+    walk_retry_tick();
+
     for (int i = 0; i < anim_smooth_owed_count; i++) {
         if (anim_smooth_owed_elevation[i] == gElevation) {
             tileWindowRefreshRect(&(anim_smooth_owed[i]), gElevation);
@@ -6408,11 +6520,13 @@ static void anim_smooth_forget(Object* obj)
     }
 
     walk_smooth_forget(obj);
+    walk_retry_forget(obj);
 }
 
 void anim_smooth_reset()
 {
     memset(walk_smooth_state, 0, sizeof(walk_smooth_state));
+    memset(walk_retry, 0, sizeof(walk_retry));
     anim_smooth_count = 0;
     anim_smooth_owed_count = 0;
     anim_deferred_count = 0;
