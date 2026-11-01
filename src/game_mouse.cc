@@ -1398,9 +1398,25 @@ int gameMouseSetCursor(int cursor)
     // the pointer into the spinning planet wherever the pointer is -- with a mouse that is where you
     // look; on a pad it is the hidden pointer, parked wherever the last screen or the right stick left
     // it. With a controller connected, the planet's picture is centred on the screen when it comes up.
+    // ...in the middle of the MAP, not of the whole screen (2026-11-01, "logo při loadingu není veprostřed"): the bar
+    // stays up while the map goes black above it, and the screen's centre sat 50 px below the black area's.
     if (cursor == MOUSE_CURSOR_WAIT_PLANET && gGameMouseCursor != MOUSE_CURSOR_WAIT_PLANET
         && gamepad_ui_get_controller() != nullptr) {
-        _mouse_set_position(screenGetWidth() / 2 - width / 2 + offsetX, screenGetHeight() / 2 - height / 2 + offsetY);
+        int centerX = screenGetWidth() / 2;
+        int centerY = screenGetHeight() / 2;
+        Rect mapRect;
+        if (gIsoWindow != -1 && windowGetRect(gIsoWindow, &mapRect) == 0) {
+            centerX = (mapRect.left + mapRect.right + 1) / 2;
+            centerY = (mapRect.top + mapRect.bottom + 1) / 2;
+        }
+        _mouse_set_position(centerX - width / 2 + offsetX, centerY - height / 2 + offsetY);
+    }
+    if (cursor == MOUSE_CURSOR_WAIT_PLANET) {
+        int mx;
+        int my;
+        mouseGetPosition(&mx, &my);
+        trace_event(TRACE_FLOW, "planet", "was=%d pad=%d at=%d,%d screen=%dx%d", gGameMouseCursor,
+            gamepad_ui_get_controller() != nullptr ? 1 : 0, mx, my, screenGetWidth(), screenGetHeight());
     }
 
     if (gGameMouseCursorFrmHandle != INVALID_CACHE_ENTRY) {

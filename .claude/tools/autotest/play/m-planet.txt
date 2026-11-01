@@ -1,0 +1,11 @@
+# F2 (2026-11-01, "logo při loadingu není veprostřed, když se dostanu do nové mapy v lokaci"): the loading planet
+# must sit in the middle of the screen on a map change inside a town (DENBUS1 -> DENBUS2 through a map exit).
+name m-planet
+map DENBUS1.MAP
+seed 1
+duration 14
+
+axis 1500 RX 32767
+axis 2500 RX 0
+mapgo 4000 DENBUS2.MAP -1 0
+note 12000 end
