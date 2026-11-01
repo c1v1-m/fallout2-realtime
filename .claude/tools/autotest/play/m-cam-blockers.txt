@@ -1,0 +1,13 @@
+# F2 (2026-11-01, DENBUS2: "někam jsem zašel a mapa se neposunula … zmizel z obrazovky"): with the HRP map edges on,
+# the original scroll blockers must not stop the follow camera. DENBUS2's blockers stand inside its edge area; a
+# centre they refused left the view where it was while he ran north out of the picture. The dude runs his route,
+# 17262 to 8082, and the screenshot at the end must show him on screen.
+name m-cam-blockers
+map DENBUS2.MAP
+seed 1
+duration 16
+dude tile 17262 rot 0
+
+walkto 1000 8082
+shot 13000
+note 14000 end

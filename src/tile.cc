@@ -693,6 +693,13 @@ static void tileEdgesLoad()
     }
     trace_event(TRACE_FLOW, "map-edges", "map=%s ver=%d ok=%d rects=%d/%d/%d clamp=%d clip=%d", name, version, ok ? 1 : 0,
         gTileEdgeCount[0], gTileEdgeCount[1], gTileEdgeCount[2], gTileEdgeClampOn ? 1 : 0, gTileEdgeClipOn ? 1 : 0);
+    for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
+        for (int index = 0; index < gTileEdgeCount[elevation]; index++) {
+            const TileEdgeRect* rect = &(gTileEdges[elevation][index]);
+            trace_event(TRACE_FLOW, "map-edge-rect", "elev=%d n=%d left=%d top=%d right=%d bottom=%d", elevation, index,
+                rect->left, rect->top, rect->right, rect->bottom);
+        }
+    }
 }
 
 // One edge rect in CURRENT window coordinates, half-open [left, right) x [top, bottom): the left
@@ -862,6 +869,16 @@ int tileSetCenter(int tile, int flags)
         return -1;
     }
 
+    // ⚠️ NOT WHERE THE HRP EDGE HOLDS THE VIEW (Fallout 2 Realtime 2026-11-01, DENBUS2: "zmizel z obrazovky", then
+    // "furt nevidím dude"). The edges replace both of the original maps' limits below -- the scroll blockers and
+    // the grid border, which is still worked out for a 640x480 window -- and both disagree with them: on DENBUS2
+    // each refused a centre well inside the edge area (rc -1 at tile 8082, row 40, his own save), so the view
+    // stayed put while he walked out of the picture. Where this floor has an edge, the edge alone limits the
+    // view (tileEdgeClampView, after the centring).
+    tileEdgesLoad();
+    bool edgeHolds = gTileEdgeClampOn && gElevation >= 0 && gElevation < ELEVATION_COUNT
+        && gTileEdgeCount[gElevation] > 0;
+
     if ((flags & TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS) == 0) {
         if (gTileScrollLimitingEnabled) {
             int tileScreenX;
@@ -883,7 +900,7 @@ int tileSetCenter(int tile, int flags)
             }
         }
 
-        if (gTileScrollBlockingEnabled) {
+        if (gTileScrollBlockingEnabled && !edgeHolds) {
             if (_obj_scroll_blocking_at(tile, gElevation) == 0) {
                 return -1;
             }
@@ -893,7 +910,7 @@ int tileSetCenter(int tile, int flags)
     int tile_x = gHexGridWidth - 1 - tile % gHexGridWidth;
     int tile_y = tile / gHexGridWidth;
 
-    if (gTileBorderInitialized) {
+    if (gTileBorderInitialized && !edgeHolds) {
         if (tile_x <= gTileBorderMinX || tile_x >= gTileBorderMaxX || tile_y <= gTileBorderMinY || tile_y >= gTileBorderMaxY) {
             return -1;
         }

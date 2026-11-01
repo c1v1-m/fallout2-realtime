@@ -1,0 +1,11 @@
+# F2 (2026-11-01, "furt nevidím dude", his own save on DENBUS2 copied to test slot 9): load it, run to 8082 where he
+# vanished, photograph, and trace where he is on the screen (cam-lost).
+name m-cam-hisave
+map DESERT1.MAP
+loadslot 9
+seed 1
+duration 16
+
+walkto 1000 8082
+shot 12000
+note 14000 end

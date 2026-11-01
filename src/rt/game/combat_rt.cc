@@ -18357,7 +18357,27 @@ static void rt_follow_cam(float dt)
 
     // No IGNORE_SCROLL_RESTRICTIONS, so the camera honors the map edge like
     // normal walking (it simply stops following at the boundary).
-    tile_set_center_offset(obj_dude->tile, TILE_SET_CENTER_REFRESH_WINDOW, offX, offY);
+    int centerRc = tile_set_center_offset(obj_dude->tile, TILE_SET_CENTER_REFRESH_WINDOW, offX, offY);
+
+    // Where he is on the screen once the view has been placed (2026-11-01, DENBUS2: "furt nevidím dude"): a
+    // line a second while his feet are off the map window, with what the centring answered.
+    static float rt_cam_lost_traced = -1.0f;
+    if (trace_enabled() && (rt_clock - rt_cam_lost_traced >= 1.0f || rt_cam_lost_traced > rt_clock)) {
+        int sx;
+        int sy;
+        tile_coord(obj_dude->tile, &sx, &sy, obj_dude->elevation);
+        sx += 16 + obj_dude->x;
+        sy += 8 + obj_dude->y;
+        Rect window;
+        win_get_rect(display_win, &window);
+        int w = window.lrx - window.ulx + 1;
+        int h = window.lry - window.uly + 1;
+        if (sx < 0 || sy < 0 || sx >= w || sy >= h) {
+            rt_cam_lost_traced = rt_clock;
+            trace_event(TRACE_WARN, "cam-lost", "tile=%d screen=%d,%d window=%dx%d rc=%d t=%.2f", obj_dude->tile, sx,
+                sy, w, h, centerRc, rt_clock);
+        }
+    }
 }
 
 // Live setter for the MODS screen + its reader. The cfg holds the time constant so it stays
