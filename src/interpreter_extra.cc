@@ -1253,10 +1253,42 @@ static void opGetGlobalVar(Program* program)
 // set_global_var
 // 0x4559EC
 // 0x80C6
+// ⚠️ A VANILLA SCRIPT BUG, PUT RIGHT (2026-11-01, the Deck: „nedostal jsem 1000xp za splnění questu“).
+// The Den gang war: the gang scripts (dcLara, dcTyler, dcMarc, the gang guards) count Tyler's gang in
+// GVAR_DEN_GANG_1_COUNT and Lara's in _2, and when a count runs out during the attack they move
+// GVAR_DEN_GANGWAR from 9 to 11 (Tyler's gang gone -- Lara's own script reads 11 as her win) or 10.
+// The reward they run with it is the wrong way round: 11 pays "You've successfully ambushed Lara's gang"
+// (1100 XP, and only after betraying her to Tyler, GVAR_DEN_GANG_TRAP), 10 pays "You helped Lara's gang
+// to win the battle" (1000 XP). Helping Lara paid nothing. Her win without the betrayal now gets the
+// reward written for it, in the scripts' own words.
+#define GVAR_DEN_GANGWAR 454
+#define GVAR_DEN_GANG_TRAP 471
+#define DEN_GANGWAR_ATTACK 9
+#define DEN_GANGWAR_LARA_WON 11
+static void denGangWarLaraReward(int variable, int value)
+{
+    if (variable != GVAR_DEN_GANGWAR || value != DEN_GANGWAR_LARA_WON
+        || gameGetGlobalVar(GVAR_DEN_GANGWAR) != DEN_GANGWAR_ATTACK || gameGetGlobalVar(GVAR_DEN_GANG_TRAP) != 0) {
+        return;
+    }
+
+    // Message list 59 is DenBus1.msg, 14 the generic one -- as the scripts print it.
+    displayMonitorAddMessage(_scr_get_msg_str(59, 200));
+    pcAddExperience(1000);
+    char line[256];
+    snprintf(line, sizeof(line), "%s%d%s", _scr_get_msg_str(14, 100), 1000, _scr_get_msg_str(14, 101));
+    displayMonitorAddMessage(line);
+    trace_event(TRACE_STATE, "den-gangwar-reward", "xp=1000");
+}
+
 static void opSetGlobalVar(Program* program)
 {
     ProgramValue value = programStackPopValue(program);
     int variable = programStackPopInteger(program);
+
+    if (value.opcode != VALUE_TYPE_PTR) {
+        denGangWarLaraReward(variable, value.integerValue);
+    }
 
     if (gGameGlobalVarsLength != 0) {
         if (value.opcode == VALUE_TYPE_PTR) {

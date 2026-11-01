@@ -1,0 +1,16 @@
+# F2 (2026-11-01, the Deck: "nedostal jsem 1000xp za splnění questu"): the Den gang war, his save at the church
+# with the attack on (GVAR_DEN_GANGWAR 9), copied to test slot 9. Lara's gang wipes out Tyler's crew; the scripts
+# set the war to 11 (Lara won) but pay the reward of the other outcome, which needs a betrayal -- so nothing.
+# The engine pays "You helped Lara's gang to win the battle." and 1000 XP.
+name m-den-gangwar
+map DESERT1.MAP
+loadslot 9
+seed 1
+duration 70
+dude hp 400
+dude curhp 400
+
+at 0 hunt
+
+expect den-gangwar-reward\] xp=1000
+expect You helped Lara's gang to win the battle
