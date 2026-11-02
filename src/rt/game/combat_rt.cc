@@ -6842,6 +6842,30 @@ typedef struct RtTeamFight {
 
 static RtTeamFight rt_team_fight = { -1, -1, -1, -1 };
 
+// ⚠️ THE TWO CRITTERS THE ENCOUNTER NAMED, TEAMS READ LATER (2026-11-02, the Deck: „po loadingu savu robbers
+// útočí jen na mě a karavana jen stojí“). _caiSetupTeamCombat runs in wmSetupRandomEncounter, before the
+// encounter critters' own map_enter has put them on their teams: the note read uninitialised teams (both
+// 111924), the fight was never "live", and the entry autosave -- a frame before the fight is set up -- kept
+// nothing of it. The teams are read from these two whenever the record is used (rt_team_fight_resolve).
+static Object* rt_team_fight_atk_obj = NULL;
+static Object* rt_team_fight_def_obj = NULL;
+
+static void rt_team_fight_resolve()
+{
+    if (rt_team_fight_atk_obj != NULL && rt_team_fight_def_obj != NULL) {
+        rt_team_fight.attackerTeam = rt_team_fight_atk_obj->data.critter.combat.team;
+        rt_team_fight.defenderTeam = rt_team_fight_def_obj->data.critter.combat.team;
+    }
+}
+
+// The named critters are going: their teams are what they are now.
+static void rt_team_fight_forget_objs()
+{
+    rt_team_fight_resolve();
+    rt_team_fight_atk_obj = NULL;
+    rt_team_fight_def_obj = NULL;
+}
+
 // ⚠️ THE FLED-ENEMY MEMORY (Fallout 2 Realtime, HIS DESIGN 2026-10-26 -- a deliberate change from vanilla:
 // "když uprostřed boje utečeš z mapy a vrátíš se" -> "Zůstane nepřítel"; vanilla's combat_over forgets the
 // fight on a map exit, and the canyon robot's one-shot KCRob script then stood passive). Leave a map in the
@@ -7208,15 +7232,17 @@ void combat_rt_note_team_fight(Object* attackerTeam, Object* defenderTeam)
     }
     rt_team_fight.map = rt_cur_map_index();
     rt_team_fight.elevation = attackerTeam->elevation;
-    rt_team_fight.attackerTeam = attackerTeam->data.critter.combat.team;
-    rt_team_fight.defenderTeam = defenderTeam->data.critter.combat.team;
-    trace_event(TRACE_FLOW, "team-fight-note", "map=%d elev=%d atkTeam=%d defTeam=%d",
+    rt_team_fight_atk_obj = attackerTeam;
+    rt_team_fight_def_obj = defenderTeam;
+    rt_team_fight_resolve();
+    trace_event(TRACE_FLOW, "team-fight-note", "map=%d elev=%d atkTeam=%d defTeam=%d (read again when used)",
         rt_team_fight.map, rt_team_fight.elevation, rt_team_fight.attackerTeam, rt_team_fight.defenderTeam);
 }
 
 // Worth keeping in a save: set up on this map, and both groups still have someone standing.
 static bool rt_team_fight_live()
 {
+    rt_team_fight_resolve();
     return rt_team_fight.map != -1 && rt_team_fight.map == rt_cur_map_index()
         && rt_team_fight.attackerTeam != rt_team_fight.defenderTeam
         && rt_team_fight_member(rt_team_fight.attackerTeam, rt_team_fight.elevation, false) != NULL
@@ -7405,6 +7431,8 @@ int combat_rt_medic_optout_load(DB_FILE* stream)
     rt_fight_restore_count = 0;
     rt_fled_count = 0;
     rt_team_fight.map = -1;
+    rt_team_fight_atk_obj = NULL;
+    rt_team_fight_def_obj = NULL;
 
     int count;
     if (!rt_save_read_int(stream, &count)) {
@@ -16443,6 +16471,8 @@ static void rt_abandon_encounter()
     rt_lost_memory_count = 0; // pointers only: the bodies are being freed by the caller
     // An encounter's team fight belongs to its map as well (same order: cleared, filled by the chunk, re-armed).
     rt_team_fight.map = -1;
+    rt_team_fight_atk_obj = NULL;
+    rt_team_fight_def_obj = NULL;
 }
 
 // Full per-session state reset, shared by init / exit / game-reset so every teardown path
@@ -22428,6 +22458,9 @@ void combat_rt_notify_critter_removed(Object* removed)
     }
     if (rt_mouse_target == removed) {
         rt_mouse_target = NULL;
+    }
+    if (rt_team_fight_atk_obj == removed || rt_team_fight_def_obj == removed) {
+        rt_team_fight_forget_objs();
     }
 
     // Remove it from the actor registry and clear any actor that was targeting it (both the
