@@ -1077,6 +1077,8 @@ void intface_invalidate_heal_slot()
     lb_slot_armed = -1;
 }
 
+static void pad_badge_pill(unsigned char* buf, int pitch, int w, int h, int cx, int cy, const char* text, int color);
+
 // Paints one slot at \`base\` (pitch \`pitch\`): the box frame when \`framed\`, a black plate, the icon,
 // the key label (red while its item is drawn) and the count (green, red when empty).
 static void intface_slot_paint(unsigned char* base, int pitch, bool framed, Object* item, int count, const char* label, bool armed)
@@ -1110,8 +1112,14 @@ static void intface_slot_paint(unsigned char* base, int pitch, bool framed, Obje
     }
 
     int labelY = 4 + iconH;
-    int labelX = (HEAL_SLOT_W - fontGetStringWidth(label)) / 2;
-    fontDrawText(base + pitch * labelY + labelX, label, pitch, pitch, armed ? _colorTable[31744] : _colorTable[32747]);
+    if (strcmp(label, "LB") == 0 || strcmp(label, "RB") == 0) {
+        // The pad's shoulder in the bar badges' pill (intface_update_pad_badges); its label red while armed.
+        pad_badge_pill(base, pitch, HEAL_SLOT_W, HEAL_SLOT_H, HEAL_SLOT_W / 2, labelY + lineH / 2 - 1, label,
+            armed ? _colorTable[31744] : -1);
+    } else {
+        int labelX = (HEAL_SLOT_W - fontGetStringWidth(label)) / 2;
+        fontDrawText(base + pitch * labelY + labelX, label, pitch, pitch, armed ? _colorTable[31744] : _colorTable[32747]);
+    }
 
     char countText[8];
     snprintf(countText, sizeof(countText), "%d", count);
@@ -1229,8 +1237,30 @@ static const char* pad_badge_glyph(char ch)
         return "10000100001000010000100001000011111";
     case 'S':
         return "01111100001000001110000010000111110";
+    case 'B':
+        return "11110100011000111110100011000111110";
+    case 'R':
+        return "11110100011000111110101001001010001";
+    case 'T':
+        return "11111001000010000100001000010000100";
+    case 'X':
+        return "10001100010101000100010101000110001";
     }
     return nullptr;
+}
+
+// The Steam Deck's look -- a light letter, the Deck's buttons have no colours -- or, on a PC, the Xbox
+// pad's: the face buttons' own colours (his picks, 2026-11-03). Steam sets SteamDeck=1 for a game it
+// starts on the Deck, through Proton too; a pad on the Deck is a virtual Xbox pad, so SDL cannot tell.
+static bool pad_badge_on_deck()
+{
+    static int onDeck = -1;
+    if (onDeck == -1) {
+        const char* value = getenv("SteamDeck");
+        onDeck = value != nullptr && strcmp(value, "1") == 0 ? 1 : 0;
+        trace_event(TRACE_STATE, "pad-badges", "look=%s", onDeck ? "deck" : "xbox");
+    }
+    return onDeck == 1;
 }
 
 // A palette index for a 0-255 grey, never 0 (the transparent index of a button picture).
@@ -1264,9 +1294,9 @@ static void pad_badge_disc(unsigned char* buf, int pitch, int w, int h, int cx, 
     }
 }
 
-static void pad_badge_text(unsigned char* buf, int pitch, int w, int h, const char* text, int cx, int cy)
+static void pad_badge_text(unsigned char* buf, int pitch, int w, int h, const char* text, int cx, int cy, int color = -1)
 {
-    int light = pad_badge_grey(210);
+    int light = color != -1 ? color : pad_badge_grey(210);
     int width = (int)strlen(text) * 6 - 1;
     int x0 = cx - width / 2;
     int y0 = cy - 3;
@@ -1278,6 +1308,55 @@ static void pad_badge_text(unsigned char* buf, int pitch, int w, int h, const ch
             }
         }
     }
+}
+
+// A face button (Y, X): the dark disc, its letter light on the Deck, in its Xbox colour on a PC.
+static void pad_badge_face(unsigned char* buf, int pitch, int w, int h, int cx, int cy, char key)
+{
+    pad_badge_disc(buf, pitch, w, h, cx, cy, PAD_BADGE_R);
+    int color = -1;
+    if (!pad_badge_on_deck()) {
+        switch (key) {
+        case 'Y':
+            color = _colorTable[(29 << 10) | (22 << 5) | 0];
+            break;
+        case 'X':
+            color = _colorTable[(8 << 10) | (18 << 5) | 31];
+            break;
+        }
+    }
+    char text[2] = { key, '\0' };
+    pad_badge_text(buf, pitch, w, h, text, cx, cy, color);
+}
+
+// A shoulder or a trigger (LB, RB, RT): a dark pill, its label light -- or `color` (an armed slot's red).
+static void pad_badge_pill(unsigned char* buf, int pitch, int w, int h, int cx, int cy, const char* text, int color)
+{
+    int fill = pad_badge_grey(44);
+    int edge = pad_badge_grey(12);
+    int pillW = (int)strlen(text) * 6 + 5;
+    int pillH = 11;
+    int x0 = cx - pillW / 2;
+    int y0 = cy - pillH / 2;
+    for (int y = 0; y < pillH; y++) {
+        for (int x = 0; x < pillW; x++) {
+            bool cornerX = x < 2 || x >= pillW - 2;
+            bool cornerY = y < 2 || y >= pillH - 2;
+            bool outer = (x == 0 || x == pillW - 1) && (y == 0 || y == pillH - 1);
+            if (outer || (cornerX && cornerY && (x == 0 || x == pillW - 1 || y == 0 || y == pillH - 1))) {
+                continue; // rounded corners
+            }
+            bool border = x == 0 || y == 0 || x == pillW - 1 || y == pillH - 1 || (cornerX && cornerY);
+            pad_badge_put(buf, pitch, w, h, x0 + x, y0 + y, border ? edge : fill);
+        }
+    }
+    pad_badge_text(buf, pitch, w, h, text, cx, cy, color);
+}
+
+// For the character sheet's folder tabs (character_editor.cc).
+void intface_pad_pill(unsigned char* buf, int pitch, int w, int h, int cx, int cy, const char* text)
+{
+    pad_badge_pill(buf, pitch, w, h, cx, cy, text, -1);
 }
 
 // The static ones: 0 View (inventory), 1 Menu (pause), 2-4 the D-pad left / down / up.
@@ -1324,6 +1403,27 @@ static unsigned char pad_badge_hands[2][22 * 21];
 static unsigned char pad_badge_skilldex[2][22 * 21];
 static int pad_badge_window = -1; // the bar they were painted on
 static bool pad_badge_shown = false;
+static int pad_badge_slot_state = -1; // the weapon slot's: 1 a pad, 2 the magazine empty
+
+// The weapon in the active hand takes ammo and has none loaded: X (reload) shows in the slot.
+static bool pad_badge_slot_empty()
+{
+    Object* item = gInterfaceItemStates[gInterfaceCurrentHand].item;
+    return item != nullptr && itemGetType(item) == ITEM_TYPE_WEAPON && ammoGetCapacity(item) > 0
+        && ammoGetQuantity(item) == 0;
+}
+
+// Called by interfaceBarRefreshMainAction on the slot's two pictures: RT top left, X beside it when empty.
+static void pad_badge_slot_paint(unsigned char* picture)
+{
+    if (gamepad_ui_get_controller() == nullptr) {
+        return;
+    }
+    pad_badge_pill(picture, 188, 188, 67, 14, 9, "RT", -1);
+    if (pad_badge_slot_empty()) {
+        pad_badge_face(picture, 188, 188, 67, 34, 9, 'X');
+    }
+}
 
 // Once a frame from gamepad_ui_tick: on when a pad is in, off when it is not.
 void intface_update_pad_badges()
@@ -1338,6 +1438,15 @@ void intface_update_pad_badges()
     }
 
     bool want = gamepad_ui_get_controller() != nullptr;
+
+    // The weapon slot draws its own RT and X (interfaceBarRefreshMainAction): repaint it when the pad
+    // comes or goes, or the magazine runs empty or is filled.
+    int slotState = (want ? 1 : 0) | (pad_badge_slot_empty() ? 2 : 0);
+    if (slotState != pad_badge_slot_state) {
+        pad_badge_slot_state = slotState;
+        interfaceBarRefreshMainAction();
+    }
+
     if (want == pad_badge_shown) {
         return;
     }
@@ -1364,8 +1473,7 @@ void intface_update_pad_badges()
         memcpy(pad_badge_skilldex[0], _skilldexButtonNormalFrmImage.getData(), sizeof(pad_badge_skilldex[0]));
         memcpy(pad_badge_skilldex[1], _skilldexButtonPressedFrmImage.getData(), sizeof(pad_badge_skilldex[1]));
         for (int i = 0; i < 2; i++) {
-            pad_badge_disc(pad_badge_hands[i], 22, 22, 21, 11, 10, PAD_BADGE_R);
-            pad_badge_text(pad_badge_hands[i], 22, 22, 21, "Y", 11, 10);
+            pad_badge_face(pad_badge_hands[i], 22, 22, 21, 11, 10, 'Y');
             pad_badge_disc(pad_badge_skilldex[i], 22, 22, 21, 11, 10, PAD_BADGE_R + 1);
             pad_badge_text(pad_badge_skilldex[i], 22, 22, 21, "LS", 11, 10);
         }
@@ -3340,6 +3448,12 @@ static int interfaceBarRefreshMainAction()
                 _dark_trans_buf_to_buf(label, labelW, WORN_H, labelW, _itemButtonDown, labelX + 1, labelY - 2, 188, 59641);
             }
         }
+    }
+
+    // With a pad: RT, and X while the magazine is empty (intface_update_pad_badges).
+    if (itemState->isDisabled == 0) {
+        pad_badge_slot_paint(_itemButtonUp);
+        pad_badge_slot_paint(_itemButtonDown);
     }
 
     if (!gInterfaceBarInitialized) {

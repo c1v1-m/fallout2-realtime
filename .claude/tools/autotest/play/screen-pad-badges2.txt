@@ -1,0 +1,21 @@
+# F2 (2026-11-03, his "Ano, postav je"): the weapon slot shows RT, and X once the magazine is empty; the side
+# panels' LB and RB are pills; on a PC the Y is yellow (Xbox look, no SteamDeck=1). A rocket launcher holds one
+# round: one shot at a far gecko empties it.
+name screen-pad-badges2
+map DESERT1.MAP
+seed 1
+duration 8
+dude tile 20100 rot 2
+dude armor 2
+dude wield 13
+spawn 16777296 22900 rot 5 hostile hp 500
+
+shot 700
+axis 900 LT 32767
+axis 1600 RT 32767
+axis 1900 RT -32768
+shot 4500
+axis 5000 LT -32768
+note 7000 end
+
+expect pad-badges\] look=xbox

@@ -3277,6 +3277,13 @@ static void characterEditorDrawFolders()
         debugPrint("\n ** Unknown folder type! **\n");
         break;
     }
+
+    // With a pad: LB and RB at the ends of the tab row, the shoulders that turn the tabs (ce_pad_poll), in
+    // the bar's pill (his pick, 2026-11-03: "ať hráč ví, že přepnutím uvidí kolik zabil, karmu atd").
+    if (gamepad_ui_get_controller() != nullptr) {
+        intface_pad_pill(gCharacterEditorWindowBuffer, EDITOR_WINDOW_WIDTH, EDITOR_WINDOW_WIDTH, 480, 18, 341, "LB");
+        intface_pad_pill(gCharacterEditorWindowBuffer, EDITOR_WINDOW_WIDTH, EDITOR_WINDOW_WIDTH, 480, 325, 341, "RB");
+    }
 }
 
 // 0x434238
