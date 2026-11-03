@@ -1,0 +1,10 @@
+# F2 (2026-11-03, his picks on the mockups): with a pad in, the bar names its buttons -- Y on the change-hands
+# button, LS on the Skilldex, View and Menu right of INV and the options wheel, the D-pad left of MAP/CHA/PIP.
+name screen-pad-badges
+map DESERT1.MAP
+seed 1
+duration 6
+dude tile 20100 rot 2
+
+shot 3000
+note 5000 end

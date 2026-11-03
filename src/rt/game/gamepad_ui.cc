@@ -8806,6 +8806,7 @@ void gamepad_ui_tick()
             intface_update_quick_slot_lb(item, count, gpui_qs_drawn(GPUI_QS_LB));
         }
         intface_update_aim_part(gpui_aim_last_part);
+        intface_update_pad_badges(); // off: no pad
         gpui_drain_requests();
         interact_prompt_tick();
         return;
@@ -8848,6 +8849,9 @@ void gamepad_ui_tick()
     // AIMED: the remembered part is what RT fires at then.
     // Also a no-op unless it changed, so polling costs a compare.
     intface_update_aim_part(gpui_aim_last_part);
+
+    // The pad's buttons named on the bar (intface_update_pad_badges); a compare unless the pad came or went.
+    intface_update_pad_badges();
 
     // The requests from the hook and the keyboard (heal, reload, exit run, called shot).
     gpui_drain_requests();

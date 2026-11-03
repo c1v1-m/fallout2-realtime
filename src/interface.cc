@@ -1206,6 +1206,181 @@ void intface_update_quick_slot_lb(Object* item, int count, bool armed)
     windowRefreshRect(win, &rect);
 }
 
+// --- PAD BUTTONS ON THE BAR -------------------------------------------------
+//
+// With a pad in, the bar names the buttons that work it (2026-11-03, his „jak lépe vylepšit UI, aby hráč
+// věděl, co kdy jak kde mačkat“ and his picks on the mockups: Xbox symbols, the Steam Deck look -- a dark
+// disc with a light letter -- Y and LS ON their red buttons, View and Menu to the RIGHT of INV and the
+// options wheel, clear of the message screen). Y swaps hands (held: weapons), LS opens the skills, View the
+// inventory, Menu the pause, the D-pad Map / Character / Pip-Boy. Without a pad the bar is vanilla's.
+//
+// Y and LS go into COPIES of their buttons' pictures, so a press or a disable redraws them with the badge;
+// the others go onto parts of the bar art nothing repaints, and what was under them is kept to put back.
+
+#define PAD_BADGE_R 7
+#define PAD_BADGE_STATIC 5
+
+static const char* pad_badge_glyph(char ch)
+{
+    switch (ch) {
+    case 'Y':
+        return "10001100010101000100001000010000100";
+    case 'L':
+        return "10000100001000010000100001000011111";
+    case 'S':
+        return "01111100001000001110000010000111110";
+    }
+    return nullptr;
+}
+
+// A palette index for a 0-255 grey, never 0 (the transparent index of a button picture).
+static int pad_badge_grey(int v)
+{
+    int c = v >> 3;
+    int index = _colorTable[(c << 10) | (c << 5) | c];
+    return index != 0 ? index : _colorTable[(2 << 10) | (2 << 5) | 2];
+}
+
+static void pad_badge_put(unsigned char* buf, int pitch, int w, int h, int x, int y, int color)
+{
+    if (x >= 0 && y >= 0 && x < w && y < h) {
+        buf[y * pitch + x] = (unsigned char)color;
+    }
+}
+
+static void pad_badge_disc(unsigned char* buf, int pitch, int w, int h, int cx, int cy, int r)
+{
+    int fill = pad_badge_grey(44);
+    int edge = pad_badge_grey(12);
+    for (int y = -r - 1; y <= r + 1; y++) {
+        for (int x = -r - 1; x <= r + 1; x++) {
+            float d = sqrtf((float)(x * x + y * y));
+            if (d <= r - 0.5f) {
+                pad_badge_put(buf, pitch, w, h, cx + x, cy + y, fill);
+            } else if (d <= r + 0.6f) {
+                pad_badge_put(buf, pitch, w, h, cx + x, cy + y, edge);
+            }
+        }
+    }
+}
+
+static void pad_badge_text(unsigned char* buf, int pitch, int w, int h, const char* text, int cx, int cy)
+{
+    int light = pad_badge_grey(210);
+    int width = (int)strlen(text) * 6 - 1;
+    int x0 = cx - width / 2;
+    int y0 = cy - 3;
+    for (const char* p = text; *p != '\0'; p++, x0 += 6) {
+        const char* g = pad_badge_glyph(*p);
+        for (int i = 0; g != nullptr && i < 35; i++) {
+            if (g[i] == '1') {
+                pad_badge_put(buf, pitch, w, h, x0 + i % 5, y0 + i / 5, light);
+            }
+        }
+    }
+}
+
+// The static ones: 0 View (inventory), 1 Menu (pause), 2-4 the D-pad left / down / up.
+static void pad_badge_icon(unsigned char* buf, int pitch, int w, int h, int kind, int cx, int cy)
+{
+    pad_badge_disc(buf, pitch, w, h, cx, cy, PAD_BADGE_R);
+    int light = pad_badge_grey(220);
+    int dim = pad_badge_grey(110);
+    if (kind == 0) {
+        for (int i = 0; i < 5; i++) {
+            pad_badge_put(buf, pitch, w, h, cx - 3 + i, cy - 3, light);
+            pad_badge_put(buf, pitch, w, h, cx - 3 + i, cy + 1, light);
+            pad_badge_put(buf, pitch, w, h, cx - 3, cy - 3 + i, light);
+            pad_badge_put(buf, pitch, w, h, cx + 1, cy - 3 + i, light);
+            pad_badge_put(buf, pitch, w, h, cx - 1 + i, cy + 3, light);
+            pad_badge_put(buf, pitch, w, h, cx + 3, cy - 1 + i, light);
+        }
+    } else if (kind == 1) {
+        for (int i = -3; i <= 3; i++) {
+            pad_badge_put(buf, pitch, w, h, cx + i, cy - 3, light);
+            pad_badge_put(buf, pitch, w, h, cx + i, cy, light);
+            pad_badge_put(buf, pitch, w, h, cx + i, cy + 3, light);
+        }
+    } else {
+        static const int arms[4][2] = { { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 0 } }; // left, down, up, right
+        pad_badge_put(buf, pitch, w, h, cx, cy, dim);
+        for (int a = 0; a < 4; a++) {
+            int color = a == kind - 2 ? light : dim;
+            for (int t = 1; t <= 4; t++) {
+                for (int s = -1; s <= 1; s++) {
+                    int dx = arms[a][0];
+                    int dy = arms[a][1];
+                    pad_badge_put(buf, pitch, w, h, cx + dx * t + (dy != 0 ? s : 0), cy + dy * t + (dx != 0 ? s : 0), color);
+                }
+            }
+        }
+    }
+}
+
+static const int pad_badge_static_at[PAD_BADGE_STATIC][2] = { { 253, 50 }, { 253, 78 }, { 517, 48 }, { 517, 67 }, { 517, 86 } };
+#define PAD_BADGE_SIZE (PAD_BADGE_R * 2 + 3)
+static unsigned char pad_badge_under[PAD_BADGE_STATIC][PAD_BADGE_SIZE * PAD_BADGE_SIZE];
+static unsigned char pad_badge_hands[2][22 * 21];
+static unsigned char pad_badge_skilldex[2][22 * 21];
+static int pad_badge_window = -1; // the bar they were painted on
+static bool pad_badge_shown = false;
+
+// Once a frame from gamepad_ui_tick: on when a pad is in, off when it is not.
+void intface_update_pad_badges()
+{
+    if (gInterfaceBarWindow == -1 || gInterfaceWindowBuffer == nullptr) {
+        return;
+    }
+    if (pad_badge_window != gInterfaceBarWindow) {
+        // A new bar: nothing of ours is on it.
+        pad_badge_window = gInterfaceBarWindow;
+        pad_badge_shown = false;
+    }
+
+    bool want = gamepad_ui_get_controller() != nullptr;
+    if (want == pad_badge_shown) {
+        return;
+    }
+    pad_badge_shown = want;
+
+    unsigned char* bar = gInterfaceWindowBuffer;
+    int pitch = gInterfaceBarWidth;
+    int half = PAD_BADGE_SIZE / 2;
+    for (int i = 0; i < PAD_BADGE_STATIC; i++) {
+        int x = pad_badge_static_at[i][0] + gInterfaceBarContentOffset - half;
+        int y = pad_badge_static_at[i][1] - half;
+        unsigned char* at = bar + y * pitch + x;
+        if (want) {
+            blitBufferToBuffer(at, PAD_BADGE_SIZE, PAD_BADGE_SIZE, pitch, pad_badge_under[i], PAD_BADGE_SIZE);
+            pad_badge_icon(at, pitch, PAD_BADGE_SIZE, PAD_BADGE_SIZE, i, half, half);
+        } else {
+            blitBufferToBuffer(pad_badge_under[i], PAD_BADGE_SIZE, PAD_BADGE_SIZE, PAD_BADGE_SIZE, at, pitch);
+        }
+    }
+
+    if (want) {
+        memcpy(pad_badge_hands[0], _changeHandsButtonNormalFrmImage.getData(), sizeof(pad_badge_hands[0]));
+        memcpy(pad_badge_hands[1], _changeHandsButtonPressedFrmImage.getData(), sizeof(pad_badge_hands[1]));
+        memcpy(pad_badge_skilldex[0], _skilldexButtonNormalFrmImage.getData(), sizeof(pad_badge_skilldex[0]));
+        memcpy(pad_badge_skilldex[1], _skilldexButtonPressedFrmImage.getData(), sizeof(pad_badge_skilldex[1]));
+        for (int i = 0; i < 2; i++) {
+            pad_badge_disc(pad_badge_hands[i], 22, 22, 21, 11, 10, PAD_BADGE_R);
+            pad_badge_text(pad_badge_hands[i], 22, 22, 21, "Y", 11, 10);
+            pad_badge_disc(pad_badge_skilldex[i], 22, 22, 21, 11, 10, PAD_BADGE_R + 1);
+            pad_badge_text(pad_badge_skilldex[i], 22, 22, 21, "LS", 11, 10);
+        }
+        _win_register_button_image(gChangeHandsButton, pad_badge_hands[0], pad_badge_hands[1], nullptr, true);
+        _win_register_button_image(gSkilldexButton, pad_badge_skilldex[0], pad_badge_skilldex[1], nullptr, true);
+    } else {
+        _win_register_button_image(gChangeHandsButton, _changeHandsButtonNormalFrmImage.getData(),
+            _changeHandsButtonPressedFrmImage.getData(), nullptr, true);
+        _win_register_button_image(gSkilldexButton, _skilldexButtonNormalFrmImage.getData(),
+            _skilldexButtonPressedFrmImage.getData(), nullptr, true);
+    }
+
+    windowRefresh(gInterfaceBarWindow);
+}
+
 // --- AIMED-SHOT PART, IN THE WEAPON SLOT -----------------------------------
 //
 // Where an aimed RT goes: the part bound in the LB called-shot window (gpui_aim_last_part, default

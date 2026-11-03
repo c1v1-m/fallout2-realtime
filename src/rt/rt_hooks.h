@@ -146,6 +146,7 @@ void intface_hp_roll_cancel();
 void intface_update_heal_slot(Object* item, int count, bool armed = false);
 void intface_invalidate_heal_slot();
 void intface_update_quick_slot_lb(Object* item, int count, bool armed);
+void intface_update_pad_badges();
 void intface_update_aim_part(int hitLocation);
 void intface_rt_combat_box_tick(bool engaged, float dt);
 void intface_rt_combat_box_reset();
