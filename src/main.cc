@@ -490,6 +490,18 @@ static void mainLoop()
         // The keyboard as a controller first: arrows, Space, Q/E, H, R, F, V and G belong to the pad
         // layer (gamepad_ui_handle_key). Then realtime combat (the optional mouse aim and its
         // right-click called shot); anything left falls through to vanilla.
+        // ...but not with the dude dead or out. His death animation plays here before the death scene
+        // (vanilla ran no loop by then), and nothing may act on that game any more -- save, load, the
+        // inventory, the Pip-Boy, a click into the world: „šlo savovat nebo loadovat při death screen“.
+        // Quitting stays, and the wheel scroll (-1).
+        if (keyCode != -1 && gDude != nullptr && (gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0
+            && keyCode != KEY_CTRL_Q && keyCode != KEY_CTRL_X && keyCode != KEY_F10) {
+            if (keyCode != -2) {
+                trace_event(TRACE_INPUT, "key-refused", "code=%d why=dude-down", keyCode);
+            }
+            keyCode = -1;
+        }
+
         bool rtConsumed = gamepad_ui_handle_key(&keyCode) || combat_rt_handle_input(keyCode);
         if (keyCode != -1) {
             trace_event(TRACE_INPUT, "key", "code=%d rt=%d", keyCode, rtConsumed ? 1 : 0);
@@ -543,6 +555,7 @@ static void mainLoop()
         {
             bool justLoaded = LoadSaveConsumeJustLoaded();
             bool canAutosave = gDude != nullptr && !isInCombat() && !combat_rt_death_anim_pending() && !autotest_active()
+                && (gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) == 0
                 && !gameUiIsDisabled() && !combat_rt_scene_pending();
 
             static bool autosavePendingLocation = false;
@@ -614,8 +627,30 @@ static void mainLoop()
 }
 
 // 0x48118C
+// Any button of the pad down, the triggers pulled included (showDeath).
+static bool death_pad_any_down(SDL_GameController* pad)
+{
+    if (pad == nullptr) {
+        return false;
+    }
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++) {
+        if (SDL_GameControllerGetButton(pad, (SDL_GameControllerButton)b) != 0) {
+            return true;
+        }
+    }
+    return SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16000
+        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000;
+}
+
 static void showDeath()
 {
+    // Realtime (from fallout1-ce): no game behind this screen any more -- main_reset_system() has run --
+    // yet its loop reaches the pad through the mouse hook, so START opened the pause menu with its save
+    // and load, BACK the inventory, over a torn-down game („šlo savovat nebo loadovat při death screen“).
+    // No session = none of the gameplay shortcuts; self nav = the pad moves no cursor and clicks nothing.
+    gamepad_ui_set_no_session(true);
+    gamepad_ui_set_self_nav(true);
+
     artCacheFlush();
     colorCycleDisable();
     gameMouseSetCursor(MOUSE_CURSOR_NONE);
@@ -704,6 +739,12 @@ static void showDeath()
             // screen.
             inputBlockForTocks(100);
 
+            // Realtime: a pad button ends the narration too, as a key or a click does (his „kliknutím
+            // nejde ukončit kecání při death screen“ -- the pad is how he plays, and a press reached
+            // nothing here). Only a press made on this screen: one still held from the fight does not.
+            SDL_GameController* pad = gamepad_ui_get_controller();
+            bool padHeld = death_pad_any_down(pad);
+
             unsigned int time = getTicks();
             int keyCode;
             do {
@@ -711,9 +752,28 @@ static void showDeath()
 
                 keyCode = inputGetInput();
 
+                if (keyCode == -1 && pad != nullptr) {
+                    bool down = death_pad_any_down(pad);
+                    if (down && !padHeld) {
+                        keyCode = KEY_ESCAPE;
+                        trace_event(TRACE_INPUT, "death-skip", "pad=1");
+                    }
+                    padHeld = down;
+                }
+
                 renderPresent();
                 sharedFpsLimiter.throttle();
             } while (keyCode == -1 && !_main_death_voiceover_done && getTicksSince(time) < delay);
+
+            // ...and the press that ended it is let go before the main menu reads the pad, or it would
+            // land there as a press of its own.
+            unsigned int releaseFrom = getTicks();
+            while (death_pad_any_down(pad) && getTicksSince(releaseFrom) < 1500) {
+                sharedFpsLimiter.mark();
+                inputGetInput();
+                renderPresent();
+                sharedFpsLimiter.throttle();
+            }
 
             speechSetEndCallback(nullptr);
 
@@ -745,6 +805,9 @@ static void showDeath()
     gameMouseSetCursor(MOUSE_CURSOR_ARROW);
 
     colorCycleEnable();
+
+    gamepad_ui_set_self_nav(false);
+    gamepad_ui_set_no_session(false);
 }
 
 // 0x4814A8

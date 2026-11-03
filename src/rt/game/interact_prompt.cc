@@ -1381,8 +1381,10 @@ void interact_prompt_tick()
     ip_load_config();
 
     // A script's scene has the dude (combat_rt_script_ui_locked): no prompt, and nothing queued
-    // before it began is acted on.
-    if (combat_rt_script_ui_locked()) {
+    // before it began is acted on. Nor with the dude dead or out: his death animation is playing and
+    // the death scene comes next.
+    if (combat_rt_script_ui_locked()
+        || (obj_dude != NULL && (obj_dude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0)) {
         ip_pending = NULL;
         ip_pending_kind = IP_NONE;
         ip_clear_outline();

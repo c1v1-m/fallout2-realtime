@@ -446,6 +446,15 @@ void gamepad_ui_set_no_session(bool active)
     gpui_no_session = active;
 }
 
+// The dude dead or out (Fallout 2 Realtime 2026-11-03). His death animation still plays in the main loop
+// and the death scene follows it, so nothing the pad opens or uses may act on that game any more -- the
+// pause menu's save and load, START-hold's quick save, the inventory, a stimpak: „šlo savovat nebo
+// loadovat při death screen, což může způsobit potíže“. The same flags the main loop ends the game on.
+static bool gpui_dude_down()
+{
+    return obj_dude != nullptr && (obj_dude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0;
+}
+
 void gamepad_ui_set_suppress_snap(bool active)
 {
     gpui_suppress_snap = active;
@@ -1707,7 +1716,7 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
     // hold that opened the Pip-Boy is still physically down while the Pip-Boy is up; forgetting it
     // would restart the timer the moment the screen closed and immediately reopen it. Keeping
     // gpui_dpad_handled set means that direction stays spent until it is genuinely released.
-    if (in_main_menu || gpui_no_session || (!gpui_in_dpad_screen
+    if (in_main_menu || gpui_no_session || gpui_dude_down() || (!gpui_in_dpad_screen
             && (inven_any_open() || options_is_open() || gamepad_ui_menu_active()
                 || dialog_active() || !intface_is_enabled() || gpui_action_popup_active))) {
         gpui_dpad_forget();
@@ -1722,8 +1731,8 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
     // button still held when gameplay actually starts is not misread as a fresh press.
     // gpui_no_session covers the death scene, which is the same situation one screen later:
     // main_reset_system() has already run by then, so anything these shortcuts open would be
-    // operating on a torn-down game.
-    if (in_main_menu || gpui_no_session) {
+    // operating on a torn-down game. gpui_dude_down() is the moment before it: the death animation.
+    if (in_main_menu || gpui_no_session || gpui_dude_down()) {
         return;
     }
 
@@ -8807,7 +8816,9 @@ void gamepad_ui_tick()
         }
         intface_update_aim_part(gpui_aim_last_part);
         intface_update_pad_badges(); // off: no pad
-        gpui_drain_requests();
+        if (!gpui_dude_down()) {
+            gpui_drain_requests();
+        }
         interact_prompt_tick();
         return;
     }
@@ -8853,14 +8864,23 @@ void gamepad_ui_tick()
     // The pad's buttons named on the bar (intface_update_pad_badges); a compare unless the pad came or went.
     intface_update_pad_badges();
 
-    // The requests from the hook and the keyboard (heal, reload, exit run, called shot).
-    gpui_drain_requests();
+    // The dude dead or out: no request, no wheel, and a wheel already up closes (gpui_dude_down).
+    bool dudeDown = gpui_dude_down();
+    if (dudeDown && radial_wheel_is_open()) {
+        radial_wheel_close();
+        gpui_wheel_owner = GPUI_WHEEL_NONE;
+    }
 
-    gpui_skill_wheel(pad);
-    gpui_quick_wheel(pad);
-    gpui_weapon_wheel(pad);
-    gpui_aim_wheel(pad);
-    gpui_useon_arm(pad);
+    // The requests from the hook and the keyboard (heal, reload, exit run, called shot).
+    if (!dudeDown) {
+        gpui_drain_requests();
+
+        gpui_skill_wheel(pad);
+        gpui_quick_wheel(pad);
+        gpui_weapon_wheel(pad);
+        gpui_aim_wheel(pad);
+        gpui_useon_arm(pad);
+    }
     gpui_wheel_a_edge = false; // consumed by whichever wheel was open
 
     // PAUSE THE WORLD WHILE A WHEEL IS UP. combat_rt freezes its own clock (see combat_rt_update),

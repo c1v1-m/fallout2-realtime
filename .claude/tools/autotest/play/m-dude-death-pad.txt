@@ -1,0 +1,19 @@
+# F2 (2026-11-03, „šlo savovat nebo loadovat při death screen“): with the dude dead, the pad opens nothing.
+# m-dude-death, plus START (the pause menu with save/load) and BACK (the inventory) pressed while his death
+# animation plays. Before the fix START opened the pause menu over the dying dude; the run never ended.
+name m-dude-death-pad
+map DESERT1.MAP
+seed 1
+duration 15
+dude tile 15100 rot 2
+dude curhp 3
+spawn 16777454 15700 rot 5 wield 8 item 29 4 hostile
+at 0 idle
+tap 1300 START
+tap 1800 BACK
+tap 2100 RB
+expect react\] pid=16777216 id=18000 none->dying
+expect autotest] pad t=.* start=1
+expect autotest] pad t=.* back=1
+expect autotest\] end why=dude-dead
+expect-not quick-slot-press

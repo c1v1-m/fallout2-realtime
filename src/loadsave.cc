@@ -680,6 +680,14 @@ int QuickSaveGame()
 // 0x47B88C
 int lsgSaveGame(int mode)
 {
+    // ⚠️ The same rule as SaveGameSlot, for the save SCREEN and F6: not with the dude dead or out (his
+    // „šlo savovat nebo loadovat při death screen“). The flag would be in the save, and every load of it
+    // would go straight back to the death scene. 0 = nothing saved, as a cancel.
+    if (gDude != nullptr && (gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+        trace_event(TRACE_WARN, "save-refused", "mode=%d why=dude-down", mode);
+        return 0;
+    }
+
     ScopedGameMode gm(GameMode::kSaveGame);
 
     MessageListItem messageListItem;
