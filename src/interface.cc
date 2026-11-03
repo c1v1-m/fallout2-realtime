@@ -1249,18 +1249,12 @@ static const char* pad_badge_glyph(char ch)
     return nullptr;
 }
 
-// The Steam Deck's look -- a light letter, the Deck's buttons have no colours -- or, on a PC, the Xbox
-// pad's: the face buttons' own colours (his picks, 2026-11-03). Steam sets SteamDeck=1 for a game it
-// starts on the Deck, through Proton too; a pad on the Deck is a virtual Xbox pad, so SDL cannot tell.
-static bool pad_badge_on_deck()
+// Every letter and icon in the gold of the weapon slot's "AP 3" and "PUNCH" (palette 60), on the Deck and
+// a PC alike -- his pick over the light Deck letters and the Xbox colours ("Zkus použít tu žlutou jak má
+// AP3", the dark disc kept).
+static int pad_badge_gold()
 {
-    static int onDeck = -1;
-    if (onDeck == -1) {
-        const char* value = getenv("SteamDeck");
-        onDeck = value != nullptr && strcmp(value, "1") == 0 ? 1 : 0;
-        trace_event(TRACE_STATE, "pad-badges", "look=%s", onDeck ? "deck" : "xbox");
-    }
-    return onDeck == 1;
+    return _colorTable[(23 << 10) | (19 << 5) | 5]; // 184,156,40
 }
 
 // A palette index for a 0-255 grey, never 0 (the transparent index of a button picture).
@@ -1296,7 +1290,7 @@ static void pad_badge_disc(unsigned char* buf, int pitch, int w, int h, int cx, 
 
 static void pad_badge_text(unsigned char* buf, int pitch, int w, int h, const char* text, int cx, int cy, int color = -1)
 {
-    int light = color != -1 ? color : pad_badge_grey(210);
+    int light = color != -1 ? color : pad_badge_gold();
     int width = (int)strlen(text) * 6 - 1;
     int x0 = cx - width / 2;
     int y0 = cy - 3;
@@ -1310,26 +1304,15 @@ static void pad_badge_text(unsigned char* buf, int pitch, int w, int h, const ch
     }
 }
 
-// A face button (Y, X): the dark disc, its letter light on the Deck, in its Xbox colour on a PC.
+// A face button (Y, X): the dark disc, its letter gold.
 static void pad_badge_face(unsigned char* buf, int pitch, int w, int h, int cx, int cy, char key)
 {
     pad_badge_disc(buf, pitch, w, h, cx, cy, PAD_BADGE_R);
-    int color = -1;
-    if (!pad_badge_on_deck()) {
-        switch (key) {
-        case 'Y':
-            color = _colorTable[(29 << 10) | (22 << 5) | 0];
-            break;
-        case 'X':
-            color = _colorTable[(8 << 10) | (18 << 5) | 31];
-            break;
-        }
-    }
     char text[2] = { key, '\0' };
-    pad_badge_text(buf, pitch, w, h, text, cx, cy, color);
+    pad_badge_text(buf, pitch, w, h, text, cx, cy);
 }
 
-// A shoulder or a trigger (LB, RB, RT): a dark pill, its label light -- or `color` (an armed slot's red).
+// A shoulder or a trigger (LB, RB, RT): a dark pill, its label gold -- or `color` (an armed slot's red).
 static void pad_badge_pill(unsigned char* buf, int pitch, int w, int h, int cx, int cy, const char* text, int color)
 {
     int fill = pad_badge_grey(44);
@@ -1363,7 +1346,7 @@ void intface_pad_pill(unsigned char* buf, int pitch, int w, int h, int cx, int c
 static void pad_badge_icon(unsigned char* buf, int pitch, int w, int h, int kind, int cx, int cy)
 {
     pad_badge_disc(buf, pitch, w, h, cx, cy, PAD_BADGE_R);
-    int light = pad_badge_grey(220);
+    int light = pad_badge_gold();
     int dim = pad_badge_grey(110);
     if (kind == 0) {
         for (int i = 0; i < 5; i++) {

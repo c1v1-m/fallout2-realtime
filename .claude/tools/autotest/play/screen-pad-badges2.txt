@@ -1,5 +1,5 @@
 # F2 (2026-11-03, his "Ano, postav je"): the weapon slot shows RT, and X once the magazine is empty; the side
-# panels' LB and RB are pills; on a PC the Y is yellow (Xbox look, no SteamDeck=1). A rocket launcher holds one
+# panels' LB and RB are pills; every letter is the gold of "AP 3". A rocket launcher holds one
 # round: one shot at a far gecko empties it.
 name screen-pad-badges2
 map DESERT1.MAP
@@ -18,4 +18,4 @@ shot 4500
 axis 5000 LT -32768
 note 7000 end
 
-expect pad-badges\] look=xbox
+expect COMBAT/attack\] DUDE aid=18000
