@@ -297,7 +297,14 @@ static int ip_classify(Object* obj)
         // Tow2Chid / CTower*); obj_use on a bare one just says "You see: Staircase". The tower's flight
         // is two pieces side by side and only one carries the script -- the nearer, dead one took A
         // four times running. Not offered, so A lands on the half that works.
-        if (hasProto && proto->scenery.type == SCENERY_TYPE_STAIRS && obj->sid == -1) {
+        //
+        // ⚠️ "NO SCRIPT" IS NOT "NOWHERE" (Fallout 2 Realtime 2026-11-04, „nemůžu se po výbuchu tnt v caves s
+        // hovnama vstoupit do kráteru … nemám na výběr dlaň“). Vanilla's useStairs travels on the MAP OBJECT's
+        // own destination (data.scenery.stairs), and only a -1 there means a dead flight. The crater the
+        // outhouse leaves in Modoc (MODINN elevation 1, pid 33555730 "Hole") is exactly that: stairs with no
+        // script whose object leads down to MODSHIT, and the old test dropped it with the tower's dead half.
+        if (hasProto && proto->scenery.type == SCENERY_TYPE_STAIRS && obj->sid == -1
+            && obj->data.scenery.stairs.destinationBuiltTile == -1) {
             return IP_NONE;
         }
         // ⚠️ WHAT LIES FLAT ON THE FLOOR IS STEPPED ON, NOT USED (Fallout 2 Realtime 2026-10-24, the

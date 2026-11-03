@@ -1,0 +1,16 @@
+# F2 (2026-11-04, „nemůžu se po výbuchu tnt v caves s hovnama vstoupit do kráteru … nemám na výběr dlaň“): the crater
+# the outhouse leaves in Modoc (MODINN elevation 1, once GVAR 297 bit 1 says the shitter blew) is pid 33555730 "Hole",
+# a STAIRS scenery with no script whose map object carries the destination (vanilla useStairs reads the object's
+# data, not the proto). The use prompt dropped every script-less staircase, so A had nothing to offer.
+name m-modoc-crater
+map MODINN.MAP
+mapscript on
+seed 1
+duration 14
+gvar 297 1
+dude elevation 1
+dude tile 19477 rot 2
+tap 3000 A
+expect interact-do] kind=1 pid=33555730 .* rc=0
+expect ip-show\] pid=33555730
+expect map-load-stage\] done name=modshit
