@@ -3749,6 +3749,60 @@ int _obj_save_dude(File* stream)
     return rc;
 }
 
+// Realtime (Fallout 2 Realtime 2026-11-04): one critter with its inventory out to a stream that is not a
+// map file -- the party backup in SAVE.DAT (party_member.cc, partyMembersBackupWrite). A companion carries
+// OBJECT_NO_SAVE (it travels with the dude), which _obj_save_obj would skip, so the flag is lifted for the
+// call; the script id is written as -1, since a restore makes the companion a script of its own.
+int objectWriteDetached(File* stream, Object* obj)
+{
+    int savedFlags = obj->flags;
+    int savedSid = obj->sid;
+
+    obj->flags &= ~OBJECT_NO_SAVE;
+    obj->sid = -1;
+
+    int rc = _obj_save_obj(stream, obj);
+
+    obj->sid = savedSid;
+    obj->flags = savedFlags;
+
+    return rc;
+}
+
+// ...and back: a new object with its inventory, linked into the object list at no tile on `elevation`. The
+// caller places it (objectSetLocation). 0 on success; nothing is left behind on a failure.
+int objectReadDetached(File* stream, Object** objectPtr, int elevation)
+{
+    *objectPtr = nullptr;
+
+    Object* obj;
+    if (_obj_load_obj(stream, &obj, elevation, nullptr) != 0 || obj == nullptr) {
+        return -1;
+    }
+
+    ObjectListNode* node;
+    if (objectListNodeCreate(&node) == -1) {
+        return -1;
+    }
+
+    obj->tile = -1;
+    obj->sid = -1;
+    obj->outline = 0;
+    // A companion is written with OBJECT_NO_REMOVE (it travels with the dude); left on, a copy the caller has to
+    // throw away could never be destroyed. partyMemberAdd sets it again on the one that joins.
+    obj->flags &= ~OBJECT_NO_REMOVE;
+    if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+        obj->data.critter.combat.whoHitMe = nullptr;
+        obj->data.critter.combat.whoHitMeCid = -1;
+    }
+
+    node->obj = obj;
+    _obj_insert(node);
+
+    *objectPtr = obj;
+    return 0;
+}
+
 // obj_load_dude
 // 0x48D600
 int _obj_load_dude(File* stream)

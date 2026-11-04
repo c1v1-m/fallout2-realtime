@@ -97,6 +97,8 @@ char* objectGetDescription(Object* obj);
 void _obj_preload_art_cache(int flags);
 int _obj_save_dude(File* stream);
 int _obj_load_dude(File* stream);
+int objectWriteDetached(File* stream, Object* obj);
+int objectReadDetached(File* stream, Object** objectPtr, int elevation);
 void _obj_fix_violence_settings(int* fid);
 
 Object* objectTypedFindById(int id, int type);

@@ -33,6 +33,8 @@
 #include "tile.h"
 #include "window_manager.h"
 
+#include "rt/game/game_trace.h"
+
 namespace fallout {
 
 // SFALL: Enable party members with level 6 protos to reach level 6.
@@ -108,6 +110,12 @@ static int _partyMemberItemCount = 20000;
 
 // 0x519DB4
 static int _partyStatePrepped = 0;
+
+// Realtime (Fallout 2 Realtime 2026-11-04): the companions partyMembersLoad could not find on the loaded map,
+// by object id -- what the party backup further on in SAVE.DAT restores (partyMembersBackupRead).
+#define PARTY_BACKUP_MAX 32
+static int gPartyLoadMissingIds[PARTY_BACKUP_MAX];
+static int gPartyLoadMissingCount = 0;
 
 // 0x519DB8
 static PartyMemberDescription* gPartyMemberDescriptions = nullptr;
@@ -723,6 +731,8 @@ int partyMembersLoad(File* stream)
     if (fileReadInt32(stream, &_partyMemberItemCount) == -1) return -1;
 
     gPartyMembers->object = gDude;
+    gPartyLoadMissingCount = 0;
+    trace_event(TRACE_STATE, "party-load-begin", "members=%d items=%d", gPartyMembersLength, _partyMemberItemCount);
 
     if (gPartyMembersLength != 0) {
         for (int index = 1; index < gPartyMembersLength; index++) {
@@ -742,7 +752,16 @@ int partyMembersLoad(File* stream)
 
             if (object != nullptr) {
                 gPartyMembers[index].object = object;
+                trace_event(TRACE_STATE, "party-load", "index=%d id=%d pid=%d tile=%d elev=%d sid=%08x",
+                    index, objectId, object->pid, object->tile, object->elevation, object->sid);
             } else {
+                // Realtime: traced -- a companion who silently drops out of the party on a load is
+                // otherwise invisible (Vic, 2026-11-04) -- and remembered, so the party backup further on in
+                // SAVE.DAT can bring him back (partyMembersBackupRead).
+                trace_event(TRACE_WARN, "party-load-missing", "index=%d id=%d of=%d", index, objectId, gPartyMembersLength);
+                if (gPartyLoadMissingCount < PARTY_BACKUP_MAX) {
+                    gPartyLoadMissingIds[gPartyLoadMissingCount++] = objectId;
+                }
                 debugPrint("Couldn't find party member on map...trying to load anyway.\n");
                 if (index + 1 >= gPartyMembersLength) {
                     partyMemberObjectIds[index] = 0;
@@ -771,6 +790,347 @@ int partyMembersLoad(File* stream)
     }
 
     return 0;
+}
+
+// --- Realtime: the party backup in SAVE.DAT (Fallout 2 Realtime 2026-11-04) ----------------------------------
+//
+// His „Vic se ztratil … zamez tomu, aby se companions ztráceli“. A companion's object lives only in the map file
+// of the map he stood on (MODMAIN.SAV ...); SAVE.DAT names him by id. Steam Cloud once delivered a slot's new
+// SAVE.DAT with the OLD map files (Deck -> PC), partyMembersLoad did not find Vic on that map, dropped him,
+// and every save after had no Vic. So SAVE.DAT now carries its own copy of every companion -- the object with
+// his inventory, his script's index and local variables, and his proto (his level-ups) -- and a companion the
+// map does not have is put back from it, next to the dude. One the map does have is left exactly as vanilla
+// loads him; the copy is then only skipped over.
+//
+// Written into the realtime chunk's sections (combat_rt.cc, RT_SAVE_PARTY_TAG), so an older build skips it by
+// its length. Layout, big-endian ints:
+//   count, then per companion: recordLength (the bytes after this int), valid, id, pid, tile, elevation,
+//   rotation, scriptIndex, varCount, vars[varCount], hasProto, [proto], object (objectWriteDetached).
+// ⚠️ A record whose object could not be written stays in the file with valid = 0 and its length patched over
+// whatever was written, so a reader always skips it whole.
+#define PARTY_BACKUP_MAX_VARS 512
+
+int partyMembersBackupWrite(File* stream)
+{
+    int count = gPartyMembersLength > 1 ? gPartyMembersLength - 1 : 0;
+    if (count > PARTY_BACKUP_MAX) {
+        count = PARTY_BACKUP_MAX;
+    }
+    if (fileWriteInt32(stream, count) == -1) {
+        return -1;
+    }
+
+    for (int index = 1; index <= count; index++) {
+        Object* obj = gPartyMembers[index].object;
+
+        long lengthAt = fileTell(stream);
+        if (fileWriteInt32(stream, 0) == -1) {
+            return -1;
+        }
+        long validAt = fileTell(stream);
+        if (fileWriteInt32(stream, 0) == -1) {
+            return -1;
+        }
+
+        bool valid = false;
+        if (obj != nullptr) {
+            Script* script = nullptr;
+            int scriptIndex = -1;
+            int varCount = 0;
+            if (obj->sid != -1 && scriptGetScript(obj->sid, &script) != -1) {
+                scriptIndex = script->index;
+                if (script->localVarsCount > 0 && script->localVarsOffset >= 0 && gMapLocalVars != nullptr
+                    && script->localVarsOffset + script->localVarsCount <= gMapLocalVarsLength) {
+                    varCount = script->localVarsCount < PARTY_BACKUP_MAX_VARS ? script->localVarsCount : PARTY_BACKUP_MAX_VARS;
+                }
+            }
+
+            if (fileWriteInt32(stream, obj->id) == -1
+                || fileWriteInt32(stream, obj->pid) == -1
+                || fileWriteInt32(stream, obj->tile) == -1
+                || fileWriteInt32(stream, obj->elevation) == -1
+                || fileWriteInt32(stream, obj->rotation) == -1
+                || fileWriteInt32(stream, scriptIndex) == -1
+                || fileWriteInt32(stream, varCount) == -1) {
+                return -1;
+            }
+            for (int v = 0; v < varCount; v++) {
+                if (fileWriteInt32(stream, gMapLocalVars[script->localVarsOffset + v]) == -1) {
+                    return -1;
+                }
+            }
+
+            bool hasProto = PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER;
+            if (fileWriteInt32(stream, hasProto ? 1 : 0) == -1) {
+                return -1;
+            }
+            bool protoOk = !hasProto || protoWriteToStream(obj->pid, stream) == 0;
+            valid = protoOk && objectWriteDetached(stream, obj) == 0;
+        }
+
+        long endAt = fileTell(stream);
+        if (lengthAt < 0 || validAt < 0 || endAt < 0
+            || fileSeek(stream, lengthAt, SEEK_SET) != 0
+            || fileWriteInt32(stream, (int)(endAt - validAt)) == -1
+            || fileWriteInt32(stream, valid ? 1 : 0) == -1
+            || fileSeek(stream, endAt, SEEK_SET) != 0) {
+            return -1;
+        }
+
+        trace_event(valid ? TRACE_STATE : TRACE_WARN, "party-backup-save", "id=%d pid=%d valid=%d bytes=%ld",
+            obj != nullptr ? obj->id : -1, obj != nullptr ? obj->pid : -1, valid ? 1 : 0, endAt - validAt);
+    }
+
+    return 0;
+}
+
+// Where a restored companion stands: where he stood when the game was saved, when that is free and on the
+// dude's elevation, else the nearest free tile around the dude.
+static int partyBackupPlaceTile(Object* obj, int savedTile, int savedElevation)
+{
+    int elevation = gDude->elevation;
+    if (savedElevation == elevation && savedTile >= 0 && savedTile < HEX_GRID_SIZE
+        && _obj_blocking_at(obj, savedTile, elevation) == nullptr) {
+        return savedTile;
+    }
+
+    for (int distance = 1; distance <= 6; distance++) {
+        for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+            int tile = tileGetTileInDirection(gDude->tile, rotation, distance);
+            if (tile >= 0 && tile < HEX_GRID_SIZE && _obj_blocking_at(obj, tile, elevation) == nullptr) {
+                return tile;
+            }
+        }
+    }
+
+    return gDude->tile;
+}
+
+// One companion from the copy, onto the map and into the party. The stream stands right after `hasProto`'s
+// proto. False when he could not be made; nothing half-made is left in the party.
+static bool partyBackupRestore(File* stream, int id, int pid, int savedTile, int savedElevation, int rotation,
+    int scriptIndex, const int* vars, int varCount, bool duringLoad)
+{
+    Object* obj;
+    if (objectReadDetached(stream, &obj, gDude->elevation) != 0 || obj == nullptr) {
+        return false;
+    }
+    if (obj->pid != pid) {
+        objectDestroy(obj, nullptr);
+        return false;
+    }
+
+    // A graft brings him from another save: where he stood THERE means nothing here, so next to the dude.
+    int tile = partyBackupPlaceTile(obj, duringLoad ? savedTile : -1, savedElevation);
+    objectSetLocation(obj, tile, gDude->elevation, nullptr);
+    objectSetRotation(obj, rotation, nullptr);
+
+    // The script type vanilla gives a party member back on a map change (_partyMemberRecoverLoadInstance).
+    int scriptType = PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER ? SCRIPT_TYPE_CRITTER : SCRIPT_TYPE_ITEM;
+    if (scriptIndex != -1 && _obj_new_sid_inst(obj, scriptType, scriptIndex) != -1) {
+        Script* script;
+        if (scriptGetScript(obj->sid, &script) != -1 && script->localVarsCount > 0 && varCount > 0) {
+            script->localVarsOffset = _map_malloc_local_var(script->localVarsCount);
+            int n = varCount < script->localVarsCount ? varCount : script->localVarsCount;
+            if (gMapLocalVars != nullptr) {
+                memcpy(gMapLocalVars + script->localVarsOffset, vars, sizeof(int) * n);
+            }
+        }
+    }
+
+    obj->id = id;
+    if (partyMemberAdd(obj) != 0) {
+        trace_event(TRACE_WARN, "party-restore-refused", "id=%d pid=%d", id, pid);
+        return true; // he is on the map; the party refused him (vanilla's reasons), nothing to undo
+    }
+
+    // His queued events (a drug wearing off, a knockout ending) lost their owner in queueLoad: they are his again.
+    // Only during the load -- the list is that load's.
+    if (duringLoad) {
+        queueAdoptOrphans(obj);
+    }
+
+    trace_event(TRACE_WARN, "party-restore", "id=%d pid=%d tile=%d elev=%d sid=%08x vars=%d items=%d",
+        obj->id, obj->pid, obj->tile, obj->elevation, obj->sid, varCount, obj->data.inventory.length);
+    return true;
+}
+
+// Forward to `target` by READING (a seek reports differently on a gzip stream), never backwards: a record
+// that read past its own end is corrupt.
+static bool partyBackupSkipTo(File* stream, long target)
+{
+    long at = fileTell(stream);
+    if (at < 0 || at > target) {
+        return false;
+    }
+    unsigned char sink[256];
+    while (at < target) {
+        size_t n = (size_t)(target - at) < sizeof(sink) ? (size_t)(target - at) : sizeof(sink);
+        if (fileRead(sink, 1, n, stream) != n) {
+            return false;
+        }
+        at += (long)n;
+    }
+    return true;
+}
+
+// The records, `length` bytes from where `stream` stands. LOAD mode (the RTPB section): every companion's proto is
+// put back (the slot's proto file may be as stale as the map that lost him), and one partyMembersLoad could not
+// find comes back whole. GRAFT mode (partyMembersBackupImport): any companion the party does not have comes back.
+// Returns the bytes used, -1 if the records could not even be read; never fails a load. `restoredOut` counts.
+static int partyBackupReadRecords(File* stream, int length, bool graft, int* restoredOut)
+{
+    *restoredOut = 0;
+
+    long start = fileTell(stream);
+    if (start < 0) {
+        return -1;
+    }
+
+    int count;
+    if (fileReadInt32(stream, &count) == -1 || count < 0 || count > PARTY_BACKUP_MAX) {
+        return -1;
+    }
+
+    int restored = 0;
+    for (int index = 0; index < count; index++) {
+        int recordLength;
+        int valid;
+        if (fileReadInt32(stream, &recordLength) == -1 || recordLength < 4 || recordLength > length) {
+            return -1;
+        }
+        long recordAt = fileTell(stream); // the start of `valid`
+        long recordEnd = recordAt + recordLength;
+        if (recordAt < 0 || recordEnd > start + length || fileReadInt32(stream, &valid) == -1) {
+            return -1;
+        }
+
+        int id;
+        int pid;
+        int tile;
+        int elevation;
+        int rotation;
+        int scriptIndex;
+        int varCount;
+        bool header = valid == 1
+            && fileReadInt32(stream, &id) == 0
+            && fileReadInt32(stream, &pid) == 0
+            && fileReadInt32(stream, &tile) == 0
+            && fileReadInt32(stream, &elevation) == 0
+            && fileReadInt32(stream, &rotation) == 0
+            && fileReadInt32(stream, &scriptIndex) == 0
+            && fileReadInt32(stream, &varCount) == 0
+            && varCount >= 0 && varCount <= PARTY_BACKUP_MAX_VARS;
+
+        bool bringBack = false;
+        if (header) {
+            if (graft) {
+                bringBack = partyMemberFindByPid(pid) == nullptr;
+            } else {
+                for (int m = 0; m < gPartyLoadMissingCount; m++) {
+                    if (gPartyLoadMissingIds[m] == id) {
+                        bringBack = true;
+                        break;
+                    }
+                }
+                // ...and only one nobody brought back already (a second record of the same pid).
+                if (bringBack && partyMemberFindByPid(pid) != nullptr) {
+                    bringBack = false;
+                }
+            }
+        }
+
+        // His proto: for one coming back, and on a load for every companion the party has.
+        bool applyProto = header && (bringBack || (!graft && partyMemberFindByPid(pid) != nullptr));
+
+        int* vars = nullptr;
+        bool ok = header && (applyProto || bringBack);
+        if (ok && varCount > 0) {
+            vars = (int*)internal_malloc(sizeof(int) * varCount);
+            ok = vars != nullptr;
+            for (int v = 0; ok && v < varCount; v++) {
+                ok = fileReadInt32(stream, &(vars[v])) == 0;
+            }
+        }
+
+        int hasProto = 0;
+        ok = ok && fileReadInt32(stream, &hasProto) == 0;
+        if (ok && hasProto == 1) {
+            if (applyProto && protoReadFromStream(pid, stream) == 0) {
+                _proto_save_pid(pid);
+            } else {
+                ok = false; // the object follows the proto: without reading it there is no object to read
+            }
+        }
+
+        if (ok && bringBack) {
+            if (partyBackupRestore(stream, id, pid, tile, elevation, rotation, scriptIndex, vars, varCount, !graft)) {
+                restored++;
+            } else {
+                trace_event(TRACE_WARN, "party-restore-failed", "id=%d pid=%d", id, pid);
+            }
+        } else if (bringBack) {
+            trace_event(TRACE_WARN, "party-restore-failed", "id=%d pid=%d why=record", id, pid);
+        }
+
+        if (vars != nullptr) {
+            internal_free(vars);
+        }
+
+        if (!partyBackupSkipTo(stream, recordEnd)) {
+            return -1;
+        }
+    }
+
+    // A companion back on the map: any other critter of his proto that is not him goes, as on every map change.
+    if (restored > 0) {
+        partyFixMultipleMembers();
+    }
+
+    trace_event(TRACE_STATE, "party-backup-load", "records=%d missing=%d restored=%d graft=%d", count,
+        gPartyLoadMissingCount, restored, graft ? 1 : 0);
+    if (!graft) {
+        gPartyLoadMissingCount = 0;
+    }
+
+    *restoredOut = restored;
+    long end = fileTell(stream);
+    return end >= start ? (int)(end - start) : -1;
+}
+
+// The RTPB section's payload, `length` bytes (combat_rt.cc). Returns the bytes used (the caller skips what is
+// left), -1 if it could not even be read; never fails the load.
+int partyMembersBackupRead(File* stream, int length)
+{
+    int restored;
+    return partyBackupReadRecords(stream, length, false, &restored);
+}
+
+// Moving a companion between saves (the harness's partyexport / partyimport, his Vic 2026-11-04): the records
+// into a file of their own, and back into the game that is loaded now. Export returns the companions written,
+// import the companions brought back; -1 when the file cannot be used.
+int partyMembersBackupExport(const char* path)
+{
+    File* stream = fileOpen(path, "wb");
+    if (stream == nullptr) {
+        return -1;
+    }
+    int rc = partyMembersBackupWrite(stream);
+    fileClose(stream);
+    return rc == -1 ? -1 : (gPartyMembersLength > 1 ? gPartyMembersLength - 1 : 0);
+}
+
+int partyMembersBackupImport(const char* path)
+{
+    File* stream = fileOpen(path, "rb");
+    if (stream == nullptr) {
+        return -1;
+    }
+    int length = fileGetSize(stream);
+    int restored = 0;
+    int used = length > 0 ? partyBackupReadRecords(stream, length, true, &restored) : -1;
+    fileClose(stream);
+    return used < 0 ? -1 : restored;
 }
 
 // 0x494D7C
@@ -1233,6 +1593,9 @@ static int partyFixMultipleMembers()
             if (remove) {
                 // NOTE: Uninline.
                 if (obj != partyMemberFindByPid(obj->pid)) {
+                    Object* member = partyMemberFindByPid(obj->pid);
+                    trace_event(TRACE_WARN, "party-doppelganger", "id=%d pid=%d tile=%d elev=%d sid=%08x member=%d",
+                        obj->id, obj->pid, obj->tile, obj->elevation, obj->sid, member != nullptr ? member->id : -1);
                     debugPrint("\nDestroying evil critter doppleganger!");
 
                     if (obj->sid != -1) {

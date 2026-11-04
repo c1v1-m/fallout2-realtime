@@ -122,6 +122,8 @@ namespace fallout {
 //   projectiles on|off                 MODS "Projectiles" for this run
 //   tracer <hexes> <r> <g> <b> [underline]   how a bullet looks (r g b 0-31) -- to photograph variants
 //   ipdump <seconds>                   list every interactable in the picker's range and why it is (not) pickable
+//   partyexport <file>                 F2: after loadslot, every companion whole into <file> (data folder)
+//   partyimport <file>                 F2: after loadslot, every companion in <file> the party lacks, back in
 //   shots <n>                          up to n screenshots (screenshots/scrNNNNN.bmp beside the exe),
 //                                      each taken while a bullet tracer is in the air, 1 s apart
 //   projectile_speedup <x>             how much faster than its art a rocket / plasma / laser flies
@@ -241,6 +243,8 @@ static char at_file[260] = "";
 static int at_seed = 1;
 static bool at_map_script = false;
 static int at_load_slot = 0;
+static char at_party_export[128] = ""; // F2: scenario "partyexport" -- the companions out to this file
+static char at_party_import[128] = ""; // F2: scenario "partyimport" -- the companions in this file back in
 static bool at_reload = false;
 static float at_projectile_speedup = -1.0f;
 static int at_tactical = -1;
@@ -742,6 +746,10 @@ static bool at_parse(const char* path)
             at_map_script = strcmp(tok[1], "on") == 0;
         } else if (strcmp(tok[0], "reload") == 0) {
             at_reload = true;
+        } else if (strcmp(tok[0], "partyexport") == 0 && n >= 2) {
+            SDL_strlcpy(at_party_export, tok[1], sizeof(at_party_export));
+        } else if (strcmp(tok[0], "partyimport") == 0 && n >= 2) {
+            SDL_strlcpy(at_party_import, tok[1], sizeof(at_party_import));
         } else if (strcmp(tok[0], "loadslot") == 0 && n >= 2) {
             at_load_slot = atoi(tok[1]);
             at_map_script = true;
@@ -981,6 +989,19 @@ void autotest_setup_world()
         trace_event(rc == -1 ? TRACE_ERR : TRACE_FLOW, "autotest", "loadslot %d rc=%d map=%s dude=%d hp=%d maneuver=0x%x results=0x%x",
             at_load_slot, rc, map_data.name, obj_dude->tile, obj_dude->data.critter.hp, obj_dude->data.critter.combat.maneuver, obj_dude->data.critter.combat.results);
     }
+
+#if FALLOUT_RT_GAME == 2
+    // Moving a companion from one save into another (his Vic, 2026-11-04): export from the save that has him,
+    // import into the one that lost him, then a quick save keeps the result.
+    if (at_party_export[0] != 0) {
+        int rc = partyMembersBackupExport(at_party_export);
+        trace_event(rc < 0 ? TRACE_ERR : TRACE_FLOW, "autotest", "partyexport %s members=%d", at_party_export, rc);
+    }
+    if (at_party_import[0] != 0) {
+        int rc = partyMembersBackupImport(at_party_import);
+        trace_event(rc < 0 ? TRACE_ERR : TRACE_FLOW, "autotest", "partyimport %s restored=%d", at_party_import, rc);
+    }
+#endif
 
     if (at_dude_elevation >= 0 && at_dude_elevation != map_elevation) {
         map_set_elevation(at_dude_elevation);

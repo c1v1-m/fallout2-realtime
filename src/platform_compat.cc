@@ -298,6 +298,28 @@ int compat_remove(const char* path)
     return remove(nativePath);
 }
 
+// Realtime (Fallout 2 Realtime 2026-11-04): `src` over an existing `dst` in one step -- the save slot keeps a map
+// file it did not change (loadsave.cc). Windows' rename() refuses an existing target, MoveFileEx does not; POSIX
+// rename() already replaces. 0 on success.
+int compat_replace_file(const char* src, const char* dst)
+{
+    char nativeSrc[COMPAT_MAX_PATH];
+    strcpy(nativeSrc, src);
+    compat_windows_path_to_native(nativeSrc);
+    compat_resolve_path(nativeSrc);
+
+    char nativeDst[COMPAT_MAX_PATH];
+    strcpy(nativeDst, dst);
+    compat_windows_path_to_native(nativeDst);
+    compat_resolve_path(nativeDst);
+
+#ifdef _WIN32
+    return MoveFileExA(nativeSrc, nativeDst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 0 : -1;
+#else
+    return rename(nativeSrc, nativeDst);
+#endif
+}
+
 int compat_rename(const char* oldFileName, const char* newFileName)
 {
     char nativeOldFileName[COMPAT_MAX_PATH];

@@ -6,6 +6,10 @@
 #include <time.h>
 
 #include <algorithm>
+#include <string>
+#include <vector>
+
+#include <zlib.h>
 
 #include "art.h"
 #include "automap.h"
@@ -476,6 +480,447 @@ static void ls_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned int* la
     *lastY = y;
 }
 
+// --- Realtime: a slot that Steam Cloud delivered whole, or not (Fallout 2 Realtime 2026-11-04) ----------------
+//
+// His „Vic se ztratil“. Steam Cloud syncs SAVEGAME between his PC and his Deck, and a slot is ~50 files. On
+// 2026-11-02 the Deck's upload of four slots (193 files) went up as two commits -- Steam caps one at 100 files --
+// and the idle PC synced in the 4 s between them: it took the new SAVE.DATs and none of the maps, called itself
+// current and never looked again (Steam's cloud_log on both machines: change 48 at 21:10:58, 49 at 21:11:03, the
+// PC "synced to ChangeNumber 49" at 21:11:04 with 8 files). That slot loaded without a word and was wrong:
+// partyMembersLoad did not find Vic on the old MODMAIN.SAV and dropped him, for good.
+//
+// Two answers:
+//  1. FEWER FILES CHANGE. 172 of those 193 uploads were byte-identical to what the cloud had: vanilla renames
+//     every map file of the slot to .BAK and writes all of them anew, and Steam uploads anything with a new
+//     mtime. After a successful save an unchanged map now gets its old file back (same bytes, same mtime), an
+//     unchanged party proto is not rewritten, and a save is a handful of files: one commit, nothing another
+//     device can catch half-way (lsgKeepUnchangedMaps, lsgStageProto). Kept only what the last save here
+//     listed with those bytes (gLsOldManifest), or a slot loaded torn would stay torn on the other device.
+//  2. A TORN SLOT IS SEEN. SAVE.DAT ends with a list of the slot's other files, each with its size and CRC-32 --
+//     a trailer behind everything any loader reads, so an older build never sees it. Before a load the files are
+//     checked against it (lsgSlotIntegrity): Continue does not take a torn slot, the load screen asks first.
+//     A save written before this has no list and is taken as it is.
+#define LS_MANIFEST_TAG 0x52544D46 // 'RTMF'
+#define LS_MANIFEST_VERSION 1
+#define LS_MANIFEST_MAX_FILES 1024
+// A file this save wrote but cannot find any more: listed with a size no file has, so the slot reads torn.
+#define LS_MANIFEST_MISSING 0xFFFFFFFFu
+
+typedef struct LsManifestEntry {
+    std::string name;
+    unsigned int size;
+    unsigned int crc;
+} LsManifestEntry;
+
+// The slot's files written by this save, relative to its folder (filled by _GameMap2Slot).
+static std::vector<std::string> gLsSlotFiles;
+
+// ⚠️ KEEP A FILE ONLY WHERE THE CLOUD HAS IT (review 2026-11-04). "The new bytes equal the old file" is not
+// enough: a slot loaded TORN holds the other device's stale maps, and keeping them (old mtime, never uploaded)
+// would leave that device torn for good. A file is kept only when the slot's previous SAVE.DAT -- SAVE.BAK while
+// this save runs -- lists it with exactly these bytes: then the previous save wrote it and it went up with that
+// save. Upper-cased names; read at the start of _GameMap2Slot.
+static std::vector<LsManifestEntry> gLsOldManifest;
+
+// Party protos written to <name>.TMP by _GameMap2Slot, moved into place only once the save has succeeded (a
+// failed save's _RestoreSave puts back an old SAVE.DAT whose list must still match). Full paths.
+static std::vector<std::pair<std::string, std::string>> gLsPendingProtos;
+
+static void lsgSlotDir(int slot, char* dest, size_t size)
+{
+    snprintf(dest, size, "%s\\%s\\%s%.2d\\", _patches, "SAVEGAME", "SLOT", slot + 1);
+}
+
+static std::string lsgUpper(const std::string& s)
+{
+    std::string out = s;
+    for (char& c : out) {
+        c = (char)toupper((unsigned char)c);
+    }
+    return out;
+}
+
+static bool lsgFileCrc(const char* path, unsigned int* sizeOut, unsigned int* crcOut)
+{
+    FILE* f = compat_fopen(path, "rb");
+    if (f == nullptr) {
+        return false;
+    }
+    uLong crc = crc32(0L, Z_NULL, 0);
+    unsigned int total = 0;
+    unsigned char buf[16384];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        crc = crc32(crc, buf, (uInt)n);
+        total += (unsigned int)n;
+    }
+    fclose(f);
+    *sizeOut = total;
+    *crcOut = (unsigned int)crc;
+    return true;
+}
+
+static bool lsgFilesEqual(const char* a, const char* b)
+{
+    FILE* fa = compat_fopen(a, "rb");
+    if (fa == nullptr) {
+        return false;
+    }
+    FILE* fb = compat_fopen(b, "rb");
+    if (fb == nullptr) {
+        fclose(fa);
+        return false;
+    }
+    bool equal = true;
+    unsigned char ba[8192];
+    unsigned char bb[8192];
+    while (equal) {
+        size_t na = fread(ba, 1, sizeof(ba), fa);
+        size_t nb = fread(bb, 1, sizeof(bb), fb);
+        if (na != nb || memcmp(ba, bb, na) != 0) {
+            equal = false;
+        } else if (na == 0) {
+            break;
+        }
+    }
+    fclose(fa);
+    fclose(fb);
+    return equal;
+}
+
+// `src` over `dst` in ONE step (review 2026-11-04: two renames left a moment with no file at all).
+static bool lsgReplaceFile(const char* src, const char* dst)
+{
+    return compat_replace_file(src, dst) == 0;
+}
+
+static unsigned int lsgGetU32(const unsigned char* p)
+{
+    return ((unsigned int)p[0] << 24) | ((unsigned int)p[1] << 16) | ((unsigned int)p[2] << 8) | (unsigned int)p[3];
+}
+
+static void lsgPutU32(std::vector<unsigned char>& out, unsigned int value)
+{
+    out.push_back((unsigned char)(value >> 24));
+    out.push_back((unsigned char)(value >> 16));
+    out.push_back((unsigned char)(value >> 8));
+    out.push_back((unsigned char)value);
+}
+
+// The list at the end of a SAVE.DAT (or SAVE.BAK). False when it has none, or it does not add up.
+static bool lsgReadManifest(const char* savePath, std::vector<LsManifestEntry>& out)
+{
+    out.clear();
+
+    FILE* f = compat_fopen(savePath, "rb");
+    if (f == nullptr) {
+        return false;
+    }
+
+    std::vector<unsigned char> payload;
+    unsigned char footer[8];
+    bool read = fseek(f, -8, SEEK_END) == 0 && fread(footer, 1, 8, f) == 8 && lsgGetU32(footer + 4) == LS_MANIFEST_TAG;
+    if (read) {
+        unsigned int length = lsgGetU32(footer);
+        read = length >= 8 && length < 1024 * 1024 && fseek(f, -(long)(8 + length), SEEK_END) == 0;
+        if (read) {
+            payload.resize(length);
+            read = fread(payload.data(), 1, length, f) == length;
+        }
+    }
+    fclose(f);
+    if (!read || lsgGetU32(payload.data()) != LS_MANIFEST_VERSION) {
+        return false;
+    }
+
+    unsigned int count = lsgGetU32(payload.data() + 4);
+    if (count > LS_MANIFEST_MAX_FILES) {
+        return false;
+    }
+    size_t at = 8;
+    for (unsigned int i = 0; i < count; i++) {
+        if (at + 1 > payload.size()) {
+            out.clear();
+            return false;
+        }
+        size_t nameLen = payload[at];
+        if (nameLen == 0 || at + 1 + nameLen + 8 > payload.size()) {
+            out.clear();
+            return false;
+        }
+        LsManifestEntry entry;
+        entry.name.assign((const char*)payload.data() + at + 1, nameLen);
+        entry.size = lsgGetU32(payload.data() + at + 1 + nameLen);
+        entry.crc = lsgGetU32(payload.data() + at + 1 + nameLen + 4);
+        at += 1 + nameLen + 8;
+        out.push_back(entry);
+    }
+    return true;
+}
+
+// The previous save's list (SAVE.BAK), for the keep rule above.
+static void lsgLoadOldManifest(int slot)
+{
+    char dir[COMPAT_MAX_PATH];
+    lsgSlotDir(slot, dir, sizeof(dir));
+    char path[COMPAT_MAX_PATH];
+    snprintf(path, sizeof(path), "%s%s", dir, "SAVE.BAK");
+    lsgReadManifest(path, gLsOldManifest);
+    for (LsManifestEntry& entry : gLsOldManifest) {
+        entry.name = lsgUpper(entry.name);
+    }
+}
+
+// Does the previous save's list have `name` with exactly the bytes of `path`?
+static bool lsgOldManifestHas(const std::string& name, const char* path)
+{
+    std::string upper = lsgUpper(name);
+    for (const LsManifestEntry& entry : gLsOldManifest) {
+        if (entry.name == upper) {
+            unsigned int size;
+            unsigned int crc;
+            return lsgFileCrc(path, &size, &crc) && size == entry.size && crc == entry.crc;
+        }
+    }
+    return false;
+}
+
+// A party proto into the slot: written to <dst>.TMP now, moved into place after the save succeeds -- unless the
+// slot's file already has these bytes AND the previous save listed it so (then it is left alone, mtime and all,
+// and Steam Cloud has nothing to send). `name` is relative to the slot folder.
+static int lsgStageProto(const char* src, const char* dst, const std::string& name)
+{
+    char tmp[COMPAT_MAX_PATH];
+    _strmfe(tmp, dst, "TMP");
+    if (fileCopyCompressed(src, tmp) == -1) {
+        compat_remove(tmp);
+        return -1;
+    }
+    if (lsgFilesEqual(tmp, dst) && lsgOldManifestHas(name, dst)) {
+        compat_remove(tmp);
+        return 0;
+    }
+    gLsPendingProtos.push_back(std::make_pair(std::string(tmp), std::string(dst)));
+    return 0;
+}
+
+// The save succeeded: the staged protos take their place.
+static void lsgCommitProtos()
+{
+    for (const auto& p : gLsPendingProtos) {
+        if (!lsgReplaceFile(p.first.c_str(), p.second.c_str())) {
+            trace_event(TRACE_WARN, "save-proto", "replace-failed dst=%s", p.second.c_str());
+            compat_remove(p.first.c_str());
+        }
+    }
+    gLsPendingProtos.clear();
+}
+
+// The save failed: the staged protos go (_RestoreSave).
+static void lsgDropProtos()
+{
+    for (const auto& p : gLsPendingProtos) {
+        compat_remove(p.first.c_str());
+    }
+    gLsPendingProtos.clear();
+}
+
+// After a SUCCESSFUL save, before the .BAK files go: a map file whose new bytes equal its backup, where the
+// previous save listed that backup so, gets the backup back with its old mtime. Done only now because a failed
+// save's _RestoreSave counts the .BAK files.
+static void lsgKeepUnchangedMaps(int slot)
+{
+    char dir[COMPAT_MAX_PATH];
+    lsgSlotDir(slot, dir, sizeof(dir));
+
+    int kept = 0;
+    int changed = 0;
+    int unlisted = 0;
+    for (const std::string& name : gLsSlotFiles) {
+        size_t len = name.size();
+        if (len < 5 || compat_stricmp(name.c_str() + len - 4, ".SAV") != 0 || compat_stricmp(name.c_str(), "AUTOMAP.SAV") == 0) {
+            continue;
+        }
+
+        char sav[COMPAT_MAX_PATH];
+        char bak[COMPAT_MAX_PATH];
+        snprintf(sav, sizeof(sav), "%s%s", dir, name.c_str());
+        _strmfe(bak, sav, "BAK");
+
+        if (!lsgFilesEqual(sav, bak)) {
+            changed++;
+            continue;
+        }
+        if (!lsgOldManifestHas(name, bak)) {
+            unlisted++; // same bytes, but not what the last save here wrote: the new file goes up
+            continue;
+        }
+        if (lsgReplaceFile(bak, sav)) {
+            kept++;
+        }
+    }
+
+    trace_event(TRACE_STATE, "save-keep-unchanged", "slot=%d kept=%d changed=%d unlisted=%d", slot + 1, kept, changed, unlisted);
+}
+
+// The list, appended to the slot's SAVE.DAT once every other file is final.
+static void lsgWriteSlotManifest(int slot)
+{
+    char dir[COMPAT_MAX_PATH];
+    lsgSlotDir(slot, dir, sizeof(dir));
+
+    std::vector<unsigned char> payload;
+    lsgPutU32(payload, LS_MANIFEST_VERSION);
+    size_t countAt = payload.size();
+    lsgPutU32(payload, 0);
+
+    unsigned int count = 0;
+    unsigned int missing = 0;
+    for (const std::string& name : gLsSlotFiles) {
+        if (count >= LS_MANIFEST_MAX_FILES || name.empty() || name.size() > 255) {
+            continue;
+        }
+        char path[COMPAT_MAX_PATH];
+        snprintf(path, sizeof(path), "%s%s", dir, name.c_str());
+        unsigned int size;
+        unsigned int crc;
+        if (!lsgFileCrc(path, &size, &crc)) {
+            // This save wrote it and it is gone: listed as no file can be, so the slot never reads whole.
+            size = LS_MANIFEST_MISSING;
+            crc = LS_MANIFEST_MISSING;
+            missing++;
+        }
+        payload.push_back((unsigned char)name.size());
+        payload.insert(payload.end(), name.begin(), name.end());
+        lsgPutU32(payload, size);
+        lsgPutU32(payload, crc);
+        count++;
+    }
+    payload[countAt] = (unsigned char)(count >> 24);
+    payload[countAt + 1] = (unsigned char)(count >> 16);
+    payload[countAt + 2] = (unsigned char)(count >> 8);
+    payload[countAt + 3] = (unsigned char)count;
+
+    std::vector<unsigned char> footer;
+    lsgPutU32(footer, (unsigned int)payload.size());
+    lsgPutU32(footer, LS_MANIFEST_TAG);
+
+    char savePath[COMPAT_MAX_PATH];
+    snprintf(savePath, sizeof(savePath), "%s%s", dir, "SAVE.DAT");
+    FILE* f = compat_fopen(savePath, "ab");
+    if (f == nullptr) {
+        trace_event(TRACE_WARN, "save-manifest", "slot=%d error=open", slot + 1);
+        return;
+    }
+    bool ok = fwrite(payload.data(), 1, payload.size(), f) == payload.size()
+        && fwrite(footer.data(), 1, footer.size(), f) == footer.size();
+    fclose(f);
+    trace_event(ok && missing == 0 ? TRACE_STATE : TRACE_WARN, "save-manifest", "slot=%d files=%u missing=%u ok=%d",
+        slot + 1, count, missing, ok ? 1 : 0);
+}
+
+enum {
+    LS_SLOT_TORN = -1,
+    LS_SLOT_UNKNOWN = 0, // no list (an older save, or the list itself unreadable): taken as it is
+    LS_SLOT_WHOLE = 1,
+};
+
+// Is every file the slot's SAVE.DAT lists there, as it was written? `bad` gets the first one that is not.
+static int lsgSlotIntegrity(int slot, char* bad, size_t badSize, int* badCount, int* fileCount)
+{
+    if (bad != nullptr && badSize > 0) {
+        bad[0] = '\0';
+    }
+    *badCount = 0;
+    *fileCount = 0;
+
+    char dir[COMPAT_MAX_PATH];
+    lsgSlotDir(slot, dir, sizeof(dir));
+    char savePath[COMPAT_MAX_PATH];
+    snprintf(savePath, sizeof(savePath), "%s%s", dir, "SAVE.DAT");
+
+    std::vector<LsManifestEntry> entries;
+    if (!lsgReadManifest(savePath, entries)) {
+        return LS_SLOT_UNKNOWN;
+    }
+
+    for (const LsManifestEntry& entry : entries) {
+        char path[COMPAT_MAX_PATH];
+        snprintf(path, sizeof(path), "%s%s", dir, entry.name.c_str());
+        unsigned int size = 0;
+        unsigned int crc = 0;
+        bool same = lsgFileCrc(path, &size, &crc) && size == entry.size && crc == entry.crc;
+        (*fileCount)++;
+        if (!same) {
+            if (*badCount == 0 && bad != nullptr && badSize > 0) {
+                snprintf(bad, badSize, "%s", entry.name.c_str());
+            }
+            (*badCount)++;
+        }
+    }
+
+    return *badCount > 0 ? LS_SLOT_TORN : LS_SLOT_WHOLE;
+}
+
+// The check with its trace line; LS_SLOT_*.
+static int lsgCheckSlot(int slot, const char* why)
+{
+    char bad[COMPAT_MAX_PATH];
+    int badCount;
+    int fileCount;
+    int rc = lsgSlotIntegrity(slot, bad, sizeof(bad), &badCount, &fileCount);
+    trace_event(rc == LS_SLOT_TORN ? TRACE_WARN : TRACE_STATE, "slot-check", "slot=%d why=%s result=%s files=%d bad=%d first=%s",
+        slot + 1, why, rc == LS_SLOT_TORN ? "torn" : (rc == LS_SLOT_WHOLE ? "whole" : "unknown"), fileCount, badCount,
+        bad[0] != '\0' ? bad : "-");
+    return rc;
+}
+
+// "Load it anyway?" for a torn slot -- or, from Continue, "load <that one> instead?". True = yes. Terse, like
+// every line the game adds. Shown over a running game too (F7), so the world stops and the pointer shows, as
+// for the quit box (showQuitConfirmationDialog).
+static bool lsgAskLoadTorn(const char* insteadDescription, bool insteadChecked)
+{
+    bool isoWasEnabled = isoDisable();
+    bool gameMouseWasVisible = isoWasEnabled && gameMouseObjectsIsVisible();
+    if (gameMouseWasVisible) {
+        gameMouseObjectsHide();
+    }
+    bool cursorWasHidden = cursorIsHidden();
+    if (cursorWasHidden) {
+        mouseShowCursor();
+    }
+    int oldCursor = gameMouseGetCursor();
+    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+
+    char line[96];
+    if (insteadDescription != nullptr) {
+        snprintf(line, sizeof(line), insteadChecked ? "Load the last whole one, %s?" : "Load an older one, %s?",
+            insteadDescription[0] != '\0' ? insteadDescription : "no name");
+    } else {
+        snprintf(line, sizeof(line), "%s", "Load it anyway?");
+    }
+    const char* body[] = {
+        "Steam Cloud has not copied it all.",
+        line,
+    };
+    soundPlayFile("iisxxxx1");
+    bool yes = showDialogBox("Save not complete.", body, 2, 169, 116, _colorTable[32328], nullptr, _colorTable[32328],
+                   DIALOG_BOX_LARGE | DIALOG_BOX_YES_NO)
+        != 0;
+
+    gameMouseSetCursor(oldCursor);
+    if (cursorWasHidden) {
+        mouseHideCursor();
+    }
+    if (gameMouseWasVisible) {
+        gameMouseObjectsShow();
+    }
+    if (isoWasEnabled) {
+        isoEnable();
+    }
+    return yes;
+}
+
 // One given slot (0-based), with no screen (fallout1-ce's LoadGameSlot): the self-played tests
 // (autotest `loadslot`) start from a copy of the player's own save, so a report is reproduced in HIS
 // state -- map variables, the dude's saved combat bits, the party.
@@ -489,6 +934,7 @@ int LoadGameSlot(int slot)
     }
 
     _slot_cursor = slot;
+    lsgCheckSlot(_slot_cursor, "slot"); // traced only: the tests load what they are told to
     int rc = lsgLoadGameInSlot(_slot_cursor);
     gameMouseSetCursor(MOUSE_CURSOR_ARROW);
     return rc;
@@ -587,6 +1033,7 @@ int LoadGameNewest()
 
     int best = -1;
     long long bestTime = 0;
+    long long slotTimes[10] = { 0 };
     for (int index = 0; index < 10; index++) {
         if (_LSstatus[index] != SLOT_STATE_OCCUPIED) {
             continue;
@@ -598,6 +1045,7 @@ int LoadGameNewest()
         if (mtime == 0) {
             continue;
         }
+        slotTimes[index] = mtime;
         if (best == -1 || mtime > bestTime) {
             best = index;
             bestTime = mtime;
@@ -607,6 +1055,45 @@ int LoadGameNewest()
     trace_event(TRACE_FLOW, "continue-pick", "slot=%d", best + 1);
     if (best == -1) {
         return 0;
+    }
+
+    // Realtime: not a slot Steam Cloud delivered only in part (see LS_MANIFEST_TAG). The newest torn: say so,
+    // and offer the newest checked-whole one by name -- else the newest one with no list to check, said as
+    // much -- or, when there is none, this one anyway. No = back to the menu, so the other device can finish its
+    // upload first. Newest first, so the search stops at the first that will do.
+    if (lsgCheckSlot(best, "continue") == LS_SLOT_TORN) {
+        int order[10];
+        int orderCount = 0;
+        for (int index = 0; index < 10; index++) {
+            if (index != best && slotTimes[index] != 0) {
+                order[orderCount++] = index;
+            }
+        }
+        std::sort(order, order + orderCount, [&](int a, int b) { return slotTimes[a] > slotTimes[b]; });
+
+        int older = -1;
+        int unchecked = -1;
+        for (int i = 0; i < orderCount && older == -1; i++) {
+            int rc = lsgCheckSlot(order[i], "continue-older");
+            if (rc == LS_SLOT_WHOLE) {
+                older = order[i];
+            } else if (rc == LS_SLOT_UNKNOWN && unchecked == -1) {
+                unchecked = order[i];
+            }
+        }
+        bool olderChecked = older != -1;
+        if (older == -1) {
+            older = unchecked;
+        }
+
+        if (!lsgAskLoadTorn(older != -1 ? _LSData[older].description : nullptr, olderChecked)) {
+            trace_event(TRACE_FLOW, "continue-torn", "slot=%d older=%d choice=menu", best + 1, older + 1);
+            return 0;
+        }
+        trace_event(TRACE_FLOW, "continue-torn", "slot=%d older=%d choice=%s", best + 1, older + 1, older != -1 ? "older" : "anyway");
+        if (older != -1) {
+            best = older;
+        }
     }
 
     _slot_cursor = best;
@@ -1243,6 +1730,11 @@ int lsgLoadGame(int mode)
     _patches = settings.system.master_patches_path.c_str();
 
     if (mode == LOAD_SAVE_MODE_QUICK && _quick_done) {
+        // Realtime: the quick load asks first about a slot Steam Cloud has not delivered whole.
+        if (lsgCheckSlot(_slot_cursor, "quick") == LS_SLOT_TORN && !lsgAskLoadTorn(nullptr, false)) {
+            return 0;
+        }
+
         int quickSaveWindowX = (screenGetWidth() - LS_WINDOW_WIDTH) / 2;
         int quickSaveWindowY = (screenGetHeight() - LS_WINDOW_HEIGHT) / 2;
         int window = windowCreate(quickSaveWindowX,
@@ -1622,6 +2114,11 @@ int lsgLoadGame(int mode)
                 rc = -1;
                 break;
             default:
+                // Realtime: a slot Steam Cloud has not delivered whole is loaded only when he says so.
+                if (lsgCheckSlot(_slot_cursor, "screen") == LS_SLOT_TORN && !lsgAskLoadTorn(nullptr, false)) {
+                    rc = -1;
+                    break;
+                }
                 if (lsgLoadGameInSlot(_slot_cursor) == -1) {
                     gameMouseSetCursor(MOUSE_CURSOR_ARROW);
                     soundPlayFile("iisxxxx1");
@@ -2111,7 +2608,14 @@ static int lsgPerformSaveGameBody()
         } while (0);
 
         fileClose(_flptr);
+        gLsSlotFiles.push_back("sfallgv.sav");
     }
+
+    // Realtime: the save is good -- unchanged maps get their old files back, then SAVE.DAT gets the list of
+    // what the slot holds (see LS_MANIFEST_TAG). Both before the .BAK files are erased.
+    lsgCommitProtos();
+    lsgKeepUnchangedMaps(_slot_cursor);
+    lsgWriteSlotManifest(_slot_cursor);
 
     snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
     MapDirErase(_gmpath, "BAK");
@@ -2911,6 +3415,12 @@ static int _GameMap2Slot(File* stream)
         return -1;
     }
 
+    // Realtime: what this save writes into the slot, for the list at the end of SAVE.DAT (lsgWriteSlotManifest),
+    // and what the last save here listed (SAVE.BAK by now), for what may be kept as it is.
+    gLsSlotFiles.clear();
+    lsgDropProtos();
+    lsgLoadOldManifest(_slot_cursor);
+
     for (int index = 1; index < gPartyMemberDescriptionsLength; index += 1) {
         int pid = gPartyMemberPids[index];
         if (pid == -2) {
@@ -2927,9 +3437,12 @@ static int _GameMap2Slot(File* stream)
             : PROTO_DIR_NAME "\\" ITEMS_DIR_NAME;
         snprintf(_str0, sizeof(_str0), "%s\\%s\\%s", _patches, critterItemPath, path);
         snprintf(_str1, sizeof(_str1), "%s\\%s\\%s%.2d\\%s\\%s", _patches, "SAVEGAME", "SLOT", _slot_cursor + 1, critterItemPath, path);
-        if (fileCopyCompressed(_str0, _str1) == -1) {
+        // Realtime: staged, and left alone when unchanged and listed so by the last save (lsgStageProto).
+        std::string protoName = std::string(critterItemPath) + "\\" + path;
+        if (lsgStageProto(_str0, _str1, protoName) == -1) {
             return -1;
         }
+        gLsSlotFiles.push_back(protoName);
     }
 
     snprintf(_str0, sizeof(_str0), "%s\\*.%s", "MAPS", "SAV");
@@ -2975,12 +3488,14 @@ static int _GameMap2Slot(File* stream)
             fileNameListFree(&fileNameList, 0);
             return -1;
         }
+        gLsSlotFiles.push_back(string);
     }
 
     fileNameListFree(&fileNameList, 0);
 
     _strmfe(_str0, "AUTOMAP.DB", "SAV");
     snprintf(_str1, sizeof(_str1), "%s\\%s\\%s%.2d\\%s", _patches, "SAVEGAME", "SLOT", _slot_cursor + 1, _str0);
+    gLsSlotFiles.push_back(_str0);
     snprintf(_str0, sizeof(_str0), "%s\\%s\\%s", _patches, "MAPS", "AUTOMAP.DB");
 
     if (fileCopyCompressed(_str0, _str1) == -1) {
@@ -3334,6 +3849,9 @@ static int _SaveBackup()
 static int _RestoreSave()
 {
     debugPrint("\nLOADSAVE: Restoring save file backup...\n");
+
+    // Realtime: the protos this save staged are not part of the slot it puts back.
+    lsgDropProtos();
 
     _EraseSave();
 

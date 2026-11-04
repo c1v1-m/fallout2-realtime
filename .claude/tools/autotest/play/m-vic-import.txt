@@ -1,0 +1,19 @@
+# F2 (2026-11-04): his newest save (SLOT04 of 2026-11-04 00:54, MODINN, no Vic) in test slot 9 + Vic from
+# data\VIC.PARTY (m-vic-export), then a quick save into SLOT01: his save with Vic back.
+# Fixture: his Steam SLOT04 of 2026-11-04 00:54 (backup 2026-11-04_213228) -> SLOT09; VIC.PARTY from m-vic-export.
+name m-vic-import
+map DESERT1.MAP
+loadslot 9
+partyimport VIC.PARTY
+seed 1
+census
+duration 12
+
+pad 7000 start 1
+pad 8600 start 0
+
+expect autotest\] partyimport VIC.PARTY restored=1
+expect party-restore\] id=18062 pid=16777278
+expect id=18062 pid=16777278 .* int=follow team=0
+expect party-backup-save\] id=18062 pid=16777278 valid=1
+expect save-manifest\] slot=1 .* missing=0 ok=1

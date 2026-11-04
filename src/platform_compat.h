@@ -41,6 +41,7 @@ int compat_remove(const char* path);
 // Realtime build (fallout1-ce): the file's modification time, 0 if it cannot be stat-ed.
 long long compat_file_mtime(const char* path);
 int compat_rename(const char* oldFileName, const char* newFileName);
+int compat_replace_file(const char* src, const char* dst);
 void compat_windows_path_to_native(char* path);
 void compat_resolve_path(char* path);
 int compat_access(const char* path, int mode);

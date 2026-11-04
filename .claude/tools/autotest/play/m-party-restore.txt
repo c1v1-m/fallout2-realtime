@@ -1,0 +1,19 @@
+# F2 (2026-11-04, „Vic se ztratil … zamez tomu, aby se companions ztráceli“): a TORN slot like the one Steam Cloud
+# made -- SAVE.DAT says Vic is in the party on DENBUS2, but DENBUS2.SAV comes from a later save where he had left
+# with the dude. Test slot 10 = save A (m-party-backup-save) with save B's DENBUS2.SAV (m-party-tear-make).
+# The slot check sees the tear, partyMembersLoad does not find Vic, and the party copy in SAVE.DAT brings him back.
+# Fixture: build/Release/data/SAVEGAME/SLOT-fixture-torn -> SLOT10 (save A = SLOT-fixture-partyA).
+name m-party-restore
+map DESERT1.MAP
+loadslot 10
+seed 1
+census
+duration 10
+
+walkto 3000 15113
+
+expect slot-check\] slot=10 why=slot result=torn .* first=DENBUS2.SAV
+expect party-load-missing\] index=1 id=18062
+expect party-restore\] id=18062 pid=16777278
+expect party-backup-load\] records=1 missing=1 restored=1
+expect id=18062 pid=16777278 .* int=follow team=0

@@ -15,7 +15,13 @@
 #include "proto_instance.h"
 #include "scripts.h"
 
+#include <utility>
+#include <vector>
+
+#include "rt/game/game_trace.h"
+
 namespace fallout {
+
 
 typedef struct QueueListNode {
     unsigned int time;
@@ -48,6 +54,12 @@ static QueueListNode* gLastFoundQueueListNode = nullptr;
 
 // 0x6648C0
 static QueueListNode* gQueueListHead;
+
+// Realtime (Fallout 2 Realtime 2026-11-04): the events this load could not give an owner -- the object they
+// name is not on the loaded map -- with that object's id. A companion the party backup puts back later in the
+// same load (party_member.cc) takes his own back (queueAdoptOrphans): his drug effects wear off, a knockout
+// wakes him. Only valid during the load that filled it; the next queueLoad starts it again.
+static std::vector<std::pair<QueueListNode*, int>> gQueueOrphans;
 
 // 0x51C540
 static EventTypeDescription gEventTypeDescriptions[EVENT_TYPE_COUNT] = {
@@ -90,6 +102,7 @@ int queueLoad(File* stream)
 
     QueueListNode* oldListHead = gQueueListHead;
     gQueueListHead = nullptr;
+    gQueueOrphans.clear();
 
     QueueListNode** nextPtr = &gQueueListHead;
 
@@ -135,6 +148,9 @@ int queueLoad(File* stream)
         }
 
         queueListNode->owner = obj;
+        if (obj == nullptr && objectId != -2) {
+            gQueueOrphans.push_back(std::make_pair(queueListNode, objectId));
+        }
 
         EventTypeDescription* eventTypeDescription = &(gEventTypeDescriptions[queueListNode->type]);
         if (eventTypeDescription->readProc != nullptr) {
@@ -154,6 +170,7 @@ int queueLoad(File* stream)
     }
 
     if (rc == -1) {
+        gQueueOrphans.clear();
         while (gQueueListHead != nullptr) {
             QueueListNode* next = gQueueListHead->next;
 
@@ -185,6 +202,27 @@ int queueLoad(File* stream)
     }
 
     return rc;
+}
+
+// Gives `owner` -- a companion just put back on the map -- the events of this load that name him or an item he
+// carries. Returns how many.
+int queueAdoptOrphans(Object* owner)
+{
+    int adopted = 0;
+    for (auto& orphan : gQueueOrphans) {
+        if (orphan.first == nullptr || orphan.first->owner != nullptr) {
+            continue;
+        }
+        Object* match = _inven_find_id(owner, orphan.second);
+        if (match != nullptr) {
+            orphan.first->owner = match;
+            adopted++;
+        }
+    }
+    if (adopted > 0) {
+        trace_event(TRACE_STATE, "queue-adopt", "id=%d events=%d", owner->id, adopted);
+    }
+    return adopted;
 }
 
 // 0x4A24E0

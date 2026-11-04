@@ -6790,7 +6790,9 @@ static bool rt_do_step_back(Object* npc)
 #define RT_SAVE_END_TAG 0x52544E44 // 'RTND' -- no more sections
 #define RT_SAVE_SECTION_VERSION 1 // bumped only when a field changes MEANING; a new field grows the record
 #define RT_SAVE_MAX_SECTIONS 16
-#define RT_SAVE_SECTION_MAX_BYTES 65536
+// 4 MB: the party section (RTPB) carries whole companions with their packs. An older build caps a section at
+// 64 KB and ends the chunk at a longer one -- which is why RTPB is written last, just before RTND.
+#define RT_SAVE_SECTION_MAX_BYTES (4 * 1024 * 1024)
 #define RT_SAVE_RECORD_MAX_BYTES 256
 #define RT_SAVE_ELEVATIONS 3
 #define RT_FIGHT_HEADER_BYTES 16 // map, elevation, count, record size
@@ -6832,6 +6834,7 @@ static int rt_fight_restore_count = 0;
 // (combat_rt_note_team_fight), written as RTTF while both still have someone standing, and set on each other
 // again once a load is complete (combat_rt_rearm_team_fight), the way the first visit set them.
 #define RT_SAVE_TEAMFIGHT_TAG 0x52545446 // 'RTTF'
+#define RT_SAVE_PARTY_TAG 0x52545042 // 'RTPB' -- every companion, whole (party_member.cc, 2026-11-04)
 #define RT_TEAMFIGHT_BYTES 16 // map, elevation, attacker team, defender team
 typedef struct RtTeamFight {
     int map; // -1 = none
@@ -7409,6 +7412,32 @@ int combat_rt_medic_optout_save(DB_FILE* stream)
             rt_team_fight.elevation, rt_team_fight.attackerTeam, rt_team_fight.defenderTeam);
     }
 
+#if FALLOUT_RT_GAME == 2
+    // (D) RTPB -- every companion, whole (partyMembersBackupWrite): what brings back one the map file lost
+    // („Vic se ztratil“, 2026-11-04). LAST before the end: an older build stops at a section over 64 KB. The
+    // length is patched in once the companions are written (SAVE.DAT is a plain file, fileSeek works on it).
+    {
+        long lengthAt = -1;
+        if (db_fwriteInt(stream, RT_SAVE_PARTY_TAG) == -1
+            || db_fwriteInt(stream, RT_SAVE_SECTION_VERSION) == -1
+            || (lengthAt = fileTell(stream)) < 0
+            || db_fwriteInt(stream, 0) == -1) {
+            return -1;
+        }
+        long startAt = fileTell(stream);
+        if (startAt < 0 || partyMembersBackupWrite(stream) == -1) {
+            return -1;
+        }
+        long endAt = fileTell(stream);
+        if (endAt < startAt
+            || fileSeek(stream, lengthAt, SEEK_SET) != 0
+            || db_fwriteInt(stream, (int)(endAt - startAt)) == -1
+            || fileSeek(stream, endAt, SEEK_SET) != 0) {
+            return -1;
+        }
+    }
+#endif
+
     // The end of the sections: a loader stops here, even if a handler is ever appended behind this one.
     if (db_fwriteInt(stream, RT_SAVE_END_TAG) == -1
         || db_fwriteInt(stream, RT_SAVE_SECTION_VERSION) == -1
@@ -7515,6 +7544,11 @@ int combat_rt_medic_optout_load(DB_FILE* stream)
             } else if (secTag == RT_SAVE_TEAMFIGHT_TAG) {
                 used = rt_team_fight_section_read(stream, secLen);
             }
+#if FALLOUT_RT_GAME == 2
+            else if (secTag == RT_SAVE_PARTY_TAG) {
+                used = partyMembersBackupRead(stream, secLen);
+            }
+#endif
         }
         if (used < 0 || !rt_save_skip(stream, secLen - used)) {
             trace_event(TRACE_WARN, "rt-chunk", "short-section tag=0x%x len=%d", secTag, secLen);

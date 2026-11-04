@@ -23,6 +23,11 @@ int partyMembersSave(File* stream);
 int _partyMemberPrepLoad();
 int _partyMemberRecoverLoad();
 int partyMembersLoad(File* stream);
+// Realtime: every companion, whole, in SAVE.DAT; one the loaded map lacks is put back (party_member.cc).
+int partyMembersBackupWrite(File* stream);
+int partyMembersBackupRead(File* stream, int length);
+int partyMembersBackupExport(const char* path);
+int partyMembersBackupImport(const char* path);
 void _partyMemberClear();
 int _partyMemberSyncPosition();
 int _partyMemberRestingHeal(int a1);

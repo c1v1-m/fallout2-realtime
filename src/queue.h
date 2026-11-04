@@ -58,6 +58,7 @@ typedef int QueueEventDataWriteProc(File* stream, void* data);
 void queueInit();
 int queueExit();
 int queueLoad(File* stream);
+int queueAdoptOrphans(Object* owner);
 int queueSave(File* stream);
 int queueAddEvent(int delay, Object* owner, void* data, int eventType);
 int queueRemoveEvents(Object* owner);

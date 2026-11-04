@@ -1,0 +1,17 @@
+# F2 (2026-11-04, review finding): a slot loaded TORN and saved again must rewrite the stale files it holds, or the
+# other device stays torn for good. SLOT01 = save A (m-party-backup-save) with save B's DENBUS1.SAV (m-party-tear-make):
+# a stale map the dude is NOT on. Its fresh copy has the stale bytes, but save A did not list them, so it is not
+# kept (unlisted=1) -- then m-party-resave-check reads the slot whole.
+# Fixture: SLOT-fixture-partyA with a later DENBUS1.SAV -> SLOT01 (see m-party-tear-make).
+name m-party-torn-resave
+map DESERT1.MAP
+loadslot 1
+seed 1
+duration 8
+
+pad 2000 start 1
+pad 3600 start 0
+
+expect slot-check\] slot=1 why=slot result=torn
+expect save-keep-unchanged\] slot=1 kept=[0-9]+ changed=[0-9]+ unlisted=[1-9]
+expect save-manifest\] slot=1 files=[0-9]+ missing=0 ok=1

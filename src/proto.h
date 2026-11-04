@@ -134,6 +134,8 @@ int protoInit();
 void protoReset();
 void protoExit();
 int _proto_save_pid(int pid);
+int protoWriteToStream(int pid, File* stream);
+int protoReadFromStream(int pid, File* stream);
 int proto_new(int* pid, int type);
 void _proto_remove_all();
 int protoGetProto(int pid, Proto** protoPtr);

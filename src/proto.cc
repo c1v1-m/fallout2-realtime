@@ -1919,6 +1919,35 @@ static int protoWrite(Proto* proto, File* stream)
 }
 
 // 0x4A1B30
+// Realtime (Fallout 2 Realtime 2026-11-04): a party member's proto -- where his level-ups live -- into the
+// party backup in SAVE.DAT, and back over the one in memory (party_member.cc). The read goes into a copy
+// first and replaces the live proto only when it is whole and is the same pid.
+int protoWriteToStream(int pid, File* stream)
+{
+    Proto* proto;
+    if (protoGetProto(pid, &proto) == -1) {
+        return -1;
+    }
+    return protoWrite(proto, stream);
+}
+
+int protoReadFromStream(int pid, File* stream)
+{
+    Proto* proto;
+    if (protoGetProto(pid, &proto) == -1) {
+        return -1;
+    }
+
+    Proto copy;
+    memcpy(&copy, proto, sizeof(copy));
+    if (protoRead(&copy, stream) != 0 || copy.pid != pid) {
+        return -1;
+    }
+
+    memcpy(proto, &copy, sizeof(copy));
+    return 0;
+}
+
 int _proto_save_pid(int pid)
 {
     Proto* proto;

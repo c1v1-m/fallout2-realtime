@@ -1,0 +1,12 @@
+# F2 (2026-11-04, „nakonec mi ho vrať“): his intact Deck save of 2026-11-02 21:10 (Vic in the party, MODMAIN) in test
+# slot 10 -> every companion whole into data\VIC.PARTY, for m-vic-import.
+# Fixture: build/Release/data/SAVEGAME/SLOT-fixture-vic2110 -> SLOT10.
+name m-vic-export
+map DESERT1.MAP
+loadslot 10
+partyexport VIC.PARTY
+seed 1
+duration 4
+
+expect party-load\] index=1 id=18062
+expect autotest\] partyexport VIC.PARTY members=1

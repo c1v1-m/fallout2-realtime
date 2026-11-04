@@ -1,0 +1,18 @@
+# F2 (2026-11-04, „zamez tomu, aby se companions ztráceli“): a save writes every companion whole into SAVE.DAT
+# (party-backup-save), keeps the unchanged map files (save-keep-unchanged) and ends SAVE.DAT with the slot's file
+# list (save-manifest). Needs a save with a companion in test slot 10 (his PC save of 2026-11-02 16:17 has Vic);
+# START held = quick save into SLOT01 -- back SLOT01 up first and put it back after.
+# Fixture: his 16:17 save = Steam Fallout2-Realtime-backup/2026-11-02_205558/SAVEGAME/SLOT01 -> SLOT10.
+name m-party-backup-save
+map DESERT1.MAP
+loadslot 10
+seed 1
+duration 10
+
+pad 2000 start 1
+pad 3600 start 0
+
+expect party-load\] index=1 id=18062
+expect party-backup-save\] id=18062 pid=16777278 valid=1
+expect save-manifest\] slot=1 files=[1-9][0-9]* missing=0 ok=1
+expect save-keep-unchanged\] slot=1
