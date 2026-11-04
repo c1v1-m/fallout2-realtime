@@ -26,6 +26,8 @@
 #include "tile.h"
 #include "trait.h"
 
+#include "rt/game/combat_rt.h"
+
 namespace fallout {
 
 // Provides metadata about stats.
@@ -237,7 +239,16 @@ int critterGetStat(Object* critter, int stat)
                         }
                     }
                     value += hthEvadeBonus;
-                    value += critter->data.critter.combat.ap * actionPointsMultiplier;
+
+                    // Realtime (fallout1-ce 2026-08-27, ported 2026-11-04 -- his „AC se neubírá, když mám méně
+                    // AP jako ve F1“): vanilla's "unspent action points make you harder to hit" read this
+                    // field, but combat_rt pins combat.ap to the MAXIMUM every frame and no one's turn ever
+                    // comes, so every combatant carried a flat +max AP all fight (his trace: AC 32 at every
+                    // AP from 1/8 to 8/8). The pool realtime actually spends: hold points, be harder to hit;
+                    // spend them, and the defence goes with them. -1 outside realtime or for an untracked
+                    // critter, and then the vanilla field stands.
+                    int rtAp = combat_rt_critter_ap(critter);
+                    value += (rtAp >= 0 ? rtAp : critter->data.critter.combat.ap) * actionPointsMultiplier;
                 }
             }
             break;

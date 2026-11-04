@@ -1,0 +1,23 @@
+# F2 (2026-11-04, „nejde mi vybrat ve world map místa kam cestovat, ui je bugged“): his save (Steam SLOT01 with Vic,
+# Modoc) in test slot 9; the world map, D-pad down through the place list, A to travel. Photographs every step.
+name screen-wm-list
+map DESERT1.MAP
+loadslot 9
+seed 1
+duration 26
+
+mapgo 1500 WORLDMAP
+shot 4000
+tap 4500 DOWN
+shot 5200
+tap 5600 DOWN
+shot 6300
+tap 6700 UP
+shot 7400
+tap 8000 A
+shot 9000
+shot 13000
+shot 20000
+expect wm-pad-step\] dir=1
+expect wm-pad-a\]
+expect wm-pad-travel\] area=

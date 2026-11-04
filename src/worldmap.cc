@@ -3051,6 +3051,7 @@ static void wmPadTravelToArea(int areaIdx)
     int destY = city->y + citySizeDescription->frmImage.getHeight() / 2 - WM_VIEW_Y;
     wmPartyInitWalking(destX, destY);
     wmGenData.mousePressed = false;
+    trace_event(TRACE_FLOW, "wm-pad-travel", "area=%d dest=%d,%d from=%d", areaIdx, destX, destY, wmGenData.currentAreaId);
 }
 
 // What the pad asks the world map loop to do this frame.
@@ -3151,6 +3152,10 @@ static int wmPadUpdate(int* keyCode, int mouseX, int mouseY)
             wm_pad_label = next;
             soundPlayFile("ib1p1xx1");
         }
+        // Realtime: the world map runs its own loop, out of gamepad_ui_tick's button trace -- so its pad says what
+        // it does itself (his „nejde mi vybrat ve world map místa“, 2026-11-04, left nothing to read).
+        trace_event(TRACE_INPUT, "wm-pad-step", "dir=%d label=%d area=%d of=%d", dir, wm_pad_label,
+            wm_pad_label >= 0 && wm_pad_label < wmLabelCount ? wmLabelList[wm_pad_label] : -1, wmLabelCount);
 
         // Keep it in the visible part of the list (six rows), then park on it.
         int first = wmGenData.tabsOffsetY / 27;
@@ -3214,6 +3219,13 @@ static int wmPadUpdate(int* keyCode, int mouseX, int mouseY)
                 action = WM_PAD_ENTER_HERE;
             }
         }
+    }
+
+    if (aNow && !prevA) {
+        trace_event(TRACE_INPUT, "wm-pad-a", "pointer=%d,%d park=%d,%d label=%d area=%d here=%d walking=%d key=%d action=%d",
+            mouseX, mouseY, wm_park_x, wm_park_y, wm_pad_label,
+            wm_pad_label >= 0 && wm_pad_label < wmLabelCount ? wmLabelList[wm_pad_label] : -1,
+            wmGenData.currentAreaId, wmGenData.isWalking ? 1 : 0, *keyCode, action);
     }
 
     prevA = aNow;
@@ -3844,6 +3856,9 @@ static int wmWorldMapFunc(int a1)
             wmInterfaceScrollTabsStart(27);
         } else if (keyCode >= KEY_CTRL_F1 && keyCode <= KEY_CTRL_F7) {
             int quickDestinationIndex = wmGenData.tabsOffsetY / 27 + (keyCode - KEY_CTRL_F1);
+            trace_event(TRACE_INPUT, "wm-town-button", "row=%d index=%d of=%d area=%d here=%d", keyCode - KEY_CTRL_F1,
+                quickDestinationIndex, wmLabelCount, quickDestinationIndex < wmLabelCount ? wmLabelList[quickDestinationIndex] : -1,
+                wmGenData.currentAreaId);
             if (quickDestinationIndex < wmLabelCount) {
                 int areaIdx = wmLabelList[quickDestinationIndex];
                 CityInfo* city = &(wmAreaInfoList[areaIdx]);
