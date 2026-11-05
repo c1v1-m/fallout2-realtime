@@ -20,7 +20,7 @@ You need your own copy of Fallout 2 from [Steam](https://store.steampowered.com/
 - Enemies fight smarter. They wait for each other and come round a corner together, cover the door you are holding, shoot from where they can see you, reload out of your sight, jump clear of grenades and step out of your line of fire.
 - Your stats decide how fast you swing, aim and reload. Agility brings your action points back faster.
 - A stimpack heals over the next few seconds in a fight, so hits still hurt while it works. Hold the button and you inject one after another.
-- The whole game plays on a gamepad: fighting, looting, barter, dialogue, the Pip-Boy, the character screen and your followers' combat settings.
+- The whole game plays on a gamepad: fighting, looting, barter, dialogue, the Pip-Boy, the character screen and your followers' combat settings. The interface bar shows the pad's buttons, and arrows on the action icon mark when the D-pad has more to offer.
 - Two quick slots beside the interface bar: LB for a stimpack or any drug or tool, RB for a grenade. Radial menus for skills, weapons, ammo and drugs.
 - Autosaves when you go to another map or a quest moves on, and a quick save on the controller.
 - On the Steam Deck it starts straight from the Steam library, in Game Mode.
@@ -53,7 +53,7 @@ Steam's Fallout 2 includes the High Resolution Patch, whose files give the wider
 
 ### Uninstall
 
-Run the installer again and click **Uninstall**. On the Deck it is `bash install-steamdeck.sh uninstall`. Steam's **Verify integrity of game files** brings the original back as well. Your saves, `fallout2.cfg` and the backups stay. If you changed **Screen** or **Internal resolution** on the MODS page, that went into the High Resolution Patch's `f2_res.ini`, which is not backed up, so set them back before you uninstall.
+Run the installer again and click **Uninstall**. On the Deck it is `bash install-steamdeck.sh uninstall`. Steam's **Verify integrity of game files** brings the original back as well. Your saves, `fallout2.cfg` and the backups stay. **Screen** and **Internal resolution** on the MODS page write to the High Resolution Patch's `f2_res.ini`, which the installer does not back up, so copy that file somewhere safe before you change them and put it back after you uninstall.
 
 ## Controls
 
@@ -102,21 +102,24 @@ An autosave waits until the fight is over. Holding START quick-saves whenever yo
 > [!CAUTION]
 > **Your own saves in slots 1 to 5 WILL BE OVERWRITTEN.** Save them again into slot 6 or later before you start, or back up the `SAVEGAME` folder outside the game folder.
 
+If you play on more than one machine, Steam Cloud can deliver a slot only partly when the other machine syncs while an upload is still running. The game checks for that: Continue offers the last complete save instead, and the load screen asks before it loads one. Saves made by this version also carry your companions, so one that a half-copied slot would have lost comes back. With every slot full, Steam's file limit can keep the last slots from syncing at all, so use the lower ones if you switch machines.
+
 ## Status
 
-Version 0.1.0, the first public release, so expect rough edges. So far it has been played from a new character through the Temple of Trials into Klamath. The rest of the game has not been played yet, and the car has not been worked on. If something breaks, please open an [issue](../../issues). It helps a lot if you put `trace_log=1` under `[preferences]` in `fallout2.cfg`, play until it happens again and attach the newest `trace_*.log` from the game folder.
+Version 0.1.0, the first public release, so expect rough edges. So far it has been played from a new character through the Temple of Trials, Klamath and the Den into Modoc. The rest of the game has not been played yet, and the car has not been worked on. If something breaks, please open an [issue](../../issues). It helps a lot if you put `trace_log=1` under `[preferences]` in `fallout2.cfg`, play until it happens again and attach the newest `trace_*.log` from the game folder.
 
 Known:
 
 - On some PCs (seen with an AMD graphics card) the Steam overlay may not show.
-- If the game shows a small 4:3 picture with black bars and no LB slot (seen on a Steam Deck), set **Internal resolution** on the MODS page to **Original** and restart the game.
+- If the game shows a small 4:3 picture with black bars and no LB slot (seen on a Steam Deck), step **Internal resolution** on the MODS page to another value and back to **Original**, then restart the game. It may already say Original, but only a change is saved.
 - Fallout 2's own calibres all fly at the same speed for now.
 - Nobody has checked yet whether your followers keep to their Distance and Chem use settings in a realtime fight.
 - Some help texts on the MODS page still talk about Fallout 1.
+- In a New Reno boxing match the opponent can keep coming during the break between rounds.
 
 ## What's next
 
-- The rest of the game after Klamath, and polish everywhere it still feels rough.
+- The rest of the game after Modoc, and polish everywhere it still feels rough.
 - New hand-made animations, starting with reloading.
 - The Steam overlay on the PCs where it does not show yet.
 
@@ -136,6 +139,8 @@ That builds `fallout2-realtime.exe` and the installer. Leave out `-DFALLOUT_RELE
 Fallout 2 Realtime is a **modified version** of [Fallout 2 Community Edition](https://github.com/alexbatalov/fallout2-ce) by Alexander Batalov, which re-implements the original engine. Everything changed after upstream commit `e97087b` is the work of c1v1-m, apart from the Fallout Community Edition code it carries (see below).
 
 It builds on [Fallout 1 Realtime](https://github.com/c1v1-m/fallout1-realtime), and through it carries code from [Fallout Community Edition](https://github.com/alexbatalov/fallout1-ce), also by Alexander Batalov.
+
+It uses [SDL2](https://www.libsdl.org) and [zlib](https://zlib.net) under the zlib license, and fpattern by David R Tribble under the MIT License. Their notices are in `third_party` here and in `NOTICE.txt` in the release zip.
 
 Fallout is a trademark of Bethesda Softworks. This project contains no game data. The High Resolution Patch by Mash, whose files it reads, comes with Steam's copy of the game.
 
