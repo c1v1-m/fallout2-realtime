@@ -140,7 +140,7 @@ Fallout 2 Realtime is a **modified version** of [Fallout 2 Community Edition](ht
 
 It builds on [Fallout 1 Realtime](https://github.com/c1v1-m/fallout1-realtime), and through it carries code from [Fallout Community Edition](https://github.com/alexbatalov/fallout1-ce), also by Alexander Batalov.
 
-It uses [SDL2](https://www.libsdl.org) and [zlib](https://zlib.net) under the zlib license, and fpattern by David R Tribble under the MIT License. Their notices are in `third_party` here and in `NOTICE.txt` in the release zip.
+It uses [SDL2](https://www.libsdl.org) and [zlib](https://zlib.net) under the zlib license, the YUV conversion code in SDL2 under a BSD license, and fpattern by David R Tribble under the MIT License. Their notices are in `NOTICE.txt` in the release zip.
 
 Fallout is a trademark of Bethesda Softworks. This project contains no game data. The High Resolution Patch by Mash, whose files it reads, comes with Steam's copy of the game.
 
