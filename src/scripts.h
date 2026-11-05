@@ -188,6 +188,7 @@ int scriptsRequestStealing(Object* a1, Object* a2);
 void _script_make_path(char* path);
 int scriptExecProc(int sid, int proc);
 bool scriptHasProc(int sid, int proc);
+const char* scriptsListEntryName(int index);
 int _scr_find_str_run_info(int a1, int* a2, int sid);
 int scriptsSetDudeScript();
 int scriptsClearDudeScript();

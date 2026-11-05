@@ -2214,6 +2214,7 @@ void _obj_remove_all()
     combat_rt_notify_objects_freed();
     anim_smooth_reset();
     interact_prompt_reset();
+    interact_prompt_forget_hover();
 
     _scr_remove_all();
 

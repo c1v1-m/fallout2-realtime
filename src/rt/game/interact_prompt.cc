@@ -162,6 +162,18 @@ static int ip_win = -1;            // floating icon overlay window
 static int ip_icon_num = 0;        // interface FRM number currently shown (hand vs talk face)
 static int ip_hand_w = 0;          // current icon dimensions
 static int ip_hand_h = 0;
+
+// ▲ ABOVE AND ▼ BELOW THE ICON while the target has more than one action -- the D-pad's tap steps through
+// them (Fallout 2 Realtime 2026-11-05, his pick of six mock-ups: „aby hráč věděl, že může použít dpad“).
+// ⚠️ TWO SMALL WINDOWS OF THEIR OWN, NOT A TALLER ICON WINDOW: WINDOW_TRANSPARENT works only while GNW
+// double-buffers, which it never does in play, so a see-through margin came out as two black bars (the same
+// trap as the aim marks, gamepad_ui.cc). And no plate either (his „ty šipky jsou moc velké“, „pryč černé pole“):
+// every frame each window takes the piece of the WORLD window under it as its background and draws the
+// triangle on that, so it reads as an arrow lying on the map (ip_paint_arrow).
+#define IP_ARROW_W 7
+#define IP_ARROW_H 5
+static int ip_up_win = -1;
+static int ip_down_win = -1;
 static int ip_win_x = -32000;
 static int ip_win_y = -32000;
 
@@ -427,10 +439,47 @@ static bool ip_look_only(Object* obj)
     return ip_classify(obj) == IP_NONE;
 }
 
+// Would the hand on this thing do nothing but say "You see: X"? GENERIC scenery (no door, ladder, stairs or
+// lift behaviour of its own) whose script has no use_p_proc -- or that has no script at all. Vanilla's use
+// then runs nothing that answers and prints the name. Unknown (the program not loaded yet, procs[] not
+// located) counts as "it might", so the hand stays first.
+static bool ip_scenery_use_is_dead(Object* obj)
+{
+    if (FID_TYPE(obj->fid) != OBJ_TYPE_SCENERY) {
+        return false;
+    }
+    Proto* proto = NULL;
+    if (proto_ptr(obj->pid, &proto) == -1 || proto == NULL || proto->scenery.type != SCENERY_TYPE_GENERIC) {
+        return false;
+    }
+    if (obj->sid == -1) {
+        return true;
+    }
+    Script* script;
+    if (scr_ptr(obj->sid, &script) == -1 || (script->flags & SCRIPT_FLAG_0x01) == 0) {
+        return false;
+    }
+    return script->procs[SCRIPT_PROC_USE] == SCRIPT_PROC_NO_PROC;
+}
+
+static void ip_hover_tick(Object* target); // the pad's hover -- see ip_hover_scripts
+static Object* ip_hover_obj_get();
+
 static int ip_build_actions(Object* obj, int* out)
 {
     int n = 0;
     int def = ip_classify(obj);
+
+    // ⚠️ A HAND THAT DOES NOTHING IS NOT THE DEFAULT (Fallout 2 Realtime 2026-11-05, Becky's still in the Den:
+    // „první akci mi to nabídlo ruku, což nic neudělalo a pak až binoculary a to progresslo quest“). The still
+    // carries the proto's "can use" bit, but its script answers only look_at_p_proc -- which a mouse player
+    // runs just by HOVERING over it, and a pad has no hover. So where the hand would only print "You see:",
+    // LOOK comes first and the hand is one tap away.
+    if (def == IP_USE && ip_scenery_use_is_dead(obj)) {
+        out[n++] = IP_LOOK;
+        out[n++] = IP_USE;
+        return n;
+    }
     if (def == IP_NONE) {
         // A pointed-at sign has exactly one thing it can do, and the cycle must not be empty or the
         // prompt would have a target with no action to show.
@@ -1226,12 +1275,25 @@ static void ip_set_outline(Object* obj)
     }
 }
 
+static void ip_hide_arrows()
+{
+    if (ip_up_win != -1) {
+        win_delete(ip_up_win);
+        ip_up_win = -1;
+    }
+    if (ip_down_win != -1) {
+        win_delete(ip_down_win);
+        ip_down_win = -1;
+    }
+}
+
 static void ip_hide_overlay()
 {
     if (ip_win != -1) {
         win_delete(ip_win);
         ip_win = -1;
     }
+    ip_hide_arrows();
     ip_win_x = ip_win_y = -32000;
 }
 
@@ -1278,6 +1340,44 @@ static int ip_icon_art_num(int kind)
     }
 }
 
+// One arrow, 5 px wide and 3 tall with a 1 px dark rim: tip row `tipY`, pointing up (dir = 1, the rows run
+// down from the tip) or down (dir = -1). In the gold of the bar's pad badges (interface.cc, pad_badge_gold).
+static bool ip_arrow_in(int dx, int row)
+{
+    return row >= 0 && row <= 2 && dx >= -row && dx <= row;
+}
+
+static void ip_draw_arrow(unsigned char* buf, int w, int h, int cx, int tipY, int dir)
+{
+    unsigned char fill = (unsigned char)colorTable[(23 << 10) | (19 << 5) | 5];
+    unsigned char rim = (unsigned char)colorTable[(2 << 10) | (2 << 5) | 1];
+    if (rim == 0) {
+        rim = (unsigned char)colorTable[(2 << 10) | (2 << 5) | 2];
+    }
+    for (int row = -1; row <= 3; row++) {
+        for (int dx = -4; dx <= 4; dx++) {
+            bool in = ip_arrow_in(dx, row);
+            bool edge = false;
+            for (int oy = -1; oy <= 1 && !in && !edge; oy++) {
+                for (int ox = -1; ox <= 1; ox++) {
+                    if (ip_arrow_in(dx + ox, row + oy)) {
+                        edge = true;
+                        break;
+                    }
+                }
+            }
+            if (!in && !edge) {
+                continue;
+            }
+            int x = cx + dx;
+            int y = tipY + dir * row;
+            if (x >= 0 && y >= 0 && x < w && y < h) {
+                buf[y * w + x] = in ? fill : rim;
+            }
+        }
+    }
+}
+
 // Blit the current icon (frame 0, index-0 transparent) into the overlay window and present it.
 static void ip_draw_icon()
 {
@@ -1308,6 +1408,53 @@ static void ip_draw_icon()
     }
 
     win_draw(ip_win);
+}
+
+// One arrow: created where it is wanted, moved after the icon, repainted over what the world shows there now,
+// every frame. Dropped when it would not lie on the world window (off the top, or over the bar).
+static void ip_place_arrow(int* win, int x, int y, bool up)
+{
+    Rect world;
+    unsigned char* src = display_win != -1 && win_get_rect(display_win, &world) == 0 ? win_get_buf(display_win) : NULL;
+    if (src == NULL || x < world.ulx || y < world.uly || x + IP_ARROW_W - 1 > world.lrx || y + IP_ARROW_H - 1 > world.lry) {
+        if (*win != -1) {
+            win_delete(*win);
+            *win = -1;
+        }
+        return;
+    }
+
+    if (*win == -1) {
+        *win = win_add(x, y, IP_ARROW_W, IP_ARROW_H, colorTable[0], WINDOW_MOVE_ON_TOP);
+        if (*win == -1) {
+            return;
+        }
+    } else {
+        win_move(*win, x, y);
+    }
+
+    unsigned char* buf = win_get_buf(*win);
+    if (buf == NULL) {
+        return;
+    }
+    int pitch = world.lrx - world.ulx + 1;
+    for (int row = 0; row < IP_ARROW_H; row++) {
+        memcpy(buf + row * IP_ARROW_W, src + (y - world.uly + row) * pitch + (x - world.ulx), IP_ARROW_W);
+    }
+    ip_draw_arrow(buf, IP_ARROW_W, IP_ARROW_H, IP_ARROW_W / 2, up ? 1 : IP_ARROW_H - 2, up ? 1 : -1);
+    win_draw(*win);
+}
+
+// The ▲▼ plates centred above and below the icon window, when the target has more than one action.
+static void ip_place_arrows(int iw, int ih)
+{
+    if (ip_win == -1 || ip_actions_count <= 1) {
+        ip_hide_arrows();
+        return;
+    }
+    int x = ip_win_x + iw / 2 - IP_ARROW_W / 2;
+    ip_place_arrow(&ip_up_win, x, ip_win_y - IP_ARROW_H - 1, true);
+    ip_place_arrow(&ip_down_win, x, ip_win_y + ih + 1, false);
 }
 
 // Float the icon for `kind` just to the RIGHT of the object (vertically centered), tracking it.
@@ -1374,6 +1521,8 @@ static void ip_show_overlay(Object* obj, int kind)
         ip_win_y = y;
         ip_draw_icon();
     }
+
+    ip_place_arrows(iw, ih);
 }
 
 void interact_prompt_tick()
@@ -1397,6 +1546,7 @@ void interact_prompt_tick()
         ip_clear_outline();
         ip_hide_overlay();
         ip_target = NULL;
+        ip_hover_tick(NULL);
         return;
     }
 
@@ -1411,6 +1561,7 @@ void interact_prompt_tick()
         ip_clear_outline();
         ip_hide_overlay();
         ip_target = NULL;
+        ip_hover_tick(NULL);
 
         // The mouse hover's side effect, which this pad action has to supply itself: a script that
         // has never run gets its start body now, so the action below reaches its own procedure.
@@ -1551,6 +1702,7 @@ void interact_prompt_tick()
         ip_clear_outline();
         ip_hide_overlay();
         ip_target = NULL;
+        ip_hover_tick(NULL);
         return;
     }
 
@@ -1564,6 +1716,7 @@ void interact_prompt_tick()
         ip_action_index = 0;
         ip_clear_outline();
         ip_hide_overlay();
+        ip_hover_tick(NULL); // walking past is no resting: coming back starts the count again
         return;
     }
 
@@ -1629,9 +1782,11 @@ void interact_prompt_tick()
     if (combat_rt_hostile_in_attack_range() && obj_dist(obj_dude, best) > IP_INTERACT_ADJACENT_TILES) {
         ip_clear_outline();
         ip_hide_overlay();
+        ip_hover_tick(NULL); // no icon, no hover: nothing offered, nothing may move on its own
         return;
     }
 
+    ip_hover_tick(best);
     ip_set_outline(best);
     ip_show_overlay(best, kind);
 }
@@ -1744,6 +1899,90 @@ void interact_prompt_notify_object_freed(Object* obj)
         ip_pending = NULL;
         ip_pending_kind = IP_NONE;
     }
+    // ...and what the right stick pointed at (review 2026-11-05): the next tick would hand a freed object back
+    // to the prompt as the target. A new object at the same address must not inherit the hover's count either.
+    if (ip_manual_target == obj) {
+        ip_manual_target = NULL;
+    }
+    if (ip_hover_obj_get() == obj) {
+        ip_hover_tick(NULL);
+    }
+}
+
+// ⚠️ THE MOUSE'S HOVER, FOR THE PAD (Fallout 2 Realtime 2026-11-05, his „je něco podobného ve hře, jako ten
+// incident s pálenkou?“). Vanilla runs an object's look_at_p_proc when the pointer merely RESTS on it, and a
+// few of those move the game. A scan of all 1443 F2 scripts (patch000 over master) found seven whose look_at
+// sets a global or map variable or a timer: Becky's still (distill), the Wrights' stills (niwristi), Mr.
+// Bishop's safe (nimrbsf), Farrel's wall safe (miwalsfe), the tanker's FOB terminal (fsfobter), Cody
+// (nccody), a Den thug (dcthug). A pad has no hover, so the prompt resting IP_HOVER_MS on one of them runs that
+// look once per object per map -- what the mouse would have done. Every other look stays on the D-pad's
+// binoculars, so the message window does not fill with "You see:" lines as the dude walks past things.
+// (description_p_proc changes -- the NCR painting, the password note -- need an explicit look with a mouse
+// too, and get it from the binoculars here as well.)
+#define IP_HOVER_MS 600
+#define IP_HOVER_DONE_MAX 32
+static const char* const ip_hover_scripts[] = { "dcthug", "distill", "fsfobter", "miwalsfe", "nccody", "nimrbsf", "niwristi" };
+static Object* ip_hover_obj = NULL;
+static unsigned int ip_hover_since = 0;
+static int ip_hover_done[IP_HOVER_DONE_MAX];
+static int ip_hover_done_count = 0;
+
+static Object* ip_hover_obj_get()
+{
+    return ip_hover_obj;
+}
+
+static bool ip_hover_wanted(Object* obj)
+{
+    if (obj == NULL || obj->sid == -1) {
+        return false;
+    }
+    Script* script;
+    if (scr_ptr(obj->sid, &script) == -1) {
+        return false;
+    }
+    const char* name = scriptsListEntryName(script->index);
+    if (name == NULL) {
+        return false;
+    }
+    for (const char* want : ip_hover_scripts) {
+        if (compat_stricmp(name, want) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ip_hover_tick(Object* target)
+{
+    if (target != ip_hover_obj) {
+        ip_hover_obj = target;
+        ip_hover_since = get_time();
+        return;
+    }
+    if (target == NULL || get_time() - ip_hover_since < IP_HOVER_MS) {
+        return;
+    }
+    for (int i = 0; i < ip_hover_done_count; i++) {
+        if (ip_hover_done[i] == target->id) {
+            return;
+        }
+    }
+    if (!ip_hover_wanted(target)) {
+        return;
+    }
+    if (ip_hover_done_count < IP_HOVER_DONE_MAX) {
+        ip_hover_done[ip_hover_done_count++] = target->id;
+    }
+    trace_event(TRACE_ACTION, "ip-hover-look", "pid=%d id=%d", target->pid, target->id);
+    obj_look_at(obj_dude, target);
+}
+
+// A new map: the objects are new, every hover may run again (object.cc, _obj_remove_all).
+void interact_prompt_forget_hover()
+{
+    ip_hover_obj = NULL;
+    ip_hover_done_count = 0;
 }
 
 void interact_prompt_reset()
@@ -1751,6 +1990,8 @@ void interact_prompt_reset()
     ip_clear_outline();
     ip_hide_overlay();
     ip_target = NULL;
+    ip_manual_target = NULL;
+    ip_hover_tick(NULL);
     ip_pending = NULL;
     ip_pending_kind = IP_NONE;
     ip_actions_count = 0;

@@ -1,0 +1,19 @@
+# F2 (2026-11-05, „první akci mi to nabídlo ruku, což nic neudělalo a pak až binoculary a to progresslo quest“): Becky's
+# still in her basement (DENBUS1, pid 33555432) has a script with look_at_p_proc and no use_p_proc. The prompt offers
+# LOOK (binoculars, kind=7) first, the hand second; A looks.
+name screen-den-still
+map DENBUS1.MAP
+mapscript on
+seed 1
+duration 8
+dude elevation 1
+dude tile 17263 rot 2
+
+shot 2500
+tap 3000 A
+shot 4500
+
+expect ip-show\] pid=33555432 kind=7 idx=0 of=2
+expect interact-do\] kind=7 pid=33555432
+expect ip-hover-look\] pid=33555432
+expect-count 1 ip-hover-look\]

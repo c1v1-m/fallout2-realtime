@@ -1518,6 +1518,16 @@ static int scriptLocateProcs(Script* script)
     return 0;
 }
 
+// Realtime: the scripts.lst name of script `index` (no extension), or nullptr -- interact_prompt.cc's pad hover.
+const char* scriptsListEntryName(int index)
+{
+    index &= 0xFFFFFF;
+    if (gScriptsListEntries == nullptr || index < 0 || index >= gScriptsListEntriesLength) {
+        return nullptr;
+    }
+    return gScriptsListEntries[index].name;
+}
+
 // 0x4A4A08
 bool scriptHasProc(int sid, int proc)
 {

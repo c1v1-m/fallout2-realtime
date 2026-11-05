@@ -29,6 +29,7 @@ Object* interact_prompt_target();
 // caller can refuse audibly instead of eating the press. Safe from the input hook: it only moves an
 // index and redraws the overlay window.
 bool interact_prompt_cycle(int delta);
+void interact_prompt_forget_hover();
 // The right stick is pointing (every frame it is out): the prompt's target wears the yellow
 // outline until a moment after it comes home. See interact_prompt.cc.
 void interact_prompt_note_stick();
