@@ -20,7 +20,7 @@ You need your own copy of Fallout 2 from [Steam](https://store.steampowered.com/
 - Enemies fight smarter. They wait for each other and come round a corner together, cover the door you are holding, shoot from where they can see you, reload out of your sight, jump clear of grenades and step out of your line of fire.
 - Your stats decide how fast you swing, aim and reload. Agility brings your action points back faster.
 - A stimpack heals over the next few seconds in a fight, so hits still hurt while it works. Hold the button and you inject one after another.
-- The whole game plays on a gamepad: fighting, looting, barter, dialogue, the Pip-Boy, the character screen and your followers' combat settings. The interface bar shows the pad's buttons, and arrows on the action icon mark when the D-pad has more to offer.
+- The whole game plays on a gamepad: fighting, looting, barter, dialogue, the Pip-Boy, the character screen and your followers' combat settings. The interface bar shows the pad's buttons, the action icon carries an A, and arrows on it mark when the D-pad has more to offer.
 - Two quick slots beside the interface bar: LB for a stimpack or any drug or tool, RB for a grenade. Radial menus for skills, weapons, ammo and drugs.
 - Autosaves when you go to another map or a quest moves on, and a quick save on the controller.
 - On the Steam Deck it starts straight from the Steam library, in Game Mode.

@@ -120,6 +120,7 @@ namespace fallout {
 //                                      base alarm does) -- it still has to see him before it comes
 //   tactical on|off                    MODS "Tactical AI" for this run (default: as the cfg says)
 //   projectiles on|off                 MODS "Projectiles" for this run
+//   promptword on|off                  MODS "Name the action" for this run (the word beside the action icon)
 //   tracer <hexes> <r> <g> <b> [underline]   how a bullet looks (r g b 0-31) -- to photograph variants
 //   ipdump <seconds>                   list every interactable in the picker's range and why it is (not) pickable
 //   partyexport <file>                 F2: after loadslot, every companion whole into <file> (data folder)
@@ -249,6 +250,7 @@ static bool at_reload = false;
 static float at_projectile_speedup = -1.0f;
 static int at_tactical = -1;
 static int at_projectiles = -1;
+static int at_prompt_word = -1;
 static int at_shots_wanted = 0;
 static float at_ipdump_at = -1.0f; // scenario "ipdump": when to list the interact candidates
 static int at_shots_taken = 0;
@@ -734,6 +736,8 @@ static bool at_parse(const char* path)
             at_tactical = strcmp(tok[1], "off") == 0 ? 0 : 1;
         } else if (strcmp(tok[0], "projectiles") == 0 && n >= 2) {
             at_projectiles = strcmp(tok[1], "off") == 0 ? 0 : 1;
+        } else if (strcmp(tok[0], "promptword") == 0 && n >= 2) {
+            at_prompt_word = strcmp(tok[1], "off") == 0 ? 0 : 1;
         } else if (strcmp(tok[0], "ipdump") == 0 && n >= 2) {
             at_ipdump_at = (float)atof(tok[1]);
         } else if (strcmp(tok[0], "tracer") == 0 && n >= 5) {
@@ -1016,6 +1020,9 @@ void autotest_setup_world()
     }
     if (at_projectiles >= 0) {
         combat_rt_set_projectiles(at_projectiles != 0);
+    }
+    if (at_prompt_word >= 0) {
+        interact_prompt_set_action_word(at_prompt_word != 0);
     }
 
     // The dude.

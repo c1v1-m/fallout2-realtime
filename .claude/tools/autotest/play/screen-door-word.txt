@@ -1,0 +1,11 @@
+# F2 (2026-11-07): the door prompt with MODS "Name the action" on -- the A badge and the word OPEN beside the icon.
+name screen-door-word
+map DENBUS1.MAP
+mapscript on
+seed 1
+promptword on
+duration 6
+dude elevation 0
+dude tile 19706 rot 0
+ipdump 1.5
+shot 2500

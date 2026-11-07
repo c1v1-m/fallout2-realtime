@@ -1,0 +1,11 @@
+# F2 (2026-11-07, „ukázat A při akci, třeba otevřít dveře“): a door's use prompt, for the A-badge mock-ups. DENBUS1,
+# beside one of the Den's doors.
+name screen-door-prompt
+map DENBUS1.MAP
+mapscript on
+seed 1
+duration 6
+dude elevation 0
+dude tile 19706 rot 0
+ipdump 1.5
+shot 2500
