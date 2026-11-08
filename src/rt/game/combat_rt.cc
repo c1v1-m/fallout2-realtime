@@ -19461,18 +19461,32 @@ static void rt_world_overlay(Rect* rect, int elevation)
 static bool rt_blast_ring_aim(int* tile, int* radius)
 {
     int hitMode;
-    if (!combat_rt_quick_throw_hit_mode(&hitMode)) {
+    Object* target;
+    if (combat_rt_quick_throw_hit_mode(&hitMode)) {
+        target = combat_rt_quick_throw_target();
+    } else if (rt_lock_target != NULL && rt_is_combatant(rt_lock_target)) {
+        // ...AND THE LT LOCK WITH AN EXPLOSIVE IN THE HAND (2026-11-08, his „raketomet bude taky ukazovat aoe
+        // awareness?“): a rocket launcher, or a grenade held in the hand rather than in a quick slot -- round the
+        // locked target, the one RT fires at.
+        hitMode = rt_player_hit_mode();
+        target = rt_lock_target;
+    } else {
         return false;
     }
     Object* weapon = item_hit_with(obj_dude, hitMode);
-    int blast = weapon != NULL ? rt_blast_radius_of(obj_dude, weapon, hitMode) : 0;
-    Object* target = blast > 0 ? combat_rt_quick_throw_target() : NULL;
-    if (target == NULL || target->tile < 0 || target->elevation != obj_dude->elevation) {
+    if (weapon == NULL || item_get_type(weapon) != ITEM_TYPE_WEAPON) {
+        return false; // a hand can hold a non-weapon (non-weapon-in-hand)
+    }
+    int blast = rt_blast_radius_of(obj_dude, weapon, hitMode);
+    if (blast <= 0 || target == NULL || target->tile < 0 || target->elevation != obj_dude->elevation) {
         return false;
     }
     int reach = item_w_range(obj_dude, hitMode);
     int lands = target->tile;
     if (obj_dist(obj_dude, target) > reach) {
+        if (item_w_subtype(weapon, hitMode) != ATTACK_TYPE_THROW) {
+            return false; // a launcher does not fire past its range: no blast to show
+        }
         lands = tile_num_beyond(obj_dude->tile, target->tile, reach);
         Object* blocker = obj_dude;
         make_straight_path(obj_dude, obj_dude->tile, lands, NULL, &blocker, 32);

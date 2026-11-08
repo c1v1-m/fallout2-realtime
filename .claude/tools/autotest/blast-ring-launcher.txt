@@ -1,0 +1,26 @@
+# F2 (2026-11-08, his „raketomet bude taky ukazovat aoe awareness?“): the blast ring while AIMING a rocket
+# launcher. The dude holds a loaded rocket launcher and locks a raider (LT); the ring of a rocket's blast,
+# radius 3, 18 dots, sits round the locked raider while LT is held, and goes when it is let go. Nothing is
+# fired. Not hostile, so the raider stands still under the lock.
+name blast-ring-launcher-f2
+map DESERT1.MAP
+seed 1
+duration 8
+dude tile 20100 rot 2
+dude hp 300
+dude skill big_guns 80
+dude armor 2
+dude wield 13
+dude item 14 4
+blastring on
+
+spawn 16777455 20504 rot 5 hp 300
+
+axis 1500 LT 32767
+shot 2600
+axis 4000 LT -32768
+shot 5000
+
+expect \[COMBAT/blast-ring\] on .*radius=3 src=aim .*dots=18
+expect \[COMBAT/blast-ring\] off
+expect-not \[COMBAT/blast-ring\] on .*src=air

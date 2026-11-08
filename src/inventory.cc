@@ -4779,6 +4779,55 @@ static void loot_draw_body_counter()
     fontSetCurrent(oldFont);
 }
 
+// ⚠️ THE LOOT WINDOW NAMES ITS PAD BUTTONS (Fallout 2 Realtime 2026-11-08, his pick of two mock-ups, „Menu bych
+// použil to první“ -- the loot menu). X has taken everything since the loot pile (his „vzít vše + další
+// mrtvola“), LB / RB step bodies and A / Y take one / the stack, yet nothing on the screen said so: he asked for a
+// key for "loot all" that X already was. So, with a pad in, the bar's own badges (dark disc or pill, gold letters)
+// go beside the window's buttons: X on the TAKE ALL plate, LB and RB either side of the next-body arrows, B on the
+// DONE plate; A and Y, which have no button, get "A one  Y stack" under the body's list. All of it on window art
+// that nothing repaints while the window is up, clear of the buttons' own rects (a press redraws those).
+static void loot_draw_pad_badges(bool takeAll, bool bodies)
+{
+    if (gamepad_ui_get_controller() == nullptr) {
+        return;
+    }
+
+    unsigned char* buf = windowGetBuffer(gInventoryWindow);
+    int pitch = windowGetWidth(gInventoryWindow);
+    int height = windowGetHeight(gInventoryWindow);
+    if (buf == nullptr) {
+        return;
+    }
+
+    if (takeAll) {
+        intface_pad_face(buf, pitch, pitch, height, 428, 196, 'X'); // the TAKE ALL plate's corner (button 432, 204)
+    }
+    if (bodies) {
+        intface_pad_pill(buf, pitch, pitch, height, 425, 171, "LB"); // the arrows: 436..475, 162..179
+        intface_pad_pill(buf, pitch, pitch, height, 487, 171, "RB");
+    }
+    intface_pad_face(buf, pitch, pitch, height, 395, 327, 'B'); // the DONE plate (its button: 476, 331)
+
+    // "A one  Y stack" under the body's list, in the badges' gold with the shadow the prompt's word has.
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+    int gold = _colorTable[(23 << 10) | (19 << 5) | 5];
+    int cy = 362;
+    int x = 294;
+    const char keys[2] = { 'A', 'Y' };
+    const char* words[2] = { "one", "stack" };
+    for (int i = 0; i < 2; i++) {
+        intface_pad_face(buf, pitch, pitch, height, x + 7, cy, keys[i]);
+        x += 17;
+        int w = fontGetStringWidth(words[i]) + 1;
+        fontDrawText(buf + pitch * (cy - 5) + x, words[i], w, pitch, gold | FONT_SHADOW);
+        x += w + 8;
+    }
+    fontSetCurrent(oldFont);
+
+    windowRefresh(gInventoryWindow);
+}
+
 int inventoryOpenLooting(Object* looter, Object* target)
 {
     int arrowFrmIds[INVENTORY_ARROW_FRM_COUNT];
@@ -4957,6 +5006,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
     loot_body_index = 0;
     loot_body_count = critterCount;
     loot_draw_body_counter();
+    loot_draw_pad_badges(!_gIsSteal, critterCount > 1);
     trace_event(TRACE_ACTION, "loot-open", "id=%d pid=%d bodies=%d items=%d", target->id, target->pid, critterCount, _target_pud->length);
     // CE: a body seen here and emptied is offered last by the pad's use prompt (interact_prompt_note_opened).
     interact_prompt_note_opened(target);
