@@ -55,6 +55,7 @@
 #include "plib/gnw/mouse.h"
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
+#include "plib/gnw/winmain.h" // GNW95_isActive: no rumble while the game window is in the background
 
 namespace fallout {
 
@@ -8442,6 +8443,165 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
     }
 }
 
+// --- CONTROLLER RUMBLE ---------------------------------------------------------------------------
+//
+// His „Ano to je super, výborný nápad, velmi chválím“ (2026-11-08; MODS "Rumble", cfg `rumble`, default ON by his
+// call). The pad gives a short pulse when the dude is HURT -- harder the bigger the share of his maximum hit points
+// the blow took -- and when something BLOWS UP near him, harder the closer it went off. Who calls: the engine's
+// damage path (every blow that lands on him, a blast's and a trap's included), the realtime blast commit
+// (combat_rt) and the explosion action (dynamite, plastic explosives, a script's blast).
+//
+// Never without a pad, never in a menu or a screen (gpui_rumble_pad), never with the game window in the background,
+// and never on the self-played runs' virtual pad: it has no motors, so there the pulse is only written to the trace.
+//
+// ⚠️ PULSES ARE SHORT AND MUST NEVER RUN TOGETHER INTO A BUZZ. SDL_GameControllerRumble cancels the effect before
+// it, so they cannot pile up in time -- but a burst landing five rounds in half a second would restart the motors
+// five times and feel like one long rattle. So every pulse is followed by GPUI_RUMBLE_GAP_MS of quiet, and until
+// that is over only a pulse at least GPUI_RUMBLE_BREAK stronger may cut in (a rocket after a graze, the hit that
+// comes with a blast). Strength tops out at 1, so no more than three pulses can chain that way before the quiet
+// has to come.
+//
+// ⚠️ SDL ENDS A PULSE ONLY WHEN IT PUMPS THE PAD (SDL_JoystickUpdate, which every get_input reaches), and a map
+// load pumps nothing: a pulse begun a moment before an exit grid would hold the motors for the whole load -- on a
+// Steam Deck, seconds. The mouse hook below stops it as the load begins (gpui_rumble_stop).
+#define GPUI_RUMBLE_MIN_MS 100 // the length of the weakest pulse...
+#define GPUI_RUMBLE_MAX_MS 250 // ...and of the strongest
+#define GPUI_RUMBLE_GAP_MS 150 // the quiet after a pulse
+#define GPUI_RUMBLE_BREAK 0.25f // how much stronger than the last pulse a new one must be to cut into that quiet
+// A HIT: this share of his maximum hit points or more is a full-strength pulse; a scratch is felt at the floor.
+#define GPUI_RUMBLE_HIT_FULL 0.4f
+#define GPUI_RUMBLE_HIT_FLOOR 0.3f
+// A BLAST: full strength on his tile or the next one, down to the floor at REACH - 1 tiles, nothing from REACH on.
+#define GPUI_RUMBLE_BLAST_REACH 10
+#define GPUI_RUMBLE_BLAST_FLOOR 0.3f
+
+static bool gpui_rumble_on = true; // the cfg is read at gamepad_ui_init
+static unsigned int gpui_rumble_at = 0; // get_time() the last pulse began
+static int gpui_rumble_ms = 0; // its length; 0 = none yet, or it was stopped
+static float gpui_rumble_level = 0.0f; // its strength, 0..1
+
+// The pad a pulse may go to NOW, or NULL. Stands down in the same states gpui_button_shortcuts does -- the title
+// menu and the death scene (no session), a D-pad screen, any modal window, the inventory, the pause menu, a
+// conversation, an action popup, a radial wheel -- and during a map load (a map script's critter_dmg): in all of
+// them the world is stopped or is not what is on screen. NOT when the dude is down: the blow that kills him is
+// the one that should be felt most.
+static SDL_GameController* gpui_rumble_pad()
+{
+    if (!gpui_rumble_on || !GNW95_isActive || map_is_loading()) {
+        return NULL;
+    }
+    if (in_main_menu || gpui_no_session || gpui_in_dpad_screen || gpui_action_popup_active
+        || gamepad_ui_menu_active() || inven_any_open() || options_is_open() || dialog_active()
+        || radial_wheel_is_open()) {
+        return NULL;
+    }
+    return gamepad_ui_get_controller();
+}
+
+// One pulse of `strength` (0..1), split between the heavy low-frequency motor and the light high-frequency one.
+// `amount` only goes to the trace: the damage, or how many tiles away the blast was.
+static void gpui_rumble_pulse(const char* why, float strength, float lowShare, float highShare, int amount)
+{
+    SDL_GameController* pad = gpui_rumble_pad();
+    if (pad == NULL || strength <= 0.0f) {
+        return;
+    }
+    if (strength > 1.0f) {
+        strength = 1.0f;
+    }
+
+    unsigned int since = elapsed_time(gpui_rumble_at);
+    if (gpui_rumble_ms > 0 && since < (unsigned int)(gpui_rumble_ms + GPUI_RUMBLE_GAP_MS)
+        && strength < gpui_rumble_level + GPUI_RUMBLE_BREAK) {
+        trace_event(TRACE_COMBAT, "rumble-held", "why=%s amount=%d strength=%.2f last=%.2f since=%u",
+            why, amount, strength, gpui_rumble_level, since);
+        return;
+    }
+
+    int ms = GPUI_RUMBLE_MIN_MS + (int)((GPUI_RUMBLE_MAX_MS - GPUI_RUMBLE_MIN_MS) * strength);
+    Uint16 low = (Uint16)(65535.0f * strength * lowShare);
+    Uint16 high = (Uint16)(65535.0f * strength * highShare);
+    int rc = gpui_on_virtual_pad ? 0 : SDL_GameControllerRumble(pad, low, high, (Uint32)ms);
+
+    gpui_rumble_at = get_time();
+    gpui_rumble_ms = ms;
+    gpui_rumble_level = strength;
+
+    trace_event(TRACE_COMBAT, "rumble", "why=%s amount=%d strength=%.2f low=%u high=%u ms=%d pad=%s rc=%d%s%s",
+        why, amount, strength, (unsigned int)low, (unsigned int)high, ms, gpui_on_virtual_pad ? "virtual" : "real",
+        rc, rc != 0 ? " err=" : "", rc != 0 ? SDL_GetError() : "");
+}
+
+// Ends a pulse that is still running: the MODS row switched off, or a map load beginning (see above). Straight on
+// the handle -- the middle of a load is no time to go opening controllers.
+static void gpui_rumble_stop(const char* why)
+{
+    if (gpui_rumble_ms == 0 || elapsed_time(gpui_rumble_at) >= (unsigned int)gpui_rumble_ms) {
+        return;
+    }
+    gpui_rumble_ms = 0;
+    if (gpui_controller != NULL && !gpui_on_virtual_pad) {
+        SDL_GameControllerRumble(gpui_controller, 0, 0, 0);
+    }
+    trace_event(TRACE_COMBAT, "rumble-stop", "why=%s", why);
+}
+
+// ⚠️ THE GAME IS GOING DOWN ON A FAULT (review 2026-11-08; trace_set_crash_hook, game_trace.cc). A crash skips
+// SDL_Quit, so nothing closes the pad, and an XInput pad keeps its motors at the last level set: a pulse begun
+// by the hit right before the crash would buzz on after the window is gone. Only while a pulse is still due to
+// run, and no trace line -- this runs inside the crash handler.
+static void gpui_rumble_crash_stop()
+{
+    if (gpui_rumble_ms == 0 || elapsed_time(gpui_rumble_at) >= (unsigned int)gpui_rumble_ms) {
+        return;
+    }
+    gpui_rumble_ms = 0;
+    if (gpui_controller != NULL && !gpui_on_virtual_pad) {
+        SDL_GameControllerRumble(gpui_controller, 0, 0, 0);
+    }
+}
+
+void gamepad_ui_rumble_hit(int damage)
+{
+    if (!gpui_rumble_on || obj_dude == NULL || damage <= 0) {
+        return;
+    }
+    int maxHp = stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS);
+    float share = maxHp > 0 ? (float)damage / (float)maxHp : 1.0f;
+    float t = share >= GPUI_RUMBLE_HIT_FULL ? 1.0f : share / GPUI_RUMBLE_HIT_FULL;
+    // A blow is sharp: the light motor leads.
+    gpui_rumble_pulse("hit", GPUI_RUMBLE_HIT_FLOOR + (1.0f - GPUI_RUMBLE_HIT_FLOOR) * t, 0.6f, 1.0f, damage);
+}
+
+void gamepad_ui_rumble_blast(int tile, int elevation)
+{
+    if (!gpui_rumble_on || obj_dude == NULL || tile < 0 || obj_dude->tile < 0 || elevation != obj_dude->elevation) {
+        return;
+    }
+    int dist = tile_dist(obj_dude->tile, tile);
+    if (dist >= GPUI_RUMBLE_BLAST_REACH) {
+        return;
+    }
+    float strength = dist <= 1
+        ? 1.0f
+        : 1.0f - (1.0f - GPUI_RUMBLE_BLAST_FLOOR) * (float)(dist - 1) / (float)(GPUI_RUMBLE_BLAST_REACH - 2);
+    // A blast is a boom: the heavy motor leads.
+    gpui_rumble_pulse("blast", strength, 1.0f, 0.5f, dist);
+}
+
+bool gamepad_ui_get_rumble()
+{
+    return gpui_rumble_on;
+}
+
+void gamepad_ui_set_rumble(bool on)
+{
+    gpui_rumble_on = on;
+    if (!on) {
+        gpui_rumble_stop("off");
+    }
+}
+
 // REENTRANCY GUARD -- this hook must never run inside itself.
 //
 // The engine pumps the mouse from inside FILE I/O: db_fgetc calls gameMouseRefreshImmediately
@@ -8474,6 +8634,9 @@ static void gpui_mouse_hook(int* dx, int* dy, int* buttons)
     // controller being unplugged for a moment -- so no press survives the load to leak a
     // click into the map you just arrived on.
     if (map_is_loading()) {
+        // The one thing done here: a pulse still running would buzz through the whole load (CONTROLLER
+        // RUMBLE). It touches only the pad, never the world.
+        gpui_rumble_stop("map-load");
         return;
     }
 
@@ -8946,6 +9109,7 @@ static bool gpui_hide_cursor_predicate()
 
 void gamepad_ui_init()
 {
+    trace_set_crash_hook(gpui_rumble_crash_stop); // a crash must not leave the pad rumbling
     gpui_aim_part_load(); // the remembered aimed part (gpui_aim_part_store)
     // Cursor feel. Clamped so a bad cfg can't make the cursor immovable or uncontrollable, and the
     // deadzone is capped well below 1 so there is always a usable band left above it.
@@ -8966,6 +9130,11 @@ void gamepad_ui_init()
         cursorDead = 0.8;
     }
     gpui_stick_deadzone = (float)cursorDead;
+
+    // MODS "Rumble": on unless the cfg says 0 (his call, 2026-11-08).
+    int rumble = 1;
+    config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_RUMBLE_KEY, &rumble);
+    gpui_rumble_on = rumble != 0;
 
     // Keep delivering controller input when the window isn't focused. SDL gates
     // joystick/controller input on focus by default, so an overlay or a brief

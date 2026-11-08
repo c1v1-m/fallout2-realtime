@@ -38,6 +38,8 @@
 // Realtime (fallout1-ce's actions.cc changes, ported).
 #include "rt/game/combat_rt.h"
 #include "rt/game/game_trace.h"
+#include "rt/game/interact_prompt.h"
+#include "rt/game/gamepad_ui.h"
 #include "rt/rt_hooks.h"
 
 namespace fallout {
@@ -1169,6 +1171,8 @@ static int action_rt_launch_flight(void* a1, void* a2)
                 break;
             }
         }
+        // Where it lands is decided only now (the re-aim above): the blast ring sits on that tile.
+        combat_rt_flight_launched(launched, fl->tile);
     }
 
     fl->used = false;
@@ -1358,6 +1362,13 @@ int _action_ranged(Attack* attack, int anim)
                 fl->explosionFid = -1;
                 strncpy(fl->flySfx, sfxBuildWeaponName(WEAPON_SOUND_EFFECT_AMMO_FLYING, weapon, attack->hitMode, attack->defender), sizeof(fl->flySfx) - 1);
                 strncpy(fl->hitSfx, sfxBuildWeaponName(WEAPON_SOUND_EFFECT_HIT, weapon, attack->hitMode, attack->defender), sizeof(fl->hitSfx) - 1);
+
+                // What the dude throws and does not blow up -- a knife, a spear, a rock -- comes down on the
+                // floor as itself (the flight's tail, or action_flight_put_away), and the pad's A picks it up
+                // before anything else there (Fallout 2 Realtime 2026-11-08, interact_prompt_note_thrown).
+                if (fl->thrown && !fl->eraseAtEnd && attack->attacker == gDude) {
+                    interact_prompt_note_thrown(projectile);
+                }
 
                 if (fl->explodes) {
                     int explosionFrmId;
@@ -2217,6 +2228,10 @@ int actionExplode(int tile, int elevation, int minDamage, int maxDamage, Object*
             gameUiEnable();
             return -1;
         }
+
+        // Realtime build: the pad feels it go off, harder the nearer the dude (MODS "Rumble", 2026-11-08). Only
+        // the animated blast: the one without is a charge left armed on a map being left, which nobody sees.
+        gamepad_ui_rumble_blast(tile, elevation);
 
         _show_damage_extras(attack);
     } else {

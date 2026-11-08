@@ -1,0 +1,21 @@
+# F2 (2026-11-08): the blast ring of an ENEMY's explosive. A super mutant's rockets: each one in the air
+# carries a ring of 18 red dots at radius 3 round the tile it flies to, and the ring is gone when it goes off.
+# `shots` photographs the flights (every 0.12 s, six frames each). With `blastring off` the same run must
+# trace no [COMBAT/blast-ring] at all.
+name blast-ring-rocket-f2
+map DESERT1.MAP
+seed 1
+duration 14
+blastring on
+shots 2
+
+dude tile 20100 rot 2
+dude hp 3000
+dude armor 17
+
+spawn 16777335 22500 rot 5 wield 13 item 14 30 hostile
+
+at 0 idle
+
+expect \[COMBAT/blast-ring\] on .*radius=3 src=air .*dots=18
+expect \[COMBAT/blast-ring\] off

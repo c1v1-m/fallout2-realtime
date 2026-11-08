@@ -1,0 +1,24 @@
+# F2 (2026-11-08, with backlog item 2, his „Yes“): a body he has opened and emptied goes after everything else.
+# Two dead raiders: the near one (1 tile) is opened with A and emptied with X. At 37 s -- past ip_recent_loot's
+# 30 s step-aside -- A must open the FAR one (2 tiles, three things on it), not the empty near one again (the
+# old exe opens it: loot-open ... items=0).
+name screen-emptied-last
+map DESERT1.MAP
+seed 1
+duration 44
+dude tile 20100 rot 2
+
+spawn 16777455 20101 rot 5 item 41 25 item 40 1 dead
+spawn 16777455 20102 rot 5 item 41 10 item 40 2 item 29 12 dead
+
+tap 1500 A
+tap 3000 X
+tap 4200 B
+tap 37000 A
+shot 38500
+tap 40000 B
+
+expect-count 2 loot-open\]
+expect loot-take-all\] .*left=0
+expect loot-open\] .*items=3
+expect-not loot-open\] .*items=0

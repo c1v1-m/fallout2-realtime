@@ -1,0 +1,28 @@
+# World map travel speed at Very fast (2026-11-08, with wm-travel-normal: the same walk from Klamath
+# Toxic Caves to Klamath). Two vanilla passes a frame: perframe 2.00 (1.9x when the last frame needed
+# only one), and the [FLOW/wm-walk] line must carry the SAME passes= and ticks= as wm-travel-normal's,
+# with about half its frames= and ms=. A then enters Klamath.
+name wm-travel-fast
+map KLADWTWN.MAP
+seed 1
+duration 14
+travel 0.5
+
+area 500 23 1
+wmat 600 23
+mapgo 1000 WORLDMAP
+shot 3000
+note 3400 pick-klamath-on-the-list
+tap 3500 DOWN
+tap 4000 DOWN
+tap 4500 A
+shot 5000
+tap 9000 A
+shot 12000
+
+expect autotest\] wmat t=\d+ area=23 rc=0
+expect wm-pad-travel\] area=2 dest=
+expect wm-walk\] leave=0 frames=\d+ passes=\d+ perframe=(1\.9\d|2\.00) ms=
+expect wm-walk\] leave=0 .* perpass=18000 .* travel=0\.50 area=2 pos=
+expect-count 2 map-load-stage\] done name=kladwtwn
+expect-not map-load-stage\] done name=desert

@@ -1,0 +1,29 @@
+# F2 (2026-11-08): the blast ring of a throw that cannot reach. Strength 3 throws a frag grenade 9 tiles;
+# the raider stands 20 off (straight down the screen to the right, off the view), so the ring held on RB
+# must sit where the throw falls short -- the tile [ACTION/far-throw] names as lands= (unless something
+# stands in the way, then on that). Photographed while held and in the air.
+name screen-blast-ring-far-f2
+map DESERT1.MAP
+seed 1
+duration 10
+dude tile 20100 rot 2
+dude stat ST 3
+dude hp 300
+dude skill throwing 80
+dude item 25 4
+dude quickslot rb 25
+blastring on
+
+spawn 16777455 24100 rot 5 wield 4 hostile hp 300
+
+pad 1500 RB 1
+shot 2200
+pad 2600 RB 0
+shot 3200
+shot 3700
+shot 4200
+
+expect-count 1 \[ACTION/quick-throw\] .*far=1
+expect \[ACTION/far-throw\]
+expect \[COMBAT/blast-ring\] on .*radius=2 src=aim
+expect \[COMBAT/blast-ring\] on .*radius=2 src=air

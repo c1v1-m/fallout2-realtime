@@ -1,0 +1,34 @@
+# The MODS row "Blast ring" (2026-11-08): the pause menu, PREFERENCES, X for MODS, then up four rows from the
+# top (the list wraps), past Rumble, onto it. Shot on Awareness (the default), LB, shot Off, RB back to Awareness,
+# B out of all three.
+# 25 rows at 480 lines in Fallout 2 now (Language is hidden): every row must still fit, the help band below them.
+name screen-mods-blast-f2
+map DESERT1.MAP
+seed 1
+duration 17
+dude tile 20100 rot 2
+
+# START tapped: the pause menu opens on the release, its highlight on SAVE GAME
+open 1000 options
+# SAVE -> LOAD -> PREFERENCES, A opens it
+tap 2200 DOWN
+tap 2700 DOWN
+tap 3200 A
+# X opens MODS from Preferences
+tap 4600 X
+# the top row wraps to the bottom: Internal resolution, Screen resolution, Rumble, Blast ring
+tap 5800 UP
+tap 6300 UP
+tap 6800 UP
+tap 7300 UP
+shot 8100
+tap 8900 LB
+shot 9700
+tap 10500 RB
+# B closes MODS, B cancels Preferences, B shuts the pause menu
+tap 11500 B
+tap 12700 B
+tap 13900 B
+note 15500 the world should be back
+
+expect \[FLOW/autotest\] end why=time .* modal=-1

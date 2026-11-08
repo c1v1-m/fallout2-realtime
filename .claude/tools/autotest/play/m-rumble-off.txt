@@ -1,0 +1,12 @@
+# F2 (2026-11-08): m-rumble-hit with MODS "Rumble" off -- the blows land and the pad is never asked.
+name m-rumble-off
+map DESERT1.MAP
+seed 1
+duration 20
+rumble off
+dude tile 15100 rot 2
+dude curhp 15
+spawn 16777454 15700 rot 5 wield 8 item 29 4 hostile
+at 0 idle
+expect \[COMBAT/hit\] .*defPid=16777216 hit=1
+expect-not \[COMBAT/rumble

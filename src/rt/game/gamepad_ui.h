@@ -171,6 +171,16 @@ int gamepad_ui_quick_slot_get(int slot);
 void gamepad_ui_quick_slot_set(int slot, int pid);
 void gamepad_ui_quick_slots_reset();
 
+// CONTROLLER RUMBLE (2026-11-08, MODS "Rumble", cfg `rumble`, default on): a short pulse when the dude is hurt,
+// harder the bigger the share of his hit points the blow took (called from combat.cc's damage path), and when
+// something blows up near him, harder the closer (the realtime blast commit in combat_rt, and the explosion
+// action for dynamite, plastic explosives and a script's blast). Only to a real pad, only while the world is
+// on screen and live, only with the game window in front -- see gpui_rumble_pad.
+void gamepad_ui_rumble_hit(int damage);
+void gamepad_ui_rumble_blast(int tile, int elevation);
+bool gamepad_ui_get_rumble();
+void gamepad_ui_set_rumble(bool on);
+
 } // namespace fallout
 
 #endif /* FALLOUT_GAME_GAMEPAD_UI_H_ */

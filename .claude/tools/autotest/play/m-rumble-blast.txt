@@ -1,0 +1,16 @@
+# F2 (2026-11-08, MODS "Rumble"): a super mutant's rockets at a dude who stands still. One that goes off on him or
+# beside him is a full-strength blast pulse; the hurt it does him (a few hit points of 3000) asks for a pulse of its
+# own in the same frame, which is not clearly stronger and is held back -- one pulse, not two run together.
+name m-rumble-blast
+map DESERT1.MAP
+seed 1
+duration 20
+rumble on
+dude tile 20100 rot 2
+dude stat EN 8
+dude hp 3000
+dude armor 17
+spawn 16777335 22500 rot 5 wield 13 item 14 30 hostile
+at 0 idle
+expect \[COMBAT/rumble\] why=blast amount=[01] strength=1\.00
+expect \[COMBAT/rumble-held\] why=hit

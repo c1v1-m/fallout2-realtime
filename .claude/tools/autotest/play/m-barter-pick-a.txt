@@ -1,0 +1,30 @@
+# F2 (2026-11-08, review report): RT's amount picker in the trade closed on the PRESS of A, and the barter loop
+# then read that same A, still down, as a fresh press -- its release moved one more item. The dude carries only
+# caps; the trade opens on them, RT asks, UP UP makes it 3, A confirms. Exactly 3 caps must sit on his offer when
+# X reads the tables (barter-auto ptableCaps=3; the old build gave 4), and no A of the barter loop may fire at all.
+# The shot after the trade opens shows the legend: "LT+A all stack" and "B exit" whole.
+name m-barter-pick-a
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 26
+dude tile 22879 rot 0
+dude item 41 2000
+
+talk 2000 16777273
+tap 6000 Y
+shot 8500
+axis 9000 RT 32767
+axis 9150 RT -32768
+tap 10000 UP 60
+tap 10500 UP 60
+tap 11500 A
+tap 13500 X
+tap 15500 B
+tap 17000 B
+tap 18500 B
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+expect barter-auto\] want=\d+ give=3 .*ptableCaps=3
+expect-not barter-a\]

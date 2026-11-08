@@ -1,0 +1,17 @@
+# F2 (2026-11-08, MODS "Rumble" -- his „Ano to je super, výborný nápad, velmi chválím“): a raider's pistol on a dude
+# with few hit points. Every blow that lands asks the pad for a pulse, the one that kills him too. The virtual pad has
+# no motors, so the pulse is only traced (pad=virtual); a blow inside a pulse's quiet that is not clearly stronger is
+# held back (rumble-held).
+name m-rumble-hit
+map DESERT1.MAP
+seed 1
+duration 20
+rumble on
+dude tile 15100 rot 2
+dude curhp 15
+spawn 16777454 15700 rot 5 wield 8 item 29 4 hostile
+at 0 idle
+expect \[COMBAT/hit\] .*defPid=16777216 hit=1
+expect \[COMBAT/rumble\] why=hit amount=\d+ strength=\d\.\d\d low=\d+ high=\d+ ms=\d+ pad=virtual rc=0
+expect-not \[COMBAT/rumble\] why=blast
+expect-not pad=real

@@ -1,0 +1,32 @@
+# World map travel speed (2026-11-08, the MODS "Travel speed" row on Fallout 2's world map; run it with
+# wm-travel-fast and compare the two [FLOW/wm-walk] lines). The party stands on Klamath Toxic Caves
+# (area 23), picks Klamath (area 2) on the list -- two D-pad downs land on it whether or not Arroyo is
+# listed above it -- and A walks there: 61 px of mountain, about 80 passes, under 1.5 s at 60 fps, and
+# the only encounter roll falls inside the caves, so no encounter can cut the walk short.
+# At Normal every frame runs exactly ONE vanilla pass (frames == passes), each pass 18000 ticks
+# (30 game minutes, no Pathfinder). wm-travel-fast must show the SAME passes and ticks, about half the
+# frames and ms. A then enters Klamath.
+name wm-travel-normal
+map KLADWTWN.MAP
+seed 1
+duration 14
+travel 1
+
+area 500 23 1
+wmat 600 23
+mapgo 1000 WORLDMAP
+shot 3000
+note 3400 pick-klamath-on-the-list
+tap 3500 DOWN
+tap 4000 DOWN
+tap 4500 A
+shot 5200
+tap 9000 A
+shot 12000
+
+expect autotest\] wmat t=\d+ area=23 rc=0
+expect wm-pad-travel\] area=2 dest=
+expect wm-walk\] leave=0 frames=(\d+) passes=\1 perframe=1\.00 ms=
+expect wm-walk\] leave=0 .* perpass=18000 .* travel=1\.00 area=2 pos=
+expect-count 2 map-load-stage\] done name=kladwtwn
+expect-not map-load-stage\] done name=desert

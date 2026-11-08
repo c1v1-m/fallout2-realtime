@@ -29,7 +29,18 @@ Object* interact_prompt_target();
 // caller can refuse audibly instead of eating the press. Safe from the input hook: it only moves an
 // index and redraws the overlay window.
 bool interact_prompt_cycle(int delta);
+// A new map (_obj_remove_all, before it frees every object): forget what belonged to the old one -- the
+// hovers already run, the dude's throws and the bodies opened (below).
 void interact_prompt_forget_hover();
+
+// The dude's own knife, spear or rock has just left his hand (actions.cc, _action_ranged): the automatic pick
+// offers it ahead of everything else until somebody picks it up or two minutes pass.
+void interact_prompt_note_thrown(Object* item);
+
+// A loot window has shown this body (inventory.cc). Once nothing is left on it, the automatic pick offers it
+// after everything else.
+void interact_prompt_note_opened(Object* obj);
+
 // The right stick is pointing (every frame it is out): the prompt's target wears the yellow
 // outline until a moment after it comes home. See interact_prompt.cc.
 void interact_prompt_note_stick();
@@ -74,6 +85,8 @@ bool interact_prompt_offering_corpse();
 bool interact_prompt_target_adjacent();
 
 // Drop the overlay + all cached pointers (map teardown, entering combat, shutdown). Idempotent.
+// What the map's own memory holds -- the throws, the opened bodies -- stays: it also runs when a screen
+// opens over the world, and interact_prompt_forget_hover drops that memory with the map.
 void interact_prompt_reset();
 
 // Drop any cached pointer to ONE object that is about to be freed (obj_erase_object).

@@ -75,6 +75,32 @@ static Object* ip_target = NULL;   // interactable currently highlighted (re-der
 static Object* ip_recent_loot = NULL;
 static unsigned int ip_recent_loot_at = 0;
 
+// ⚠️ WHAT HE THREW IS PICKED UP FIRST (Fallout 2 Realtime 2026-11-08, backlog item 2 from his 2026-06-19
+// play-test: "Thrown spear can't be picked up with A -- A loots instead of picking up the thrown weapon";
+// his „Yes“). A throw that hits lands on its target's tile, so after the kill the spear lies UNDER the body,
+// and a loose item ranked below every corpse, door and chest (ip_priority): A opened the body, and the spear
+// could only be reached by pointing the right stick at it. The dude's own knife, spear or rock --
+// _action_ranged (actions.cc) reports it the moment it leaves his hand -- now ranks above everything until it
+// is in somebody's pack again (ip_thrown_tick) or IP_THROWN_MS have passed. Only inside the prompt's own
+// reach (interact_range), like anything it offers: a spear across the room never takes A from the door he
+// stands at. Several at once: a stack of knives or rocks goes one by one, and a ninth throw takes the oldest
+// one's place.
+#define IP_THROWN_MS 120000
+#define IP_THROWN_MAX 8
+static Object* ip_thrown[IP_THROWN_MAX];
+static unsigned int ip_thrown_at[IP_THROWN_MAX];
+
+// ...and A BODY HE HAS OPENED THAT HAS NOTHING LEFT goes after everything else (same item, same „Yes“).
+// ip_recent_loot steps a looted body aside for 30 s, and only behind bodies of its own rank; after that the
+// nearest emptied body took A again -- ahead of any loose item, and of a door or a chest farther off.
+// "Opened" = a loot window has shown it (interact_prompt_note_opened, inventory.cc -- the loot pile's LB / RB
+// included), so a body nobody has looked into still gets its first look: its pickup script runs then. Kept
+// as ids, like the hover's; a new map forgets them (interact_prompt_forget_hover).
+#define IP_OPENED_MAX 64
+static int ip_opened_ids[IP_OPENED_MAX];
+static int ip_opened_count = 0;
+static int ip_opened_next = 0; // the slot the next body takes: past the last one, the oldest once all are used
+
 // ⚠️ A LOCKED DOOR IS USED FIRST, PICKED SECOND (2026-10-17, his pick, after the Mariposa entrance:
 // he had the code from the Mutant Transmissions tape, and A on the door kept rolling a -60 lockpick
 // instead of using it -- the door's use_p_proc is what enters the code). So the first A on a locked
@@ -602,11 +628,50 @@ static int ip_chosen_kind()
     return ip_classify(ip_target);
 }
 
+// One of the dude's throws still lying where it came down (see ip_thrown).
+static bool ip_thrown_live(Object* obj)
+{
+    for (int i = 0; i < IP_THROWN_MAX; i++) {
+        if (obj != NULL && ip_thrown[i] == obj) {
+            return get_time() - ip_thrown_at[i] < IP_THROWN_MS;
+        }
+    }
+    return false;
+}
+
+// A body he has opened (see ip_opened_ids) with nothing left that its loot window would show. What it wears
+// and holds is in the inventory too, so armour or a weapon still counts; Fallout 2's hidden items
+// (ITEM_HIDDEN) are put aside while the window is open (inventoryOpenLooting), so they do not.
+static bool ip_body_emptied(Object* obj)
+{
+    bool opened = false;
+    for (int i = 0; i < ip_opened_count && !opened; i++) {
+        opened = ip_opened_ids[i] == obj->id;
+    }
+    if (!opened) {
+        return false;
+    }
+    Inventory* inventory = &(obj->data.inventory);
+    for (int i = 0; i < inventory->length; i++) {
+        if (!itemIsHidden(inventory->items[i].item)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Deliberate-interaction kinds (doors/scenery, containers, corpses, NPCs) rank ABOVE picking up a
 // loose ground item, so standing next to a bookcase with a dropped book on the floor targets the
-// bookcase, not the book. Within the same rank, nearest wins.
-static int ip_priority(int kind)
+// bookcase, not the book. Within the same rank, nearest wins. Above them all, what he threw and has
+// not picked up yet; below them all, a body he has opened and emptied (both: see ip_thrown).
+static int ip_priority(Object* obj, int kind)
 {
+    if (kind == IP_GET && ip_thrown_live(obj)) {
+        return 2;
+    }
+    if (kind == IP_LOOT_CORPSE && ip_body_emptied(obj)) {
+        return -2; // under a companion's TALK too (-1, ip_find_nearest)
+    }
     return kind == IP_GET ? 0 : 1;
 }
 
@@ -822,7 +887,7 @@ static Object* ip_find_nearest(int* kindOut)
         if (!ip_auto_reach(obj)) {
             continue;
         }
-        int prio = ip_priority(kind);
+        int prio = ip_priority(obj, kind);
         // Just looted (see ip_recent_loot): ranked as if further off, so another body of the same
         // kind in reach goes first.
         if (obj == ip_recent_loot && (kind == IP_LOOT_CORPSE || kind == IP_LOOT_CONTAINER)
@@ -904,18 +969,19 @@ void interact_prompt_trace_candidates()
         return;
     }
     for (Object* obj = obj_find_first_at(obj_dude->elevation); obj != NULL; obj = obj_find_next_at()) {
-        if (ip_classify(obj) == IP_NONE) {
+        int kind = ip_classify(obj);
+        if (kind == IP_NONE) {
             continue;
         }
         int d = obj_dist(obj_dude, obj);
         if (d > ip_pick_range_tiles) {
             continue;
         }
-        trace_event(TRACE_FLOW, "ip-candidate", "pid=%d tile=%d dist=%d sees=%d reach=%d onScreen=%d pick=%d auto=%d dude=%d",
+        trace_event(TRACE_FLOW, "ip-candidate", "pid=%d tile=%d dist=%d sees=%d reach=%d onScreen=%d pick=%d auto=%d dude=%d prio=%d",
             obj->pid, obj->tile, d, ip_sees(obj) ? 1 : 0,
             ip_reachable_within(obj, tile_dist(obj_dude->tile, obj->tile) * 2 + 2) ? 1 : 0,
             ip_on_screen(obj) ? 1 : 0, ip_pick_reach(obj) ? 1 : 0,
-            d <= ip_range_tiles && ip_auto_reach(obj) ? 1 : 0, obj_dude->tile);
+            d <= ip_range_tiles && ip_auto_reach(obj) ? 1 : 0, obj_dude->tile, ip_priority(obj, kind));
     }
 }
 
@@ -1724,6 +1790,29 @@ static void ip_show_overlay(Object* obj, int kind)
     ip_place_word(obj, kind);
 }
 
+// A throw is forgotten once it has an owner again -- picked up by him or by anyone else, by whatever means
+// (the prompt, a click, a script) -- or once its time is up.
+static void ip_thrown_tick()
+{
+    unsigned int now = get_time();
+    for (int i = 0; i < IP_THROWN_MAX; i++) {
+        Object* item = ip_thrown[i];
+        if (item == NULL) {
+            continue;
+        }
+        const char* why = NULL;
+        if (item->owner != NULL) {
+            why = "taken";
+        } else if (now - ip_thrown_at[i] >= IP_THROWN_MS) {
+            why = "expired";
+        }
+        if (why != NULL) {
+            trace_event(TRACE_FLOW, "ip-thrown-end", "pid=%d id=%d why=%s", item->pid, item->id, why);
+            ip_thrown[i] = NULL;
+        }
+    }
+}
+
 void interact_prompt_tick()
 {
     ip_last_tick_ms = get_time();
@@ -1734,6 +1823,7 @@ void interact_prompt_tick()
     }
 
     ip_load_config();
+    ip_thrown_tick();
 
     // A script's scene has the dude (combat_rt_script_ui_locked): no prompt, and nothing queued
     // before it began is acted on. Nor with the dude dead or out: his death animation is playing and
@@ -2106,6 +2196,65 @@ void interact_prompt_notify_object_freed(Object* obj)
     if (ip_hover_obj_get() == obj) {
         ip_hover_tick(NULL);
     }
+    // ...and a throw, itself or whatever pack it went into before ip_thrown_tick saw it there: a pack's
+    // contents are freed with the pack, without coming through here.
+    for (int i = 0; i < IP_THROWN_MAX; i++) {
+        for (Object* o = ip_thrown[i]; o != NULL; o = o->owner) {
+            if (o == obj) {
+                ip_thrown[i] = NULL;
+                break;
+            }
+        }
+    }
+}
+
+// The dude's knife, spear or rock has just left his hand (_action_ranged, actions.cc) -- see ip_thrown.
+void interact_prompt_note_thrown(Object* item)
+{
+    if (item == NULL) {
+        return;
+    }
+    unsigned int now = get_time();
+    int slot = -1;
+    for (int i = 0; i < IP_THROWN_MAX && slot == -1; i++) {
+        if (ip_thrown[i] == item) {
+            slot = i;
+        }
+    }
+    for (int i = 0; i < IP_THROWN_MAX && slot == -1; i++) {
+        if (ip_thrown[i] == NULL) {
+            slot = i;
+        }
+    }
+    if (slot == -1) {
+        slot = 0;
+        for (int i = 1; i < IP_THROWN_MAX; i++) {
+            if (now - ip_thrown_at[i] > now - ip_thrown_at[slot]) {
+                slot = i;
+            }
+        }
+    }
+    ip_thrown[slot] = item;
+    ip_thrown_at[slot] = now;
+    trace_event(TRACE_ACTION, "ip-thrown", "pid=%d id=%d slot=%d", item->pid, item->id, slot);
+}
+
+// A loot window has shown this body (inventory.cc: opened, or stepped to with LB / RB) -- see ip_opened_ids.
+void interact_prompt_note_opened(Object* obj)
+{
+    if (obj == NULL || FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) {
+        return;
+    }
+    for (int i = 0; i < ip_opened_count; i++) {
+        if (ip_opened_ids[i] == obj->id) {
+            return;
+        }
+    }
+    ip_opened_ids[ip_opened_next] = obj->id;
+    ip_opened_next = (ip_opened_next + 1) % IP_OPENED_MAX;
+    if (ip_opened_count < IP_OPENED_MAX) {
+        ip_opened_count++;
+    }
 }
 
 // ⚠️ THE MOUSE'S HOVER, FOR THE PAD (Fallout 2 Realtime 2026-11-05, his „je něco podobného ve hře, jako ten
@@ -2178,10 +2327,19 @@ static void ip_hover_tick(Object* target)
 }
 
 // A new map: the objects are new, every hover may run again (object.cc, _obj_remove_all).
+//
+// ⚠️ THE THROWS AND THE OPENED BODIES ARE FORGOTTEN HERE, NOT IN interact_prompt_reset. Reset also takes the
+// prompt down for the Pip-Boy, the character sheet, a conversation, the called-shot window and the elevator
+// panel, and the spear must still come first when he walks out of the Pip-Boy after the fight. This one runs
+// only from _obj_remove_all, right before it frees every object WITHOUT objectDestroy -- so the pointers in
+// ip_thrown would dangle past it.
 void interact_prompt_forget_hover()
 {
     ip_hover_obj = NULL;
     ip_hover_done_count = 0;
+    memset(ip_thrown, 0, sizeof(ip_thrown));
+    ip_opened_count = 0;
+    ip_opened_next = 0;
 }
 
 void interact_prompt_reset()

@@ -1,0 +1,26 @@
+# F2 (2026-11-08, MODS "Rumble"): screen-explosive-place's plastic explosive goes off at the dude's feet (Traps 10
+# fails the roll). The explosion action pulses at full strength as it goes off; the damage lands when its animation
+# ends and asks for a pulse of its own (held back if that still falls inside the first one's quiet).
+name screen-rumble-explosive
+map DESERT1.MAP
+seed 1
+duration 34
+rumble on
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 10
+dude item 85 2
+dude quickslot rb 85
+
+tap 1500 RB
+tap 3000 DOWN
+tap 3400 DOWN
+tap 3800 DOWN
+tap 4200 DOWN
+tap 4600 DOWN
+tap 5600 A
+
+expect \[ACTION/explosive-placed\] pid=209
+expect You were hit for
+expect \[COMBAT/rumble\] why=blast amount=0 strength=1\.00
+expect \[COMBAT/rumble(-held)?\] why=hit

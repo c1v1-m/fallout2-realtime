@@ -62,6 +62,8 @@ static double g_start_ms = 0.0;
 static double g_heartbeat_ms = 0.0; // session-ms of the last heartbeat
 static float g_clock = 0.0f;        // realtime combat clock (for digest)
 static TraceSnapshotFn g_snapshot = NULL;
+// trace_set_crash_hook: the pad's rumble stop (gamepad_ui.cc), run by the crash handlers before anything else.
+static void (*g_crash_hook)() = NULL;
 
 static unsigned long long g_counts[TRACE_CAT_COUNT] = { 0 };
 
@@ -428,6 +430,10 @@ static LONG WINAPI trace_veh(EXCEPTION_POINTERS* ep)
         return EXCEPTION_CONTINUE_SEARCH; // the watchdog probing a stack; its own __except handles it
     }
     if (ep != NULL && ep->ExceptionRecord != NULL && trace_seh_is_fatal(ep->ExceptionRecord->ExceptionCode)) {
+        // Before the digest: writing it can fault again, and a pad left rumbling outlives the game.
+        if (g_crash_hook != NULL) {
+            g_crash_hook();
+        }
         trace_write_crash("first-chance", ep);
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -435,6 +441,9 @@ static LONG WINAPI trace_veh(EXCEPTION_POINTERS* ep)
 
 static LONG WINAPI trace_seh_filter(EXCEPTION_POINTERS* ep)
 {
+    if (g_crash_hook != NULL) {
+        g_crash_hook();
+    }
     trace_write_crash("unhandled", ep);
     // Let the normal crash path proceed (so any debugger / Windows error UI still runs).
     return EXCEPTION_CONTINUE_SEARCH;
@@ -442,6 +451,9 @@ static LONG WINAPI trace_seh_filter(EXCEPTION_POINTERS* ep)
 #else
 static void trace_posix_handler(int sig)
 {
+    if (g_crash_hook != NULL) {
+        g_crash_hook();
+    }
     if (g_file != NULL) {
         g_crash_digests++;
         trace_flush_pending();
@@ -718,6 +730,11 @@ void trace_shutdown()
 bool trace_enabled()
 {
     return g_enabled;
+}
+
+void trace_set_crash_hook(void (*hook)())
+{
+    g_crash_hook = hook;
 }
 
 void trace_set_snapshot_fn(TraceSnapshotFn fn)

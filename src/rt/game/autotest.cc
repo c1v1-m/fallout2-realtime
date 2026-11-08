@@ -121,6 +121,13 @@ namespace fallout {
 //   tactical on|off                    MODS "Tactical AI" for this run (default: as the cfg says)
 //   projectiles on|off                 MODS "Projectiles" for this run
 //   promptword on|off                  MODS "Name the action" for this run (the word beside the action icon)
+//   travel <0.35-1>                    MODS "Travel speed" for this run, the world map's too (1 Normal,
+//                                      0.75 Brisk, 0.67 Fast, 0.5 Very fast)
+//   blastring on|off|awareness         MODS "Blast ring" for this run (the ring where a grenade or rocket goes
+//                                      off): on = Always, awareness = only with the Awareness perk
+//   dude perk <n>                      give the dude perk n (PERK_* index, 0 = Awareness), requirements aside
+//   rumble on|off                      MODS "Rumble" for this run; the virtual pad has no motors, so a pulse
+//                                      is only traced ([COMBAT/rumble] why=hit|blast, rumble-held when held back)
 //   tracer <hexes> <r> <g> <b> [underline]   how a bullet looks (r g b 0-31) -- to photograph variants
 //   ipdump <seconds>                   list every interactable in the picker's range and why it is (not) pickable
 //   partyexport <file>                 F2: after loadslot, every companion whole into <file> (data folder)
@@ -251,6 +258,9 @@ static float at_projectile_speedup = -1.0f;
 static int at_tactical = -1;
 static int at_projectiles = -1;
 static int at_prompt_word = -1;
+static float at_travel_speed = -1.0f; // "travel": -1 = as the cfg says
+static int at_blast_ring = -1;
+static int at_rumble = -1;
 static int at_shots_wanted = 0;
 static float at_ipdump_at = -1.0f; // scenario "ipdump": when to list the interact candidates
 static int at_shots_taken = 0;
@@ -304,6 +314,10 @@ static int at_dude_hp = -1;
 static int at_dude_curhp = -1; // "dude curhp": start wounded
 static bool at_dude_sneak = false; // "dude sneak": start sneaking
 static int at_dude_armor = -1;
+// "dude perk <n>": perks the dude gets before the run (perkAddForce, so a level or stat requirement is no bar).
+#define AT_MAX_DUDE_PERKS 8
+static int at_dude_perks[AT_MAX_DUDE_PERKS];
+static int at_dude_perk_count = 0;
 static AtSpawn at_spawns[AT_MAX_SPAWNS];
 static int at_spawn_count = 0;
 static int at_team = -1; // the team every hostile spawn joins (-1 = the first hostile spawn's own)
@@ -738,6 +752,12 @@ static bool at_parse(const char* path)
             at_projectiles = strcmp(tok[1], "off") == 0 ? 0 : 1;
         } else if (strcmp(tok[0], "promptword") == 0 && n >= 2) {
             at_prompt_word = strcmp(tok[1], "off") == 0 ? 0 : 1;
+        } else if (strcmp(tok[0], "travel") == 0 && n >= 2) {
+            at_travel_speed = (float)atof(tok[1]);
+        } else if (strcmp(tok[0], "blastring") == 0 && n >= 2) {
+            at_blast_ring = strcmp(tok[1], "off") == 0 ? 0 : (strcmp(tok[1], "awareness") == 0 ? 1 : 2);
+        } else if (strcmp(tok[0], "rumble") == 0 && n >= 2) {
+            at_rumble = strcmp(tok[1], "off") == 0 ? 0 : 1;
         } else if (strcmp(tok[0], "ipdump") == 0 && n >= 2) {
             at_ipdump_at = (float)atof(tok[1]);
         } else if (strcmp(tok[0], "tracer") == 0 && n >= 5) {
@@ -812,6 +832,8 @@ static bool at_parse(const char* path)
                 at_dude_armor = atoi(tok[2]);
             } else if (strcmp(tok[1], "quickslot") == 0 && n >= 4) {
                 at_dude_quickslot[strcmp(tok[2], "rb") == 0 ? 1 : 0] = atoi(tok[3]);
+            } else if (strcmp(tok[1], "perk") == 0 && at_dude_perk_count < AT_MAX_DUDE_PERKS) {
+                at_dude_perks[at_dude_perk_count++] = atoi(tok[2]);
             }
         } else if (strcmp(tok[0], "spawn") == 0 && n >= 3 && at_spawn_count < AT_MAX_SPAWNS) {
             AtSpawn* sp = &(at_spawns[at_spawn_count++]);
@@ -1024,6 +1046,15 @@ void autotest_setup_world()
     if (at_prompt_word >= 0) {
         interact_prompt_set_action_word(at_prompt_word != 0);
     }
+    if (at_travel_speed > 0.0f) {
+        anim_set_travel_speed(at_travel_speed);
+    }
+    if (at_blast_ring >= 0) {
+        combat_rt_set_blast_ring(at_blast_ring);
+    }
+    if (at_rumble >= 0) {
+        gamepad_ui_set_rumble(at_rumble != 0);
+    }
 
     // The dude.
     for (int s = 0; s < 7; s++) {
@@ -1032,6 +1063,9 @@ void autotest_setup_world()
         }
     }
     stat_recalc_derived(obj_dude);
+    for (int i = 0; i < at_dude_perk_count; i++) {
+        perkAddForce(obj_dude, at_dude_perks[i]);
+    }
 
     // ⚠️ THE PARTY STANDS WHERE THIS MAP IS ON THE WORLD MAP, as it would after walking there. A map
     // change (an elevator, a door into the next map) calls worldmap_script_jump, which otherwise

@@ -49,6 +49,10 @@ bool trace_enabled();
 // Register the heartbeat snapshot callback (see TraceSnapshotFn). Pass nullptr to clear.
 void trace_set_snapshot_fn(TraceSnapshotFn fn);
 
+// Called first thing when the process is going down on a fault (the crash handlers, which exist while tracing
+// is on): the pad's rumble uses it to stop its motors. Must not allocate or take locks it cannot get.
+void trace_set_crash_hook(void (*hook)());
+
 // Set the realtime combat clock shown by combat heartbeats / digest (0 out of combat).
 void trace_set_clock(float seconds);
 

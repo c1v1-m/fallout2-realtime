@@ -5071,6 +5071,9 @@ static void _damage_object(Object* a1, int damage, bool animated, int a4, Object
 
     if (a1 == gDude) {
         interfaceRenderHitPoints(animated);
+        // Realtime build: the pad feels the blow, harder the bigger a share of his hit points it took (MODS "Rumble",
+        // 2026-11-08). Every blow on him comes through here: a shot, a swing, a blast, a trap's critter_dmg.
+        gamepad_ui_rumble_hit(damage);
     }
 
     a1->data.critter.combat.damageLastTurn += damage;

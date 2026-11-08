@@ -1,0 +1,26 @@
+# F2 (2026-11-08, review report): B cancels RT's amount picker on its PRESS, and the barter loop then read that
+# same B, still down, as a fresh press -- and left the whole trade. The trade opens on the dude's caps, RT asks,
+# B cancels. The trade must still be up afterwards: X there evens the deal and traces barter-auto (with nothing
+# moved: ptableCaps=0). The old build was back in the conversation by then, where X traces nothing of the sort.
+name m-barter-pick-b
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 24
+dude tile 22879 rot 0
+dude item 41 2000
+
+talk 2000 16777273
+tap 6000 Y
+axis 9000 RT 32767
+axis 9150 RT -32768
+tap 11000 B
+shot 12000
+tap 13000 X
+tap 15000 B
+tap 16500 B
+tap 18000 B
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+expect barter-auto\] want=0 give=0 gap=0 .*ptableCaps=0

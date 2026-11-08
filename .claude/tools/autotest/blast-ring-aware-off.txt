@@ -1,0 +1,33 @@
+# F2 (2026-11-08, his „Ten prstenec bych dal součástí awareness“): MODS "Blast ring" on its default, Awareness.
+# The same throw as screen-blast-ring; this dude has NO Awareness, so no ring shows at all.
+name blast-ring-aware-off
+map DESERT1.MAP
+seed 1
+duration 10
+dude tile 20100 rot 2
+dude hp 300
+dude skill throwing 80
+dude wield 8
+dude item 29 1
+dude item 25 4
+dude quickslot rb 25
+blastring awareness
+
+# Not hostile, so it stands still under the LT lock (a hostile one ran up next to him and the grenade
+# flew one tile: its ring never showed in the air).
+spawn 16777455 20504 rot 5 wield 4 hp 300
+
+axis 1500 LT 32767
+
+pad 2000 RB 1
+shot 2700
+pad 3200 RB 0
+axis 3600 LT -32768
+shot 3700
+shot 4100
+shot 4500
+shot 4900
+shot 6500
+
+expect-count 1 \[ACTION/quick-throw\]
+expect-not \[COMBAT/blast-ring\] on

@@ -3543,6 +3543,10 @@ static int wmTownMapPadInput(CityInfo* city, bool* prevUp, bool* prevDown, bool*
     return keyCode;
 }
 
+// Realtime: the encounter roll windows opened (wmRndEncounterOccurred) since the walk under way set off,
+// for its [FLOW/wm-walk] line.
+static int wmRndRollCount = 0;
+
 // 0x4BFE10
 static int wmWorldMapFunc(int a1)
 {
@@ -3564,6 +3568,12 @@ static int wmWorldMapFunc(int a1)
     unsigned int partyHealTime = 0;
     int map = -1;
     int rc = 0;
+
+    // Realtime: the walk under way, for its [FLOW/wm-walk] line when it ends (see the walking passes).
+    int walkFrames = 0;
+    int walkPasses = 0;
+    unsigned int walkStartTime = 0;
+    unsigned int walkStartTicks = 0;
 
     // A fresh pick per visit; the pointer counts as untouched until it moves; the stick steers only
     // after it has been seen neutral.
@@ -3611,101 +3621,165 @@ static int wmWorldMapFunc(int a1)
         int mouseEvent = mouseGetEvent();
 
         if (wmGenData.isWalking) {
-            wmPartyWalkingStep();
+            // Realtime: TRAVEL SPEED ON THE WORLD MAP TOO. The MODS "Travel speed" row (cfg travel_speed,
+            // LOWER = FASTER) promises it, and fallout1-ce has had it since his „přidej to i při cestování
+            // na world mapě“ (2026-10-04); Fallout 2's world map follows, 2026-11-08.
+            //
+            // Vanilla runs ONE walking pass a frame; this runs 1 / travel_speed of them (fallout1-ce's
+            // 2 / travel_speed only because its own loop runs two a frame). Every pass is a whole vanilla
+            // pass -- its own steps (the car's four to nine), its own 100 fuel, its own 30 game minutes
+            // and queue, its own revealed subtiles -- so a journey costs the days and the fuel it always
+            // did; only the wall-clock wait shrinks. A fraction carries into the next frame, so Brisk
+            // really is a third quicker. The two things vanilla spaces in REAL time come sooner by the same
+            // factor, or a faster setting would meet fewer encounters and heal less per mile: the
+            // encounter roll (1.5 s, wmRndEncounterOccurred) and the party's resting heal (1 s).
+            //
+            // The passes stop with the walk (an arrival, the walk mask, an empty tank); an encounter or a
+            // quit leaves the world map as before. Only the frame's last pass -- or the one that ends the
+            // walk -- draws the map and steps the car's movie, so a frame is drawn once and the movie keeps
+            // its pace. At Normal every pass is the last: exactly vanilla.
+            //
+            // The RAW setting, not anim_travel_speed_in_effect(): that one exists to switch the speed-up
+            // off while a fight is on, and nobody fights on the world map.
+            static float wmPassCarry = 0.0f;
+            float travelSpeed = anim_get_travel_speed();
+            float wmPasses = 1.0f / travelSpeed + wmPassCarry;
+            int wmPassesThisFrame = (int)wmPasses;
+            wmPassCarry = wmPasses - (float)wmPassesThisFrame;
 
-            if (wmGenData.isInCar) {
+            if (walkFrames == 0) {
+                walkStartTime = gameTimeGetTime();
+                walkStartTicks = now;
+                wmRndRollCount = 0;
+            }
+            walkFrames++;
+
+            bool wmLeave = false;
+            for (int wmPass = 0; wmPass < wmPassesThisFrame && wmGenData.isWalking; wmPass++) {
+                bool wmLastPass = wmPass == wmPassesThisFrame - 1;
+                walkPasses++;
+
                 wmPartyWalkingStep();
-                wmPartyWalkingStep();
-                wmPartyWalkingStep();
 
-                if (gameGetGlobalVar(GVAR_CAR_BLOWER)) {
-                    wmPartyWalkingStep();
-                }
-
-                if (gameGetGlobalVar(GVAR_NEW_RENO_CAR_UPGRADE)) {
-                    wmPartyWalkingStep();
-                }
-
-                if (gameGetGlobalVar(GVAR_NEW_RENO_SUPER_CAR)) {
+                if (wmGenData.isInCar) {
                     wmPartyWalkingStep();
                     wmPartyWalkingStep();
                     wmPartyWalkingStep();
-                }
 
-                wmGenData.carImageCurrentFrameIndex++;
-                if (wmGenData.carImageCurrentFrameIndex >= artGetFrameCount(wmGenData.carImageFrm)) {
-                    wmGenData.carImageCurrentFrameIndex = 0;
-                }
-
-                wmCarUseGas(100);
-
-                if (wmGenData.carFuel <= 0) {
-                    wmGenData.walkDestinationX = 0;
-                    wmGenData.walkDestinationY = 0;
-                    wmGenData.isWalking = false;
-
-                    wmMatchWorldPosToArea(worldX, worldY, &(wmGenData.currentAreaId));
-
-                    wmGenData.isInCar = false;
-
-                    if (wmGenData.currentAreaId == -1) {
-                        wmGenData.currentCarAreaId = CITY_CAR_OUT_OF_GAS;
-
-                        CityInfo* city = &(wmAreaInfoList[CITY_CAR_OUT_OF_GAS]);
-
-                        CitySizeDescription* citySizeDescription = &(wmSphereData[city->size]);
-                        int worldmapX = wmGenData.worldPosX + wmGenData.hotspotNormalFrmImage.getWidth() / 2 + citySizeDescription->frmImage.getWidth() / 2;
-                        int worldmapY = wmGenData.worldPosY + wmGenData.hotspotNormalFrmImage.getHeight() / 2 + citySizeDescription->frmImage.getHeight() / 2;
-                        wmAreaSetWorldPos(CITY_CAR_OUT_OF_GAS, worldmapX, worldmapY);
-
-                        city->state = CITY_STATE_KNOWN;
-                        city->visitedState = 1;
-
-                        wmGenData.currentAreaId = CITY_CAR_OUT_OF_GAS;
-                    } else {
-                        wmGenData.currentCarAreaId = wmGenData.currentAreaId;
+                    if (gameGetGlobalVar(GVAR_CAR_BLOWER)) {
+                        wmPartyWalkingStep();
                     }
 
-                    debugPrint("\nRan outta gas!");
-                }
-            }
+                    if (gameGetGlobalVar(GVAR_NEW_RENO_CAR_UPGRADE)) {
+                        wmPartyWalkingStep();
+                    }
 
-            wmInterfaceRefresh();
+                    if (gameGetGlobalVar(GVAR_NEW_RENO_SUPER_CAR)) {
+                        wmPartyWalkingStep();
+                        wmPartyWalkingStep();
+                        wmPartyWalkingStep();
+                    }
 
-            if (getTicksBetween(now, partyHealTime) > 1000) {
-                if (_partyMemberRestingHeal(3)) {
-                    interfaceRenderHitPoints(false);
-                    partyHealTime = now;
-                }
-            }
+                    if (wmLastPass) {
+                        wmGenData.carImageCurrentFrameIndex++;
+                        if (wmGenData.carImageCurrentFrameIndex >= artGetFrameCount(wmGenData.carImageFrm)) {
+                            wmGenData.carImageCurrentFrameIndex = 0;
+                        }
+                    }
 
-            wmMarkSubTileRadiusVisited(wmGenData.worldPosX, wmGenData.worldPosY);
+                    wmCarUseGas(100);
 
-            if (wmGenData.walkDistance <= 0) {
-                wmGenData.isWalking = false;
-                wmMatchWorldPosToArea(wmGenData.worldPosX, wmGenData.worldPosY, &(wmGenData.currentAreaId));
-            }
+                    if (wmGenData.carFuel <= 0) {
+                        wmGenData.walkDestinationX = 0;
+                        wmGenData.walkDestinationY = 0;
+                        wmGenData.isWalking = false;
 
-            wmInterfaceRefresh();
+                        wmMatchWorldPosToArea(worldX, worldY, &(wmGenData.currentAreaId));
 
-            if (wmGameTimeIncrement(18000)) {
-                if (_game_user_wants_to_quit != 0) {
-                    break;
-                }
-            }
+                        wmGenData.isInCar = false;
 
-            if (wmGenData.isWalking) {
-                if (wmRndEncounterOccurred()) {
-                    if (wmGenData.encounterMapId != -1) {
-                        if (wmGenData.isInCar) {
-                            wmMatchAreaContainingMapIdx(wmGenData.encounterMapId, &(wmGenData.currentCarAreaId));
+                        if (wmGenData.currentAreaId == -1) {
+                            wmGenData.currentCarAreaId = CITY_CAR_OUT_OF_GAS;
+
+                            CityInfo* city = &(wmAreaInfoList[CITY_CAR_OUT_OF_GAS]);
+
+                            CitySizeDescription* citySizeDescription = &(wmSphereData[city->size]);
+                            int worldmapX = wmGenData.worldPosX + wmGenData.hotspotNormalFrmImage.getWidth() / 2 + citySizeDescription->frmImage.getWidth() / 2;
+                            int worldmapY = wmGenData.worldPosY + wmGenData.hotspotNormalFrmImage.getHeight() / 2 + citySizeDescription->frmImage.getHeight() / 2;
+                            wmAreaSetWorldPos(CITY_CAR_OUT_OF_GAS, worldmapX, worldmapY);
+
+                            city->state = CITY_STATE_KNOWN;
+                            city->visitedState = 1;
+
+                            wmGenData.currentAreaId = CITY_CAR_OUT_OF_GAS;
+                        } else {
+                            wmGenData.currentCarAreaId = wmGenData.currentAreaId;
                         }
 
-                        wmFadeOut();
-                        mapLoadById(wmGenData.encounterMapId);
+                        debugPrint("\nRan outta gas!");
                     }
-                    break;
                 }
+
+                if (wmLastPass || !wmGenData.isWalking) {
+                    wmInterfaceRefresh();
+                }
+
+                if (getTicksBetween(now, partyHealTime) > (unsigned int)(1000.0f * travelSpeed)) {
+                    if (_partyMemberRestingHeal(3)) {
+                        interfaceRenderHitPoints(false);
+                        partyHealTime = now;
+                    }
+                }
+
+                wmMarkSubTileRadiusVisited(wmGenData.worldPosX, wmGenData.worldPosY);
+
+                if (wmGenData.walkDistance <= 0) {
+                    wmGenData.isWalking = false;
+                    wmMatchWorldPosToArea(wmGenData.worldPosX, wmGenData.worldPosY, &(wmGenData.currentAreaId));
+                }
+
+                if (wmLastPass || !wmGenData.isWalking) {
+                    wmInterfaceRefresh();
+                }
+
+                if (wmGameTimeIncrement(18000)) {
+                    if (_game_user_wants_to_quit != 0) {
+                        wmLeave = true;
+                        break;
+                    }
+                }
+
+                if (wmGenData.isWalking) {
+                    if (wmRndEncounterOccurred()) {
+                        if (wmGenData.encounterMapId != -1) {
+                            if (wmGenData.isInCar) {
+                                wmMatchAreaContainingMapIdx(wmGenData.encounterMapId, &(wmGenData.currentCarAreaId));
+                            }
+
+                            wmFadeOut();
+                            mapLoadById(wmGenData.encounterMapId);
+                        }
+                        wmLeave = true;
+                        break;
+                    }
+                }
+            }
+
+            // The walk is over (arrived, stopped, met an encounter): what it took, so a trace can show the
+            // same passes and game time at every travel speed, and the frames and wall-clock time shrink.
+            if (wmLeave || !wmGenData.isWalking) {
+                unsigned int walkTicks = gameTimeGetTime() - walkStartTime;
+                trace_event(TRACE_FLOW, "wm-walk", "leave=%d frames=%d passes=%d perframe=%.2f ms=%u ticks=%u perpass=%u rolls=%d travel=%.2f area=%d pos=%d,%d car=%d fuel=%d",
+                    wmLeave ? 1 : 0, walkFrames, walkPasses, (double)walkPasses / walkFrames,
+                    getTicksBetween(getTicks(), walkStartTicks), walkTicks, walkTicks / (unsigned int)walkPasses,
+                    wmRndRollCount, travelSpeed, wmGenData.currentAreaId, wmGenData.worldPosX, wmGenData.worldPosY,
+                    wmGenData.isInCar ? 1 : 0, wmGenData.carFuel);
+                walkFrames = 0;
+                walkPasses = 0;
+            }
+
+            if (wmLeave) {
+                break;
             }
         }
 
@@ -3949,12 +4023,16 @@ static void wmCheckGameEvents()
 // 0x4C0634
 static int wmRndEncounterOccurred()
 {
+    // Realtime: vanilla spaces the rolls 1.5 REAL seconds apart, and a faster travel speed runs the
+    // walking passes 1 / travel_speed to a frame (wmWorldMapFunc) -- so the wait shrinks by the same
+    // factor, or Very fast would roll half as often per mile. 1500 ms at Normal.
     unsigned int now = getTicks();
-    if (getTicksBetween(now, wmLastRndTime) < 1500) {
+    if (getTicksBetween(now, wmLastRndTime) < (unsigned int)(1500.0f * anim_get_travel_speed())) {
         return 0;
     }
 
     wmLastRndTime = now;
+    wmRndRollCount++;
 
     if (abs(wmGenData.oldWorldPosX - wmGenData.worldPosX) < 3) {
         return 0;

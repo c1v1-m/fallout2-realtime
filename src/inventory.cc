@@ -4958,6 +4958,8 @@ int inventoryOpenLooting(Object* looter, Object* target)
     loot_body_count = critterCount;
     loot_draw_body_counter();
     trace_event(TRACE_ACTION, "loot-open", "id=%d pid=%d bodies=%d items=%d", target->id, target->pid, critterCount, _target_pud->length);
+    // CE: a body seen here and emptied is offered last by the pad's use prompt (interact_prompt_note_opened).
+    interact_prompt_note_opened(target);
     inventorySetCursor(INVENTORY_WINDOW_CURSOR_HAND);
 
     // CE: ON A CONTROLLER, START ON THE LOOT ITSELF -- the first slot of the CONTAINER side is the only
@@ -5163,6 +5165,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
                 loot_draw_body_counter();
                 trace_event(TRACE_ACTION, "loot-body", "id=%d pid=%d index=%d of=%d items=%d",
                     target->id, target->pid, critterIndex + 1, critterCount, _target_pud->length);
+                interact_prompt_note_opened(target);
             }
         } else if (keyCode == KEY_ARROW_DOWN) {
             if (_stack_offset[_curr_stack] + gInventorySlotsCount < _pud->length) {
@@ -6313,7 +6316,14 @@ static void barter_draw_deal()
         // walked the flat left-to-right list of every occupied slot; they now step COLUMN (empty
         // ones skipped) and the D-pad steps ITEM within one column. Wording and binding change
         // together -- a legend promising a jump the buttons do not make is worse than none.
-        const char* legend = "LB/RB column   D-pad item   A move   LT+A some   X even   Y offer   B exit";
+        //
+        // ⚠️ "LT+A all stack" IS HIS WORDING (2026-11-08: "ne some ale all", then "all stack"). LT+A moves
+        // the whole stack (BARTER_AMOUNT_ALL); asking how many is RT's picker. MEASURED in font 101, where
+        // a space costs 5 px, against the 468 px this is drawn into: the old line was 470 and had been
+        // losing the last "t" of "exit"; "all stack" with the old three-space gaps is 493 and would lose
+        // " exit" whole; with two-space gaps it is 463 and fits. "RT amount" does not fit on this line at
+        // any gap (536 px, and still 501 with single spaces), so RT stays off it.
+        const char* legend = "LB/RB column  D-pad item  A move  LT+A all stack  X even  Y offer  B exit";
         int lw = fontGetStringWidth(legend);
         int lx = legX + (legW - lw) / 2;
         if (lx < legX) {
@@ -6555,6 +6565,10 @@ static int barter_gamepad_input()
     static bool prevBack = false;
     static bool prevUp = false;
     static bool prevDown = false;
+    // The A press in progress: when it went down, and whether it has already acted (see HOLD A TO LOOK
+    // below), so that its release moves nothing.
+    static unsigned int barterADownTime = 0;
+    static bool barterAHandled = false;
 
     SDL_GameController* pad = gamepad_ui_get_controller();
     if (pad == NULL) {
@@ -6620,6 +6634,31 @@ static int barter_gamepad_input()
     } else if (getTicksSince(navAt) >= BARTER_NAV_REPEAT_MS) {
         navAt = getTicks();
         navRepeat = true;
+    }
+
+    // ⚠️ A NESTED MODAL JUST RAN ITS OWN INPUT LOOP -- above all RT's amount picker, which closes on the
+    // PRESS of its A or B. That button is still down when this loop reads the pad again, and against
+    // prevA / prevB from before the picker opened it was a fresh press: B went on to leave the whole
+    // trade, and A's release moved one more item (held past BARTER_LOOK_HOLD_MS, it described one
+    // instead). The picker bumps the input epoch on its way out (MtPadOwner), as dialog boxes do; adopt
+    // the live state then and act on nothing this frame, as the load/save list does. The A still down
+    // is the picker's, so its release is spent.
+    static unsigned int seenEpoch = 0;
+    unsigned int epoch = gamepad_ui_input_epoch();
+    if (epoch != seenEpoch) {
+        seenEpoch = epoch;
+        prevLB = colLeftNow;
+        prevRB = colRightNow;
+        prevRT = rtNow;
+        prevA = aNow;
+        prevX = xNow;
+        prevY = yNow;
+        prevB = bNow;
+        prevBack = backNow;
+        prevUp = upNow;
+        prevDown = downNow;
+        barterAHandled = true;
+        return -1;
     }
 
     bool lbEdge = (colLeftNow && !prevLB) || (navRepeat && navNow == 3);
@@ -6694,8 +6733,6 @@ static int barter_gamepad_input()
             mouseX - winRect.left, mouseY - winRect.top);
     }
 
-    static unsigned int barterADownTime = 0;
-    static bool barterAHandled = false;
     if (aEdge) {
         barterADownTime = getTicks();
         barterAHandled = false;

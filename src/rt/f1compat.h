@@ -76,6 +76,7 @@
 #include <tile.h>
 #include <trait.h>
 #include <version.h>
+#include <win32.h>
 #include <window_manager.h>
 #include <window_manager_private.h>
 #include <worldmap.h>
@@ -111,6 +112,9 @@ extern const int rt_off_tile[2][6];
 #define combat_state gCombatState
 #define gcsd _gcsd
 #define combat_exps _combat_exps
+// F1's "the game window has the focus" (plib/gnw/winmain.h). Both go false on SDL's FOCUS_LOST, and neither does
+// in a self-played run (input.cc ignores the event there).
+#define GNW95_isActive gProgramIsActive
 // F1's start-of-combat data is F2's CombatStartData.
 typedef CombatStartData STRUCT_664980;
 

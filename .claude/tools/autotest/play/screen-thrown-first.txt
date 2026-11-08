@@ -1,0 +1,39 @@
+# F2 (2026-11-08, backlog item 2 "Thrown spear can't be picked up with A -- A loots instead of picking up the
+# thrown weapon", his „Yes“): what the dude threw comes first for A, ahead of the body it lies under. A 1 HP
+# raider 2 tiles off dies to one quick throw (LT lock, RB held and let go) and the spear lands on its tile. Not hostile
+# until hit, so it stands still: a hostile one wandered 10 tiles off, out of the prompt's reach.
+# The character sheet opened and closed in between must not make the prompt forget the spear (the D-pad
+# screens call interact_prompt_reset). The first A takes the spear (kind 2); the second, with the spear back
+# in the pack, opens the body (kind 4) and B closes it. The old exe opens the body with the first A.
+name screen-thrown-first
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude hp 300
+dude skill throwing 150
+dude wield 8
+dude item 29 1
+dude item 7 2
+dude quickslot rb 7
+
+spawn 16777455 20102 rot 5 hp 1
+
+axis 1500 LT 32767
+pad 2000 RB 1
+pad 2600 RB 0
+axis 3200 LT -32768
+open 5000 sheet
+tap 6500 B
+tap 8000 A
+shot 9500
+tap 11000 A
+shot 12500
+tap 13500 B
+
+expect ip-thrown\] pid=7
+expect flight\] pid=7 .*hit=1 .*thrown=1
+expect \[FLOW/autotest\] open screen=sheet
+expect interact-do\] kind=2 pid=7
+expect ip-thrown-end\] pid=7 .*why=taken
+expect-count 1 interact-do\] kind=4

@@ -55,6 +55,10 @@
 // Bullets, bolts and balls FLY and a sidestep makes them miss (combat_rt.cc, rt_projectiles; his design,
 // 2026-10-18). 1 = on (his pick), 0 = vanilla: a shot hits or misses the moment it is fired.
 #define GAME_CONFIG_PROJECTILES_KEY "projectiles"
+// MODS "Blast ring" (combat_rt.cc, rt_blast_ring): a ring of red dots at a grenade's or a rocket's blast radius round
+// where a held quick throw would land and round where each one in the air goes off. 1 = only with the
+// Awareness perk (his call, 2026-11-08, the default), 2 = always, 0 = nothing marks a blast, as in vanilla.
+#define GAME_CONFIG_BLAST_RING_KEY "blast_ring"
 // The body part the weapon slot's AIMED mode fires at (gamepad_ui, gpui_aim_last_part): written
 // whenever a part is bound in the called-shot window, read back at start. HIT_LOCATION_* (0-7).
 #define GAME_CONFIG_AIM_PART_KEY "aim_part"
@@ -241,6 +245,9 @@
 // MODS "Name the action" (default 0): the word for what A does -- OPEN, TAKE, TALK -- beside the floating
 // action icon. The pad's A on the icon's corner shows either way.
 #define GAME_CONFIG_PROMPT_WORD_KEY "prompt_action_word"
+// MODS "Rumble" (default 1, his call 2026-11-08): a short pulse on the pad when the dude is hurt, harder the bigger
+// the share of his hit points, and when something blows up near him, harder the closer (gamepad_ui.cc). 0 = never.
+#define GAME_CONFIG_RUMBLE_KEY "rumble"
 // R3 auto-lock reach: range (tiles) = max(PERCEPTION * lock_range_pe_scale, lock_range_min). Same
 // shape as the NPC aggro radius. Raise the scale if a low-Perception character with a long gun ends
 // up unable to lock anything he can shoot.

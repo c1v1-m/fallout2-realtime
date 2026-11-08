@@ -181,6 +181,21 @@ next map change freed it twice (fixed: `obj_disconnect`, as vanilla `add_obj_to_
 vanilla tolls it halts on: `fileNameListInit`'s memmove read one entry past the list (`db.cc`), and
 `backgroundSoundLoad` strcpy'd its file name onto itself (`game_sound.cc`, fixed as in fallout1-ce).
 
+**The blast ring** (2026-11-08, his „Ano, jednoznačně ano“, then „Ten prstenec bych dal součástí awareness“;
+MODS row "Blast ring" Off / Awareness / Always, cfg `blast_ring` 0 / 1 / 2, default 1 = only with the Awareness
+perk, `rt_blast_ring_shown`): `combat_rt.cc` `rt_blast_rings_tick` puts a 3 x 3 red dot on every hex at a blast's
+radius — the F11 debug ring's look, his pick of seven mock-ups (vanilla's radius, `rt_blast_radius_of`: a grenade
+2, a rocket 3) — round where a held quick throw would land (`rt_blast_ring_aim`:
+the target, or where a far throw falls short, `combat_forced_throw_tile`'s rule) and round where each grenade or
+rocket in the air flies to. Drawn by the tile overlay (`rt_world_overlay`: the rings, then the tracers), repainted
+only when a ring comes, goes or moves with the view. The tile in the air is the flight's own: `actions.cc`
+`action_rt_launch_flight` reports it (`combat_rt_flight_launched` → `RtInFlight.landTile`), because `rt_reaim`
+reads the target after that frame's moves and can be a hex out. `[COMBAT/blast-ring] on|off` traces, harness
+`blastring on|off|awareness` and `dude perk <n>`, `screen-blast-ring.txt`, `screen-blast-ring-far.txt`,
+`blast-ring-rocket.txt`, `blast-ring-aware-on.txt` / `-off.txt`, `screen-mods-blast.txt` (the row; 25 rows at
+480 lines, pitch 12 = the `lineH + 2` floor: the next MODS row needs a new layout). Not in fallout1-ce yet
+(module delta in `combat_rt.cc` / `.h`, `mods_page.cc`, `autotest.cc`).
+
 **Resyncing from fallout1-ce** (last: 99edef7 → 0be4c88, v0.1.0, 2026-10-23): the modules by a three-way
 merge — `git merge-file -L F2 -L F1-old -L F1-new <ours> <F1 old> <F1 new>`, the two F1 copies taken with
 `git -C ../fallout1-ce show <rev>:src/game/<file>` — then `git -C ../fallout1-ce diff <old> <new> -- src/game src/int`
