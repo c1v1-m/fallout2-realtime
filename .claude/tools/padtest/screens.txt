@@ -12,20 +12,14 @@
 15.0 tap UP
 15.6 tap UP
 16.2 tap A
-# selector: frame on TAKE; right x3 -> MODIFY, A
-19.0 tap RIGHT
-19.5 tap RIGHT
-20.0 tap RIGHT
-21.0 tap A
+# selector (2026-11-14 layout: LB / RB the character, A TAKE, X CREATE, Y MODIFY, B BACK): Y -> MODIFY
+21.0 tap Y
 # character editor (creation): frame on STRENGTH; down -> PE; X gives a point back; Y spends it again
 23.5 tap DOWN
 24.0 tap X
 25.2 tap Y
-# B cancels the editor, back on the selector: left x3 -> TAKE, A
+# B cancels the editor, back on the selector: A -> TAKE
 27.0 tap B
-29.0 tap LEFT
-29.5 tap LEFT
-30.0 tap LEFT
 30.6 tap A
 # the intro movie
 35.0 tap A

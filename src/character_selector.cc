@@ -31,8 +31,10 @@
 
 #include <SDL.h>
 
-// Realtime / controller (fallout1-ce's select.cc changes, ported).
+// Realtime / controller: the pad's own buttons for this screen, and their badges (2026-11-14).
+#include "rt/game/game_trace.h"
 #include "rt/game/gamepad_ui.h"
+#include "rt/rt_hooks.h"
 #include "stat.h"
 #include "svga.h"
 #include "text_font.h"
@@ -109,7 +111,7 @@ static PremadeCharacterDescription gPremadeCharacterDescriptions[PREMADE_CHARACT
 static int gPremadeCharacterCount = PREMADE_CHARACTER_COUNT;
 
 // 0x51C7F8
-// Realtime build: not static -- the gamepad layer snaps the stick between this screen's buttons
+// Realtime build: not static -- the gamepad layer reads it to know this screen is up
 // (rt/f1compat.h maps F1's select_window_id here).
 int gCharacterSelectorWindow = -1;
 
@@ -152,267 +154,264 @@ static FrmImage _previousButtonPressedFrmImage;
 
 static std::vector<PremadeCharacterDescription> gCustomPremadeCharacterDescriptions;
 
-// CONTROLLER NAVIGATION for the character SELECTION screen -- the first thing New Game shows. Every
-// clickable thing is a stop, the arrows under the portrait included; the D-pad / stick steps the
-// focus SPATIALLY, A presses the focused button (the very code the button sends), B backs out.
+// THE PAD ON CHARACTER SELECTION (Fallout 2 Realtime 2026-11-14), his layout: „upravíme char select, lb a rb a bude
+// u toho posouvá výběr A bude u Take, X bude u create character, Y bude modify B u back“. Every action of the screen
+// has a button of its own -- LB / RB the previous / next character, A TAKE, X CREATE CHARACTER, Y MODIFY, B BACK --
+// and a press sends the code that action already has here, so the loop's own dispatch below stays the only one. It
+// replaces the focus frame the D-pad stepped and A pressed (fallout1-ce's select.cc, ported): with a button for
+// everything there is nothing left to step to.
 //
-// The indicator is a 1px frame in Fallout's selection yellow, drawn through a SAVE-UNDER (the labels
-// are painted once and never repainted, so anything erased against the background would eat them),
-// hence the strict erase -> input -> draw order in the loop.
-struct SelFocusItem {
-    int x;
-    int y;
-    int w;
-    int h;
-    int code; // what pressing A sends -- the same code the on-screen button emits
+// ⚠️ THE SCREEN OWNS THE PAD (self_nav, from its first input frame to its last). It is not modal and used to set
+// nothing, so the WORLD's shortcuts ran in it through the shared mouse hook: LB / RB fired the quick slots, and Y
+// swapped hands on a bar whose hands still held the init sentinel -- itemGetType read (Object*)-1 and the game was
+// gone („hra spadla v char selectu po zmáčknutí Y“). The pad layer also refuses every world shortcut while no map is
+// up now (gpui_no_world in gamepad_ui.cc), whatever the screen.
+//
+// ⚠️ EVERY BUTTON ARMS ON ITS RELEASE. The A that pressed NEW GAME on the title menu is still down as this opens, and
+// the button that closed the editor (MODIFY / CREATE) or the quit box is still down as they come back: a press counts
+// only once the button has been seen up.
+typedef struct SelPadKey {
+    SDL_GameControllerButton button;
+    int code; // what the press sends -- the code this screen already acts on
+    const char* sound; // the click its on-screen button makes under the mouse, or nullptr when the code plays it
+    const char* name; // for the trace
+} SelPadKey;
+
+static const SelPadKey sel_pad_keys[] = {
+    { SDL_CONTROLLER_BUTTON_A, KEY_LOWERCASE_T, "ib1p1xx1", "A" }, // TAKE
+    { SDL_CONTROLLER_BUTTON_X, KEY_LOWERCASE_C, "ib1p1xx1", "X" }, // CREATE CHARACTER
+    { SDL_CONTROLLER_BUTTON_Y, KEY_LOWERCASE_M, "ib1p1xx1", "Y" }, // MODIFY
+    { SDL_CONTROLLER_BUTTON_B, KEY_ESCAPE, "ib1p1xx1", "B" }, // BACK
+    // The arrows as the keyboard's arrow keys step them: the very 500 / 501 the arrow buttons send, with the arrow
+    // button's own click in front.
+    { SDL_CONTROLLER_BUTTON_LEFTSHOULDER, KEY_ARROW_LEFT, nullptr, "LB" },
+    { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, KEY_ARROW_RIGHT, nullptr, "RB" },
 };
 
-static const SelFocusItem sel_items[] = {
-    { CS_WINDOW_TAKE_BUTTON_X, CS_WINDOW_TAKE_BUTTON_Y, 15, 16, KEY_LOWERCASE_T },
-    { CS_WINDOW_PREVIOUS_BUTTON_X, CS_WINDOW_PREVIOUS_BUTTON_Y, 20, 18, 500 },
-    { CS_WINDOW_NEXT_BUTTON_X, CS_WINDOW_NEXT_BUTTON_Y, 20, 18, 501 },
-    { CS_WINDOW_MODIFY_BUTTON_X, CS_WINDOW_MODIFY_BUTTON_Y, 15, 16, KEY_LOWERCASE_M },
-    { CS_WINDOW_CREATE_BUTTON_X, CS_WINDOW_CREATE_BUTTON_Y, 15, 16, KEY_LOWERCASE_C },
-    { CS_WINDOW_BACK_BUTTON_X, CS_WINDOW_BACK_BUTTON_Y, 15, 16, KEY_ESCAPE },
-};
+#define SEL_PAD_KEY_COUNT ((int)(sizeof(sel_pad_keys) / sizeof(sel_pad_keys[0])))
 
-#define SEL_FOCUS_COUNT ((int)(sizeof(sel_items) / sizeof(sel_items[0])))
-#define SEL_FOCUS_TAKE 0
-
-#define SEL_HL_MAX_W 40
-#define SEL_HL_MAX_H 40
-
-static unsigned char sel_hl_top[SEL_HL_MAX_W];
-static unsigned char sel_hl_bottom[SEL_HL_MAX_W];
-static unsigned char sel_hl_left[SEL_HL_MAX_H];
-static unsigned char sel_hl_right[SEL_HL_MAX_H];
-static int sel_hl_x = -1;
-static int sel_hl_y;
-static int sel_hl_w;
-static int sel_hl_h;
-static int sel_focus = SEL_FOCUS_TAKE;
-
-// Three pixels of air around the focused item.
-static void sel_focus_bounds(int* x, int* y, int* w, int* h)
+// Every button counts as held until it is seen up: on entry, and after a screen opened from here comes back.
+static void sel_pad_rearm(bool* held)
 {
-    const SelFocusItem* it = &(sel_items[sel_focus]);
-    *x = it->x - 3;
-    *y = it->y - 3;
-    *w = it->w + 6;
-    *h = it->h + 6;
-}
-
-// Drag the POINTER along with the frame: two indicators of the same thing must never disagree.
-static void sel_park_cursor()
-{
-    if (gCharacterSelectorWindow == -1) {
-        return;
-    }
-
-    Rect rect;
-    if (windowGetRect(gCharacterSelectorWindow, &rect) != 0) {
-        return;
-    }
-
-    const SelFocusItem* it = &(sel_items[sel_focus]);
-    _mouse_set_position(rect.left + it->x + it->w / 2, rect.top + it->y + it->h / 2);
-}
-
-// SPATIAL step: the nearest item that genuinely lies in the direction pushed. The candidate must move
-// at least SEL_STEP_MIN along the pushed axis, and candidates that OVERLAP the current item on the
-// other axis win outright; others only within SEL_STEP_SLOP, or the focus stays put.
-#define SEL_STEP_MIN 10
-#define SEL_STEP_SLOP 40
-
-static void sel_focus_step(int dx, int dy)
-{
-    const SelFocusItem* cur = &(sel_items[sel_focus]);
-    int cx = cur->x + cur->w / 2;
-    int cy = cur->y + cur->h / 2;
-
-    int best = -1;
-    int bestScore = 0;
-    bool bestOverlaps = false;
-
-    for (int i = 0; i < SEL_FOCUS_COUNT; i++) {
-        if (i == sel_focus) {
-            continue;
-        }
-
-        const SelFocusItem* it = &(sel_items[i]);
-        int ix = it->x + it->w / 2;
-        int iy = it->y + it->h / 2;
-
-        int along = dx != 0 ? (ix - cx) * dx : (iy - cy) * dy;
-        if (along < SEL_STEP_MIN) {
-            continue;
-        }
-
-        int across = dx != 0 ? (iy - cy) : (ix - cx);
-        if (across < 0) {
-            across = -across;
-        }
-
-        bool overlaps = dx != 0
-            ? (it->y < cur->y + cur->h && it->y + it->h > cur->y)
-            : (it->x < cur->x + cur->w && it->x + it->w > cur->x);
-
-        if (!overlaps && across > SEL_STEP_SLOP) {
-            continue;
-        }
-
-        int score = along + 2 * across;
-
-        if (best == -1 || (overlaps && !bestOverlaps)
-            || (overlaps == bestOverlaps && score < bestScore)) {
-            best = i;
-            bestScore = score;
-            bestOverlaps = overlaps;
-        }
-    }
-
-    if (best != -1) {
-        sel_focus = best;
-        sel_park_cursor();
-        soundPlayFile("ib1p1xx1");
+    for (int i = 0; i < SEL_PAD_KEY_COUNT; i++) {
+        held[i] = true;
     }
 }
 
-static void sel_hl_erase()
-{
-    if (sel_hl_x < 0 || gCharacterSelectorWindow == -1) {
-        return;
-    }
-
-    unsigned char* buf = windowGetBuffer(gCharacterSelectorWindow);
-    if (buf == nullptr) {
-        sel_hl_x = -1;
-        return;
-    }
-
-    memcpy(buf + CS_WINDOW_WIDTH * sel_hl_y + sel_hl_x, sel_hl_top, sel_hl_w);
-    memcpy(buf + CS_WINDOW_WIDTH * (sel_hl_y + sel_hl_h - 1) + sel_hl_x, sel_hl_bottom, sel_hl_w);
-    for (int i = 0; i < sel_hl_h; i++) {
-        unsigned char* row = buf + CS_WINDOW_WIDTH * (sel_hl_y + i);
-        row[sel_hl_x] = sel_hl_left[i];
-        row[sel_hl_x + sel_hl_w - 1] = sel_hl_right[i];
-    }
-
-    sel_hl_x = -1;
-}
-
-static void sel_hl_draw()
-{
-    if (gCharacterSelectorWindow == -1) {
-        return;
-    }
-
-    unsigned char* buf = windowGetBuffer(gCharacterSelectorWindow);
-    if (buf == nullptr) {
-        return;
-    }
-
-    int x;
-    int y;
-    int w;
-    int h;
-    sel_focus_bounds(&x, &y, &w, &h);
-
-    if (x < 0 || y < 0 || w < 3 || h < 3 || w > SEL_HL_MAX_W || h > SEL_HL_MAX_H
-        || x + w > CS_WINDOW_WIDTH || y + h > CS_WINDOW_HEIGHT) {
-        return;
-    }
-
-    // Whole footprint saved before any of it is drawn, or the corners come back yellow.
-    memcpy(sel_hl_top, buf + CS_WINDOW_WIDTH * y + x, w);
-    memcpy(sel_hl_bottom, buf + CS_WINDOW_WIDTH * (y + h - 1) + x, w);
-    for (int i = 0; i < h; i++) {
-        const unsigned char* row = buf + CS_WINDOW_WIDTH * (y + i);
-        sel_hl_left[i] = row[x];
-        sel_hl_right[i] = row[x + w - 1];
-    }
-
-    unsigned char color = _colorTable[32747];
-    memset(buf + CS_WINDOW_WIDTH * y + x, color, w);
-    memset(buf + CS_WINDOW_WIDTH * (y + h - 1) + x, color, w);
-    for (int i = 0; i < h; i++) {
-        unsigned char* row = buf + CS_WINDOW_WIDTH * (y + i);
-        row[x] = color;
-        row[x + w - 1] = color;
-    }
-
-    sel_hl_x = x;
-    sel_hl_y = y;
-    sel_hl_w = w;
-    sel_hl_h = h;
-}
-
-static bool sel_prev_up;
-static bool sel_prev_down;
-static bool sel_prev_left;
-static bool sel_prev_right;
-static bool sel_prev_a;
-static bool sel_prev_b;
-
-// Latch the CURRENT state as "already seen", so the A that opened this screen (on the main menu)
-// does not instantly hit TAKE.
-static void sel_pad_prime(SDL_GameController* pad)
-{
-    SDL_GameControllerUpdate();
-    sel_prev_up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
-    sel_prev_down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
-    sel_prev_left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
-    sel_prev_right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
-    sel_prev_a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
-    sel_prev_b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
-}
-
-static void sel_pad_poll(SDL_GameController* pad)
+// One frame of the pad: the first button down since the last frame sends its code (one action a frame).
+static void sel_pad_poll(SDL_GameController* pad, bool* held)
 {
     SDL_GameControllerUpdate();
 
-    bool up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
-    bool down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
-    bool left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
-    bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0
-        || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
-    bool a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
-    bool b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool sent = false;
+    for (int i = 0; i < SEL_PAD_KEY_COUNT; i++) {
+        bool down = SDL_GameControllerGetButton(pad, sel_pad_keys[i].button) != 0;
+        if (down && !held[i] && !sent) {
+            if (sel_pad_keys[i].sound != nullptr) {
+                soundPlayFile(sel_pad_keys[i].sound);
+            }
+            enqueueInputEvent(sel_pad_keys[i].code);
+            trace_event(TRACE_INPUT, "charsel-pad", "button=%s code=%d", sel_pad_keys[i].name, sel_pad_keys[i].code);
+            sent = true;
+        }
+        held[i] = down;
+    }
+}
 
-    // All four directions move the FOCUS; switching character is A on one of the arrows.
-    if (up && !sel_prev_up) {
-        sel_focus_step(0, -1);
+// THE BADGES: with a pad in, each of those buttons is named on the screen by the bar's own badge (intface_pad_face /
+// intface_pad_pill: a dark disc or pill, the letters gold). No words: the labels are the art's.
+//   - LB and RB: pills on the window art either side of the arrows' plate, clear of the arrows' rects (a press
+//     repaints those) and of every line of text; what was under each is kept, so a pad pulled out takes them with it.
+//     Both sit above y 330, inside the part a new character repaints (characterSelectorWindowRefresh), which draws
+//     them again.
+//   - A, Y, X and B: ON the red buttons themselves, the whole badge in place of the red dot (sel_red_*, below) -- his
+//     pick of three mock-ups on 2026-11-14 („Celá značka“; the others were the badge beside the plate, as first
+//     built, and the gold letter on the red dot).
+typedef struct SelPadBadge {
+    int cx;
+    int cy;
+    const char* key; // two letters: a shoulder's pill
+} SelPadBadge;
+
+static const SelPadBadge sel_pad_badges[] = {
+    { 270, 329, "LB" }, // the arrows' plate: 281..349
+    { 361, 329, "RB" },
+};
+
+#define SEL_BADGE_COUNT ((int)(sizeof(sel_pad_badges) / sizeof(sel_pad_badges[0])))
+
+// The box kept under each badge: as wide as the pill (17), as tall as the disc (15).
+#define SEL_BADGE_HALF_W 8
+#define SEL_BADGE_HALF_H 7
+#define SEL_BADGE_W (2 * SEL_BADGE_HALF_W + 1)
+#define SEL_BADGE_H (2 * SEL_BADGE_HALF_H + 1)
+
+static unsigned char sel_badge_under[SEL_BADGE_COUNT][SEL_BADGE_W * SEL_BADGE_H];
+static bool sel_badge_under_kept = false;
+static bool sel_badges_shown = false;
+
+// Once, on the bare art, before any badge is drawn.
+static void sel_badges_keep_under()
+{
+    for (int i = 0; i < SEL_BADGE_COUNT; i++) {
+        const SelPadBadge* badge = &(sel_pad_badges[i]);
+        unsigned char* src = gCharacterSelectorWindowBuffer
+            + CS_WINDOW_WIDTH * (badge->cy - SEL_BADGE_HALF_H) + badge->cx - SEL_BADGE_HALF_W;
+        for (int y = 0; y < SEL_BADGE_H; y++) {
+            memcpy(sel_badge_under[i] + SEL_BADGE_W * y, src + CS_WINDOW_WIDTH * y, SEL_BADGE_W);
+        }
     }
-    if (down && !sel_prev_down) {
-        sel_focus_step(0, 1);
-    }
-    if (left && !sel_prev_left) {
-        sel_focus_step(-1, 0);
-    }
-    if (right && !sel_prev_right) {
-        sel_focus_step(1, 0);
+    sel_badge_under_kept = true;
+    sel_badges_shown = false;
+}
+
+// The badges with a pad in, the art they covered without one. The caller refreshes the window.
+static void sel_badges_paint(bool pad)
+{
+    if (gCharacterSelectorWindowBuffer == nullptr || !sel_badge_under_kept) {
+        return;
     }
 
-    if (a && !sel_prev_a) {
-        enqueueInputEvent(sel_items[sel_focus].code);
+    for (int i = 0; i < SEL_BADGE_COUNT; i++) {
+        const SelPadBadge* badge = &(sel_pad_badges[i]);
+        if (pad) {
+            intface_pad_pill(gCharacterSelectorWindowBuffer, CS_WINDOW_WIDTH, CS_WINDOW_WIDTH, CS_WINDOW_HEIGHT,
+                badge->cx, badge->cy, badge->key);
+        } else if (sel_badges_shown) {
+            unsigned char* dest = gCharacterSelectorWindowBuffer
+                + CS_WINDOW_WIDTH * (badge->cy - SEL_BADGE_HALF_H) + badge->cx - SEL_BADGE_HALF_W;
+            for (int y = 0; y < SEL_BADGE_H; y++) {
+                memcpy(dest + CS_WINDOW_WIDTH * y, sel_badge_under[i] + SEL_BADGE_W * y, SEL_BADGE_W);
+            }
+        }
     }
-    if (b && !sel_prev_b) {
-        enqueueInputEvent(KEY_ESCAPE);
-    }
+    sel_badges_shown = pad;
+}
 
-    sel_prev_up = up;
-    sel_prev_down = down;
-    sel_prev_left = left;
-    sel_prev_right = right;
-    sel_prev_a = a;
-    sel_prev_b = b;
+// THE RED BUTTONS WEAR THEIR PAD BUTTON (2026-11-14, see THE BADGES above). Drawn into COPIES OF THE BUTTONS' OWN
+// IMAGES, not on the window: a GNW button blits its image into the window buffer at every window refresh
+// (_GNW_button_refresh), so a badge painted on the art under a red button was simply covered by it -- the first try.
+// Each copy is the whole 15x16 tile made opaque: the bare art that lies under the button, the button's own image over
+// it (its transparent pixels kept), then the badge. Opaque, because the buttons are BUTTON_FLAG_TRANSPARENT and blit
+// only their non-zero pixels: a copy with holes would leave whatever the previous image drew there. The pressed copy
+// is the same badge over the pressed art, so a mouse press on a badged button changes nothing a player could misread
+// (the press still clicks). Without a pad the buttons get the art's own images back, over the bare art put back first.
+#define SEL_RED_W 15
+#define SEL_RED_H 16
+enum {
+    SEL_RED_TAKE,
+    SEL_RED_MODIFY,
+    SEL_RED_CREATE,
+    SEL_RED_BACK,
+    SEL_RED_COUNT,
+};
+static const char sel_red_keys[SEL_RED_COUNT] = { 'A', 'Y', 'X', 'B' };
+static const int sel_red_at[SEL_RED_COUNT][2] = {
+    { CS_WINDOW_TAKE_BUTTON_X, CS_WINDOW_TAKE_BUTTON_Y },
+    { CS_WINDOW_MODIFY_BUTTON_X, CS_WINDOW_MODIFY_BUTTON_Y },
+    { CS_WINDOW_CREATE_BUTTON_X, CS_WINDOW_CREATE_BUTTON_Y },
+    { CS_WINDOW_BACK_BUTTON_X, CS_WINDOW_BACK_BUTTON_Y },
+};
+static unsigned char sel_red_under[SEL_RED_COUNT][SEL_RED_W * SEL_RED_H]; // the bare art under each red button
+static unsigned char sel_red_badged[SEL_RED_COUNT][2][SEL_RED_W * SEL_RED_H]; // [normal, pressed], opaque
+static bool sel_red_ready = false;
+static bool sel_red_shown = false;
+
+static int sel_red_button(int i)
+{
+    switch (i) {
+    case SEL_RED_TAKE:
+        return gCharacterSelectorWindowTakeButton;
+    case SEL_RED_MODIFY:
+        return gCharacterSelectorWindowModifyButton;
+    case SEL_RED_CREATE:
+        return gCharacterSelectorWindowCreateButton;
+    case SEL_RED_BACK:
+        return gCharacterSelectorWindowBackButton;
+    }
+    return -1;
+}
+
+static FrmImage* sel_red_art(int i, bool pressed)
+{
+    switch (i) {
+    case SEL_RED_TAKE:
+        return pressed ? &_takeButtonPressedFrmImage : &_takeButtonNormalFrmImage;
+    case SEL_RED_MODIFY:
+        return pressed ? &_modifyButtonPressedFrmImage : &_modifyButtonNormalFrmImage;
+    case SEL_RED_CREATE:
+        return pressed ? &_createButtonPressedFrmImage : &_createButtonNormalFrmImage;
+    case SEL_RED_BACK:
+        return pressed ? &_backButtonPressedFrmImage : &_backButtonNormalFrmImage;
+    }
+    return nullptr;
+}
+
+// Once, on the bare art, before the buttons exist (they draw themselves into the window when made).
+static void sel_red_keep_under()
+{
+    for (int i = 0; i < SEL_RED_COUNT; i++) {
+        const unsigned char* src = gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * sel_red_at[i][1] + sel_red_at[i][0];
+        for (int y = 0; y < SEL_RED_H; y++) {
+            memcpy(sel_red_under[i] + SEL_RED_W * y, src + CS_WINDOW_WIDTH * y, SEL_RED_W);
+        }
+    }
+    sel_red_ready = false;
+    sel_red_shown = false;
+}
+
+// Once the four buttons and their art exist: the badged tiles. Art of another size than the buttons' 15x16 gets no
+// badge (the plain buttons stay).
+static void sel_red_make()
+{
+    sel_red_ready = false;
+    for (int i = 0; i < SEL_RED_COUNT; i++) {
+        for (int p = 0; p < 2; p++) {
+            FrmImage* art = sel_red_art(i, p != 0);
+            if (art == nullptr || art->getData() == nullptr || art->getWidth() != SEL_RED_W
+                || art->getHeight() != SEL_RED_H) {
+                return;
+            }
+            unsigned char* tile = sel_red_badged[i][p];
+            memcpy(tile, sel_red_under[i], SEL_RED_W * SEL_RED_H);
+            const unsigned char* img = art->getData();
+            for (int k = 0; k < SEL_RED_W * SEL_RED_H; k++) {
+                if (img[k] != 0) {
+                    tile[k] = img[k];
+                }
+            }
+            intface_pad_face(tile, SEL_RED_W, SEL_RED_W, SEL_RED_H, SEL_RED_W / 2, SEL_RED_H / 2, sel_red_keys[i]);
+        }
+    }
+    sel_red_ready = true;
+}
+
+// The badged tiles with a pad in, the art's own images without one; nothing when that is already so. The window is
+// refreshed by the button swap itself.
+static void sel_red_show(bool pad)
+{
+    if (!sel_red_ready || pad == sel_red_shown) {
+        return;
+    }
+    for (int i = 0; i < SEL_RED_COUNT; i++) {
+        int btn = sel_red_button(i);
+        if (btn == -1) {
+            continue;
+        }
+        // The bare art back under the button first: a transparent image only covers its own non-zero pixels.
+        unsigned char* dest = gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * sel_red_at[i][1] + sel_red_at[i][0];
+        for (int y = 0; y < SEL_RED_H; y++) {
+            memcpy(dest + CS_WINDOW_WIDTH * y, sel_red_under[i] + SEL_RED_W * y, SEL_RED_W);
+        }
+        if (pad) {
+            _win_register_button_image(btn, sel_red_badged[i][0], sel_red_badged[i][1], nullptr, true);
+        } else {
+            _win_register_button_image(btn, sel_red_art(i, false)->getData(), sel_red_art(i, true)->getData(), nullptr,
+                true);
+        }
+    }
+    sel_red_shown = pad;
+    trace_event(TRACE_FLOW, "charsel-red", "badged=%d", pad ? 1 : 0);
 }
 
 // 0x4A71D0
@@ -421,6 +420,9 @@ int characterSelectorOpen()
     if (!characterSelectorWindowInit()) {
         return 0;
     }
+
+    // The pad is this screen's (see sel_pad_keys) -- with no pad as well, which costs nothing, as on the title menu.
+    gamepad_ui_set_self_nav(true);
 
     bool cursorWasHidden = cursorIsHidden();
     if (cursorWasHidden) {
@@ -434,21 +436,10 @@ int characterSelectorOpen()
     colorPaletteLoad("color.pal");
     paletteFadeTo(_cmap);
 
-    // Re-fetched every frame, never latched once on entry: gamepad_ui opens the controller LAZILY.
-    sel_focus = SEL_FOCUS_TAKE;
-    sel_hl_x = -1;
-    bool selSuppressWas = false;
-    {
-        SDL_GameController* pad = gamepad_ui_get_controller();
-        if (pad != nullptr) {
-            sel_pad_prime(pad);
-            sel_park_cursor(); // start with the pointer already on the framed item
-            // A is ours here (it sends the focused item's own key code); stop the shared router from
-            // also firing a raw click at the pointer, and the shared snap from moving it.
-            selSuppressWas = gamepad_ui_set_suppress_a_click(true);
-            gamepad_ui_set_suppress_snap(true);
-        }
-    }
+    bool padHeld[SEL_PAD_KEY_COUNT];
+    sel_pad_rearm(padHeld);
+    trace_event(TRACE_FLOW, "charsel", "open premades=%d pad=%d", gPremadeCharacterCount,
+        gamepad_ui_get_controller() != nullptr ? 1 : 0);
 
     int rc = 0;
     bool done = false;
@@ -459,12 +450,17 @@ int characterSelectorOpen()
             break;
         }
 
-        // Erase -> input -> draw, once per frame, which is what keeps the save-under honest.
-        SDL_GameController* selPad = gamepad_ui_get_controller();
-        if (selPad != nullptr) {
-            sel_hl_erase();
-            sel_pad_poll(selPad);
+        // Re-fetched every frame, never latched on entry: gamepad_ui opens the controller LAZILY, and one can come or
+        // go while the screen is up -- its badges with it. Read before the input, so a press is answered this frame.
+        SDL_GameController* pad = gamepad_ui_get_controller();
+        if (pad != nullptr) {
+            sel_pad_poll(pad, padHeld);
         }
+        if ((pad != nullptr) != sel_badges_shown) {
+            sel_badges_paint(pad != nullptr);
+            windowRefresh(gCharacterSelectorWindow);
+        }
+        sel_red_show(pad != nullptr); // the red buttons' badges: nothing unless the pad came or went
 
         int keyCode = inputGetInput();
 
@@ -486,22 +482,30 @@ int characterSelectorOpen()
         case KEY_UPPERCASE_C:
         case KEY_LOWERCASE_C:
             _ResetPlayer();
+            // The editor wants the right stick's pointer, which self_nav takes away (it reaches PRINT / DONE / OPTIONS
+            // with it); the pad is this screen's again when it comes back, every button once let go.
+            gamepad_ui_set_self_nav(false);
             if (characterEditorShow(1) == 0) {
                 rc = 2;
                 done = true;
             } else {
                 characterSelectorWindowRefresh();
             }
+            gamepad_ui_set_self_nav(true);
+            sel_pad_rearm(padHeld);
 
             break;
         case KEY_UPPERCASE_M:
         case KEY_LOWERCASE_M:
+            gamepad_ui_set_self_nav(false); // as CREATE's, above
             if (!characterEditorShow(1)) {
                 rc = 2;
                 done = true;
             } else {
                 characterSelectorWindowRefresh();
             }
+            gamepad_ui_set_self_nav(true);
+            sel_pad_rearm(padHeld);
 
             break;
         case KEY_UPPERCASE_T:
@@ -512,6 +516,7 @@ int characterSelectorOpen()
             break;
         case KEY_F10:
             showQuitConfirmationDialog();
+            sel_pad_rearm(padHeld); // its A / B are still down as it closes
             break;
         case KEY_ARROW_LEFT:
             soundPlayFile("ib2p1xx1");
@@ -537,22 +542,16 @@ int characterSelectorOpen()
             break;
         }
 
-        if (selPad != nullptr && !done) {
-            // The editor (MODIFY / CREATE) ran its own loop; its suppressions came back off with it.
-            gamepad_ui_set_suppress_a_click(true);
-            gamepad_ui_set_suppress_snap(true);
-            sel_hl_draw();
-            windowRefresh(gCharacterSelectorWindow);
-        }
-
         renderPresent();
         sharedFpsLimiter.throttle();
     }
 
-    sel_hl_erase();
     inputEventQueueReset();
-    gamepad_ui_set_suppress_a_click(selSuppressWas);
-    gamepad_ui_set_suppress_snap(false);
+    // Every way out comes through here. The button that closed the screen is still down, and the title menu or the
+    // game after it must not read it as a fresh press (the pad layer re-primes its edges on the epoch).
+    gamepad_ui_set_self_nav(false);
+    gamepad_ui_bump_input_epoch();
+    trace_event(TRACE_FLOW, "charsel", "close rc=%d", rc);
 
     paletteFadeTo(gPaletteBlack);
     characterSelectorWindowFree();
@@ -595,6 +594,10 @@ static bool characterSelectorWindowInit()
         CS_WINDOW_WIDTH,
         gCharacterSelectorWindowBuffer,
         CS_WINDOW_WIDTH);
+
+    // Realtime build: the bare art under the pad's badges and under the red buttons, before anything is drawn over it.
+    sel_badges_keep_under();
+    sel_red_keep_under();
 
     gCharacterSelectorBackground = (unsigned char*)internal_malloc(CS_WINDOW_BACKGROUND_WIDTH * CS_WINDOW_BACKGROUND_HEIGHT);
     if (gCharacterSelectorBackground == nullptr)
@@ -790,6 +793,9 @@ static bool characterSelectorWindowInit()
 
     buttonSetCallbacks(gCharacterSelectorWindowBackButton, _gsound_red_butt_press, _gsound_red_butt_release);
 
+    // Realtime build: the red buttons' badged tiles (sel_red_show puts them on with a pad in).
+    sel_red_make();
+
     gCurrentPremadeCharacter = PREMADE_CHARACTER_NARG;
 
     windowRefresh(gCharacterSelectorWindow);
@@ -863,6 +869,12 @@ static void characterSelectorWindowFree()
 
     windowDestroy(gCharacterSelectorWindow);
     gCharacterSelectorWindow = -1;
+
+    // Realtime build: the next opening keeps its own bare art and makes its own badged tiles.
+    sel_badge_under_kept = false;
+    sel_badges_shown = false;
+    sel_red_ready = false;
+    sel_red_shown = false;
 }
 
 // 0x4A7D58
@@ -890,6 +902,12 @@ static bool characterSelectorWindowRefresh()
             success = characterSelectorWindowRenderBio();
         }
     }
+
+    // Realtime build: the badges the background blit above just painted over (sel_pad_badges), and on the first refresh
+    // the red buttons' (the window refresh below redraws every button from its image anyway).
+    sel_badges_paint(gamepad_ui_get_controller() != nullptr);
+    sel_red_show(gamepad_ui_get_controller() != nullptr);
+    trace_event(TRACE_FLOW, "charsel-show", "premade=%d name=%s", gCurrentPremadeCharacter, objectGetName(gDude));
 
     windowRefresh(gCharacterSelectorWindow);
 

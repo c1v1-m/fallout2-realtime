@@ -1,7 +1,7 @@
 # New game straight to the temple, then the inventory and the save / load screens on the pad.
 # main menu: the highlight starts on NEW GAME
 8.0 tap A
-# selector: the frame starts on TAKE
+# selector: A is TAKE
 11.0 tap A
 # the intro movie
 15.0 tap A

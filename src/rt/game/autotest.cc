@@ -364,6 +364,7 @@ enum {
     AT_SCREEN_INVENTORY,
     AT_SCREEN_OPTIONS,
     AT_SCREEN_CREATION,
+    AT_SCREEN_SELECTOR,
 };
 
 // How the pad opens each screen from the world (gamepad_ui.cc: the D-pad holds, BACK / START taps).
@@ -380,6 +381,7 @@ static const struct {
     { "inventory", SDL_CONTROLLER_BUTTON_BACK, 120 },
     { "options", SDL_CONTROLLER_BUTTON_START, 120 },
     { "creation", -1, 0 },
+    { "selector", -1, 0 },
 };
 
 typedef struct AtStep {
@@ -1867,6 +1869,18 @@ static int at_open_screen(int screen)
         gamepad_ui_bump_input_epoch();
         break;
     }
+    case AT_SCREEN_SELECTOR:
+#if FALLOUT_RT_GAME == 2
+        // New Game's character selection (2026-11-14), opened over the scenario's world as main.cc opens it over the
+        // title menu's place: it takes the pad (self_nav), flushes the queue and bumps the epoch itself. Its exit
+        // fades the palette to black for what comes next there; here the world comes next, so it is faded back.
+        // ⚠️ It loads the premades into the dude (_proto_dude_init): end the scenario soon after.
+        rc = characterSelectorOpen();
+        paletteFadeTo(_cmap);
+#else
+        trace_event(TRACE_WARN, "autotest", "selector not in this game");
+#endif
+        break;
     }
     return rc;
 }
