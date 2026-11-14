@@ -787,9 +787,8 @@ static int rt_mark_count = 0; // slots in use, painted or still to be erased
 // rule, never a pointer, which a map change or a load rebuilds.
 //   RtSquadPref   HOW it fights: hold fire and the weapon pick. Saved (the chunk's RTSQ section), kept across maps,
 //                 cleared by a load or a new game (rt_reset_session_state) before the save's own are read.
-//   RtSquadOrder  WHAT it does on this map: its own focus (ATTACK given to it alone), a HEAL ME on its way. Never
-//                 saved; a map change or a load ends all of it (rt_abandon_encounter). (GO's post lived here too until
-//                 2026-11-13, when he took GO out: „nehodí se to do této action oriented verze“.)
+//   RtSquadOrder  WHAT it does on this map: its post (GO), its own focus (ATTACK given to it alone), a HEAL ME on its
+//                 way. Never saved; a map change or a load ends all of it (rt_abandon_encounter).
 // Both apply only while the critter is a party member: "wait here" in its dialogue (party_remove) or a companion that
 // walks out keeps its entry and obeys none of it. NO HEALING / HEAL AGAIN (Y in the mode, 2026-11-13) keep nothing in
 // either: they are the dialogue's medic opt-out (rt_medic_optout), saved in the chunk's own list.
@@ -807,6 +806,15 @@ typedef struct RtSquadOrder {
     int id;
     int pid; // for the trace
     Object* obj; // the companion -- compared only
+    // GO: its post. Distance "Stay" at that tile, in a fight and out of one (rt_squad_post_step).
+    int postTile; // -1 = none
+    int postElev;
+    float postSince;
+    float postNoRouteSince; // < 0 = the last walk there had a route
+    float postRetryAt;
+    bool postArrived;
+    bool postKeptLogged; // the "kept" proof line, once a post
+    bool followHeldLogged; // its party script's follow held off (combat_rt_party_follow_held), traced once an order
     // ATTACK given to this one alone: its own focus, before the squad's.
     Object* focus;
     int focusId;
@@ -818,7 +826,6 @@ typedef struct RtSquadOrder {
     float healStuckSince; // < 0 = its last leg was asked for
     int healLogged; // rt_party_step_to_dude's trace memory
     bool healWaitLogged;
-    bool followHeldLogged; // its party script's follow held off on the way (combat_rt_party_follow_held), traced once
     // HOLD FIRE: the last enemy it held its fire at (traced once a target), and when it next looks.
     Object* fireRefused;
     float fireCheckAt;
@@ -878,6 +885,15 @@ static int rt_squad_slow_dude_ref = -1;
 static int rt_squad_slow_dude_x = 0;
 static int rt_squad_slow_dude_y = 0;
 static float rt_squad_slow_rate();
+
+// combat_rt_squad_can_reach's last answer, kept: the mode asks on a cursor tile change, and the same question twice
+// would cost a pathfinder search twice. `who` is compared only; the dude's tile says the party has not moved since
+// (the world holds still while the mode is up, after its slowdown). Forgotten when the mode opens or closes and with
+// the map.
+static Object* rt_squad_reach_who = NULL;
+static int rt_squad_reach_tile = -1;
+static int rt_squad_reach_from = -1;
+static bool rt_squad_reach_answer = false;
 
 // The world is held still (the early return in combat_rt_update): a radial wheel is up, or the squad command mode's
 // slowdown has run out. While the mode is open its own weapon wheel (WEAPON) follows the mode's slowdown, not a wheel's
@@ -957,12 +973,25 @@ static RtSquadOrder* rt_squad_order_get(Object* c)
         o->id = c->id;
         o->pid = c->pid;
         o->obj = c;
+        o->postTile = -1;
+        o->postElev = -1;
+        o->postNoRouteSince = -1.0f;
         o->focusId = -1;
         o->focusPid = -1;
         o->healStuckSince = -1.0f;
         o->healLogged = -1;
     }
     return o;
+}
+
+// Its post's tile, or -1: none, or it is no party member just now (the post waits for it, obeyed by nobody).
+static int rt_squad_post_tile(Object* c)
+{
+    RtSquadOrder* o = rt_squad_order_find(c);
+    if (o == NULL || o->postTile < 0 || !isPartyMember(c)) {
+        return -1;
+    }
+    return o->postTile;
 }
 
 // HOLD FIRE: told to hold its fire, and a party member now.
@@ -1005,6 +1034,11 @@ static bool rt_focus_is_for(const RtActor* a, Object* tgt);
 static bool rt_party_tile_ok(const RtActor* a, int tile)
 {
     if (a == NULL) {
+        return true;
+    }
+    // SQUAD COMMAND: its post is the one tile a companion sent there walks to -- under the post's own Stay too
+    // (rt_squad_post_step walks it there, and back after a flight or a shove).
+    if (a->obj != NULL && tile >= 0 && tile == rt_squad_post_tile(a->obj)) {
         return true;
     }
     if (a->party_dist == RT_DIST_STAY) {
@@ -14917,6 +14951,12 @@ static void rt_party_refresh_dist(RtActor* a, Object* npc)
         }
     }
 #endif
+    // SQUAD COMMAND -- A POST IS "STAY" THERE (GO, 2026-11-12): sent to a tile, it holds that tile as a held companion
+    // holds its own -- no steps for the fight, fights what it can hit from there, turns to what comes -- without the
+    // packet being written: its own Distance is back the moment the post ends.
+    if (a->friendly && rt_squad_post_tile(npc) >= 0) {
+        dist = RT_DIST_STAY;
+    }
     if (dist != a->party_dist_logged) {
         if (dist != RT_DIST_NONE || a->party_dist_logged >= 0) {
             trace_event(TRACE_FLOW, "party-distance", "id=%d pid=%d dist=%s was=%s state=%d t=%.2f", npc->id, npc->pid,
@@ -15533,15 +15573,23 @@ static void rt_party_take_order(RtActor* a, Object* npc, bool hold)
 //                                    dose (rt_medic_dose), past the beat's 50 % threshold, its cooldown and "stop
 //                                    patching me up": he asked. In a fight the heal comes in over time, as any drug's.
 //   WEAPON     rt_squad_weapon_step  the weapon he gave it goes in its hand, and the AI keeps to it (rt_squad_pin_item).
+//   GO         rt_squad_post_step    it walks to its post and holds it: Distance "Stay" there (rt_party_refresh_dist).
 //   HOLD FIRE  rt_squad_holds_fire   it starts no attack -- a fight it is in is dropped at the top of rt_update_actor,
 //                                    its idle pick takes nobody, the arbiter skips it, END COMBAT does not wait on it --
-//                                    and still follows, flees, heals and keeps its Distance.
+//                                    and still follows, flees, heals, keeps its Distance and its post.
 //   NO HEALING rt_medic_patient      its medic beat passes him over (the dialogue's "stop patching me up", the same
 //                                    state, 2026-11-13): it still doses itself and the others, and HEAL ME still works.
-// None of it is a fight: a companion on its way to him with a stimpak stays IDLE (or keeps the state it had), so none
-// of these orders starts a fight, or keeps one on, for nobody. (GO's walk to a post and its hold of it were here too
-// until 2026-11-13: „dej pryč ovládání a přikazování companions kam mají přesně chodit“.)
+// None of it is a fight: a companion on its way to a post or to him with a stimpak stays IDLE (or keeps the state it
+// had), so none of these orders starts a fight, or keeps one on, for nobody.
 
+// GO to every companion: the GO tile goes to the nearest of them, the others to the nearest free tiles round it within
+// RT_SQUAD_GO_SPREAD, one each, each a tile it has a route to -- at most RT_SQUAD_GO_TRIES pathfinder searches a
+// companion, each one up to 12000 nodes (pathfinder-reach.md).
+#define RT_SQUAD_GO_SPREAD 2
+#define RT_SQUAD_GO_TRIES 4
+// Out of a fight a companion RUNS to a post farther than this; nearer, and in a fight, it walks. Vanilla's party follow
+// runs past twice the distance it follows at (2 x 3FD/2, 18 tiles at its default FD 6); an order is answered sooner.
+#define RT_SQUAD_GO_RUN_TILES 8
 // HEAL ME gives up -- "Can't reach you." -- when it has not reached him in this long: a dude who keeps walking away, a
 // way blocked a step at a time. A way shut outright gives up sooner, after the chase's RT_NO_PATH_GIVEUP_SECONDS.
 #define RT_SQUAD_HEAL_MAX_SECONDS 30.0f
@@ -15565,7 +15613,7 @@ static void rt_squad_say(Object* c, const char* text)
 #endif
 }
 
-// An order that sends a companion somewhere (HEAL ME) cuts the walk it is on, in a fight or out of one -- its party
+// An order that sends a companion somewhere (GO, HEAL ME) cuts the walk it is on, in a fight or out of one -- its party
 // script's follow, a chase leg -- or the order would land only where that leg ends. Not a flight's: vanilla's flight
 // takes no orders, and a cut leg snaps the body to its tile.
 static void rt_squad_cut_walk(RtActor* a, Object* npc, const char* why)
@@ -15582,6 +15630,126 @@ static void rt_squad_cut_walk(RtActor* a, Object* npc, const char* why)
         trace_event(TRACE_FLOW, "squad-walk-cut", "id=%d pid=%d sequences=%d why=%s t=%.2f", npc->id, npc->pid, cut, why,
             rt_clock);
     }
+}
+
+// --- GO: THE POST ---
+
+static void rt_squad_post_set(Object* c, int tile, const char* why)
+{
+    RtSquadOrder* o = rt_squad_order_get(c);
+    if (o == NULL) {
+        return;
+    }
+    o->postTile = tile;
+    o->postElev = c->elevation;
+    o->postSince = rt_clock;
+    o->postNoRouteSince = -1.0f;
+    o->postRetryAt = 0.0f;
+    o->postArrived = false;
+    o->postKeptLogged = false;
+    o->followHeldLogged = false;
+    trace_event(TRACE_FLOW, "squad-post", "set id=%d pid=%d tile=%d from=%d dist=%d why=%s t=%.2f", c->id, c->pid, tile,
+        c->tile, tile_dist(c->tile, tile), why, rt_clock);
+}
+
+// The post ends: its own Distance is back on the next frame (rt_party_refresh_dist). Never reads the companion.
+static void rt_squad_post_end(RtSquadOrder* o, const char* why)
+{
+    if (o == NULL || o->postTile < 0) {
+        return;
+    }
+    trace_event(TRACE_FLOW, "squad-post", "end id=%d pid=%d tile=%d held=%.2f why=%s t=%.2f", o->id, o->pid, o->postTile,
+        rt_clock - o->postSince, why, rt_clock);
+    o->postTile = -1;
+    o->postElev = -1;
+    o->postArrived = false;
+    o->followHeldLogged = false;
+}
+
+// GO, every beat: on its post -- or beside it while somebody else stands on it -- it holds: the state machine below
+// runs as Stay at that tile. Off it, it walks there (back again after a flight, a grenade jump or a shove), and a way
+// shut for RT_NO_PATH_GIVEUP_SECONDS ends the post: "Can't get there." A floor change ends it too (the party is moved
+// with the dude, _partyMemberSyncPosition, and no hook here sees it), and so does leaving the party. True = this beat
+// was the walk, or the wait for the next try at one: on its way to a post it fights nobody.
+static bool rt_squad_post_step(RtActor* a, Object* npc)
+{
+    RtSquadOrder* o = rt_squad_order_find(npc);
+    if (o == NULL || o->postTile < 0) {
+        return false;
+    }
+    if (!a->friendly || !isPartyMember(npc)) {
+        rt_squad_post_end(o, "left-party");
+        return false;
+    }
+    if (npc->elevation != o->postElev) {
+        rt_squad_post_end(o, "floor");
+        return false;
+    }
+
+    bool on = npc->tile == o->postTile;
+    bool beside = !on && tile_dist(npc->tile, o->postTile) <= 1
+        && obj_blocking_at(npc, o->postTile, npc->elevation) != NULL;
+    if (on || beside) {
+        if (!o->postArrived) {
+            o->postArrived = true;
+            trace_event(TRACE_FLOW, "squad-post", "arrive id=%d pid=%d tile=%d at=%d took=%.2f t=%.2f", npc->id, npc->pid,
+                o->postTile, npc->tile, rt_clock - o->postSince, rt_clock);
+        }
+        o->postNoRouteSince = -1.0f;
+        // The proof that a post holds out of a fight: he is farther off than the party's own follow lets a companion
+        // stay behind (vanilla's regroup distance), and it is still on its post.
+        if (!o->postKeptLogged && !rt_engaged && obj_dude != NULL && obj_dude->elevation == npc->elevation
+            && obj_dist(npc, obj_dude) > RT_PARTY_REGROUP_TILES) {
+            o->postKeptLogged = true;
+            trace_event(TRACE_FLOW, "squad-post", "kept id=%d pid=%d tile=%d dude=%d t=%.2f", npc->id, npc->pid,
+                o->postTile, obj_dist(npc, obj_dude), rt_clock);
+        }
+        return false;
+    }
+    if (o->postArrived) {
+        o->postArrived = false;
+        trace_event(TRACE_FLOW, "squad-post", "off id=%d pid=%d tile=%d at=%d t=%.2f", npc->id, npc->pid, o->postTile,
+            npc->tile, rt_clock);
+    }
+
+    // A flight is its own (vanilla's flight ignores the Distance); one that ran from this fight sits the rest of it
+    // out where it stopped, and walks back once the fight is over (the bookends clear DISENGAGING).
+    if (a->fleeing || (npc->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0) {
+        return false;
+    }
+    if (!rt_can_walk(npc)) {
+        rt_squad_post_end(o, "cannot-walk");
+        rt_squad_say(npc, "Can't get there.");
+        return false;
+    }
+    if (rt_clock < o->postRetryAt) {
+        return true;
+    }
+
+    int dist = tile_dist(npc->tile, o->postTile);
+    bool run = !rt_engaged && dist > RT_SQUAD_GO_RUN_TILES;
+    if (rt_walk_to(npc, o->postTile, "squad-go", run)) {
+        o->postNoRouteSince = -1.0f;
+        // A walk the way ends early (a body steps into it) is asked for again only after the plugged-route pause: the
+        // route is a pathfinder search, never one a frame.
+        o->postRetryAt = rt_clock + RT_ROUTE_PLUGGED_RETRY_SECONDS;
+        trace_event(TRACE_FLOW, "squad-post", "walk id=%d pid=%d tile=%d from=%d dist=%d run=%d fight=%d t=%.2f", npc->id,
+            npc->pid, o->postTile, npc->tile, dist, run ? 1 : 0, rt_engaged ? 1 : 0, rt_clock);
+        return true;
+    }
+
+    // No route this time: the bodies in the way may move (a doorway), so it asks again, and only a way shut for the
+    // chase's own give-up time ends the post.
+    if (o->postNoRouteSince < 0.0f) {
+        o->postNoRouteSince = rt_clock;
+    }
+    o->postRetryAt = rt_clock + RT_ROUTE_PLUGGED_RETRY_SECONDS;
+    if (rt_clock - o->postNoRouteSince >= RT_NO_PATH_GIVEUP_SECONDS) {
+        rt_squad_post_end(o, "no-route");
+        rt_squad_say(npc, "Can't get there.");
+        return false;
+    }
+    return true;
 }
 
 // --- HEAL ME ---
@@ -15648,10 +15816,10 @@ static void rt_squad_heal_end(RtSquadOrder* o, const char* why)
 
 // HEAL ME, every beat until it is done: within the medic's reach of him (RT_MEDIC_ALLY_TILES) it doses him with its best
 // healing item the moment it has the medic's RT_MEDIC_AP_COST; farther off it walks to him -- the in-fight follow's
-// move (rt_party_step_to_dude: straight legs, the pathfinder round what blocks one), which no Distance or hold keeps it
-// from. A way shut for RT_NO_PATH_GIVEUP_SECONDS, or RT_SQUAD_HEAL_MAX_SECONDS without reaching him, gives up: "Can't
-// reach you." He healed by other means, out cold or on another floor ends it quietly; its last item gone, "No meds."
-// True = this beat was the heal's: on its way it fights nobody.
+// move (rt_party_step_to_dude: straight legs, the pathfinder round what blocks one), which no Distance, post or hold
+// keeps it from. A way shut for RT_NO_PATH_GIVEUP_SECONDS, or RT_SQUAD_HEAL_MAX_SECONDS without reaching him, gives
+// up: "Can't reach you." He healed by other means, out cold or on another floor ends it quietly; its last item gone,
+// "No meds." True = this beat was the heal's: on its way it fights nobody.
 static bool rt_squad_heal_step(RtActor* a, Object* npc)
 {
     RtSquadOrder* o = rt_squad_order_find(npc);
@@ -15967,25 +16135,26 @@ static void rt_squad_fire_refuse_trace(RtActor* a, Object* npc)
         npc->pid, would->id, would->pid, obj_dist(npc, would), a->state, rt_clock);
 }
 
-// scripts.cc, around a companion's heartbeat (critter_p_proc): a HEAL ME on its way must not be undone by its party
+// scripts.cc, around a companion's heartbeat (critter_p_proc): a post or a HEAL ME must not be undone by its party
 // script's follow, which walks it back to the dude (animate_move_obj_to_tile) and clears its walk (reg_anim_func CLEAR)
 // whenever it is more than 3FD/2 tiles off. Every companion's follow asks vanilla's own switch first --
 // GVAR_PARTY_NO_FOLLOW, which scenes set -- so the heartbeat runs with that set (the rest of its critter_p_proc -- its
-// karma checks, leaving the party -- runs as ever). A fighter gets no heartbeat at all (combat_rt_critter_fighting).
-// (GO's post was held off its follow the same way until he took GO out, 2026-11-13.)
+// karma checks, leaving the party -- runs as ever). In a fight the post is Stay, and a fighter gets no heartbeat at all
+// (combat_rt_critter_fighting).
 bool combat_rt_party_follow_held(Object* critter)
 {
     if (!rt_enabled || critter == NULL || rt_squad_order_count == 0) {
         return false;
     }
     RtSquadOrder* o = rt_squad_order_find(critter);
-    if (o == NULL || !o->healing || !isPartyMember(critter)) {
+    if (o == NULL || (o->postTile < 0 && !o->healing) || !isPartyMember(critter)) {
         return false;
     }
     if (!o->followHeldLogged) {
         o->followHeldLogged = true;
-        trace_event(TRACE_FLOW, "squad-follow-held", "id=%d pid=%d heal=%d fight=%d t=%.2f", critter->id, critter->pid,
-            o->healing ? 1 : 0, rt_engaged ? 1 : 0, rt_clock);
+        // post= after heal=: the HEAL ME tests read the line up to heal= (squad-heal-script)
+        trace_event(TRACE_FLOW, "squad-follow-held", "id=%d pid=%d heal=%d post=%d fight=%d t=%.2f", critter->id,
+            critter->pid, o->healing ? 1 : 0, o->postTile, rt_engaged ? 1 : 0, rt_clock);
     }
     return true;
 }
@@ -17045,6 +17214,11 @@ static void rt_update_actor(RtActor* a, float dt)
         if (anim_busy(npc) != 0) {
             return;
         }
+    }
+
+    // GO (SQUAD COMMAND): off its post it walks there (rt_squad_post_step); on it, everything below runs as Stay.
+    if (rt_squad_post_step(a, npc)) {
+        return;
     }
 
     // FOLLOW (Stay close): out past the leash and its slack it walks back toward the dude, whatever it was fighting
@@ -18229,16 +18403,20 @@ static void rt_abandon_encounter()
     rt_offscreen_shooters_reset();
     rt_blast_rings_reset(); // tiles of the map being left; its view is redrawn whole anyway
     // SQUAD ORDERS: the focus belongs to this map (a map change or a load ends it), the chevrons to its view.
-    // SQUAD COMMAND: and so do every companion's own focus and a HEAL ME on its way (the orders table); hold fire and
-    // the weapon picks are the session's (rt_reset_session_state), NO HEALING the dialogue's opt-out (kept too).
+    // SQUAD COMMAND: and so do the posts, every companion's own focus and a HEAL ME on its way (the orders table); hold
+    // fire and the weapon picks are the session's (rt_reset_session_state), NO HEALING the dialogue's opt-out (kept
+    // too).
     rt_focus_clear("map");
     for (int i = 0; i < rt_squad_order_count; i++) {
         rt_focus_own_clear(&rt_squad_orders[i], "map");
+        rt_squad_post_end(&rt_squad_orders[i], "map");
         rt_squad_heal_end(&rt_squad_orders[i], "map");
     }
     rt_squad_order_count = 0;
     rt_mark_count = 0;
     memset(rt_marks, 0, sizeof(rt_marks));
+    rt_squad_reach_who = NULL;
+    rt_squad_reach_tile = -1;
     if (rt_squad_forget_fn != NULL) {
         rt_squad_forget_fn(NULL); // the squad command mode's own pointers go with the map
     }
@@ -21708,7 +21886,8 @@ static void rt_squad_mark_tick()
 // LT + a D-pad tap (gamepad_ui.cc) orders every companion at once -- the party members on the map that are alive and
 // awake:
 //   Up    ATTACK: the LT-locked target becomes the squad's focus; every companion that can get at it goes for it first
-//         while it lives (rt_focus_wanted). No lock, or a neutral one, is refused: the order would start a fight.
+//         while it lives (rt_focus_wanted). No lock, or one on his side, is refused; a neutral one is taken since
+//         2026-11-14, and the companions start that fight (rt_squad_command).
 //   Down  FOLLOW: COMBAT CONTROL Distance "Stay close".
 //   Left  HOLD:   Distance "Stay".
 //   Right CHARGE: Distance "Charge".
@@ -21752,14 +21931,19 @@ static const char* rt_party_set_distance(Object* c, int distance)
 //
 // One function gives every order, to every companion at once (`who` NULL: the party members on the dude's floor,
 // alive and awake -- design B's LT + D-pad, and the squad command mode's "All") or to one (`who`, the mode's LB / RB):
-//   ATTACK     `target` (an enemy: fighting him, or one by nature -- the red outline) is attacked first while it lives:
-//              for All the squad's focus (design B, which also clears every companion's own), for one that one's own
-//              focus. It lifts hold fire.
-//   FOLLOW     Distance "Stay close" (design B), and the regroup: the companions' own foci end; for All the squad's
-//              focus too, for one it ignores the squad's until its next ATTACK. A companion whose packet cannot take
-//              Stay close (party.txt) still regroups if it had a focus of its own.
-//   HOLD       Distance "Stay" (design B).
-//   CHARGE     Distance "Charge" (design B); lifts hold fire.
+//   ATTACK     `target` -- an enemy (fighting him, or one by nature: the red outline) or, since 2026-11-14, a neutral
+//              (the yellow one, whose fight the companions then start) -- is attacked first while it lives: for All the
+//              squad's focus (design B, which also clears every companion's own), for one that one's own focus. It
+//              lifts hold fire and ends the post of whoever took it.
+//   FOLLOW     Distance "Stay close" (design B), and the regroup: the posts and the companions' own foci end; for All
+//              the squad's focus too, for one it ignores the squad's until its next ATTACK. A companion whose packet
+//              cannot take Stay close (party.txt) still regroups if it had a post or a focus of its own.
+//   HOLD       Distance "Stay" (design B). A post stays: it is a Stay already.
+//   CHARGE     Distance "Charge" (design B); lifts hold fire and ends the post of whoever took it.
+//   GO         `tile`: they walk there and hold it -- the post, Distance "Stay" at that tile in a fight and out of one
+//              -- the nearest of them the tile itself, the others the nearest free tiles round it (rt_squad_go_assign).
+//              A tile nobody can reach is refused: "Can't get there." Taken out on 2026-11-13, back on 2026-11-14 at
+//              his „no to jsem myslel že vrátíš“.
 //   HOLD FIRE / OPEN FIRE   (rt_squad_holds_fire) -- saved, kept till OPEN FIRE, an ATTACK or a CHARGE.
 //   HEAL ME    the one chosen, or for All the nearest that carries something to heal with, comes to him and doses him
 //              (rt_squad_heal_step). He unhurt: "You're fine."; nobody with supplies: "No meds."
@@ -21770,19 +21954,16 @@ static const char* rt_party_set_distance(Object* c, int distance)
 //              fire, and a HEAL ME on its way goes on -- he asked for that one, and it never asks the opt-out. With no
 //              medic beat at all neither could change anything: refused, why=medic-off, without a word (the mode
 //              shows no Y then).
-// GO -- a tile they walked to and held, the post, with All spread round it -- was here until 2026-11-13, when he took
-// it out: „dej pryč ovládání a přikazování companions kam mají přesně chodit … nehodí se to do této action oriented
-// verze“. It lives on, with its tests, on branch shelf/squad-orders-with-go (ad1fe7a).
 // The nearest companion that took it says so over its head; a refusal is said by the nearest one asked. True = taken
 // (the caller clicks), false = refused (it buzzes; the mode stays open). Traced as [ACTION/squad-order], design B's
-// line with `who=` at its end (B's tests read it up to `speaker=`).
+// line with `who=` and `tile=` at its end (B's tests read it up to `speaker=`).
 #if FALLOUT_RT_GAME == 2
 static const char* const rt_squad_order_names[] = {
-    "attack", "follow", "hold", "charge", "hold-fire", "open-fire", "heal-me", "no-healing", "heal-again",
+    "attack", "follow", "hold", "charge", "go", "hold-fire", "open-fire", "heal-me", "no-healing", "heal-again",
 };
 static const char* const rt_squad_order_lines[] = {
-    "On it.", "Coming.", "Holding.", "Charging!", "Holding fire.", "Weapons free.", "Hold still.", "Saving supplies.",
-    "I'll patch you up.",
+    "On it.", "Coming.", "Holding.", "Charging!", "Moving.", "Holding fire.", "Weapons free.", "Hold still.",
+    "Saving supplies.", "I'll patch you up.",
 };
 // Too few names or lines would compile and leave the last orders a NULL (the trace's %s, the floated line): the
 // COMBAT_RT_ORDER_* list and these move together.
@@ -21855,7 +22036,68 @@ static void rt_squad_set_hold_fire(Object* c, bool hold, const char* why)
 }
 #endif
 
-static bool rt_squad_command(Object* who, int order, Object* target, const char* noTarget)
+// A tile GO can send them to: on the map, on this floor, not the black past its edge, nothing standing on it.
+bool combat_rt_squad_tile_free(int tile)
+{
+    if (!rt_enabled || obj_dude == NULL || tile < 0 || !hexGridTileIsValid(tile)) {
+        return false;
+    }
+    return obj_blocking_at(NULL, tile, map_elevation) == NULL && !map_tile_is_background(tile, map_elevation);
+}
+
+#if FALLOUT_RT_GAME == 2
+// GO's tiles, one each, for list[] (see RT_SQUAD_GO_SPREAD): tiles[i] is list[i]'s, -1 = none it can reach. The one
+// nearest the GO tile gets the GO tile itself. Returns how many got one.
+static int rt_squad_go_assign(Object** list, int count, int goTile, int* tiles)
+{
+    int cand[32];
+    int candCount = rt_tiles_around(goTile, count > 1 ? RT_SQUAD_GO_SPREAD : 0, cand, 32);
+    int order[RT_SQUAD_MAX];
+    for (int i = 0; i < count; i++) {
+        order[i] = i;
+        tiles[i] = -1;
+    }
+    for (int i = 1; i < count; i++) { // nearest the GO tile first
+        int k = order[i];
+        int d = tile_dist(list[k]->tile, goTile);
+        int j = i - 1;
+        while (j >= 0 && tile_dist(list[order[j]]->tile, goTile) > d) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = k;
+    }
+    int assigned = 0;
+    for (int i = 0; i < count; i++) {
+        int k = order[i];
+        Object* c = list[k];
+        int tries = 0;
+        for (int j = 0; j < candCount && tries < RT_SQUAD_GO_TRIES; j++) {
+            int t = cand[j];
+            bool taken = t == obj_dude->tile;
+            for (int m = 0; m < count && !taken; m++) {
+                taken = tiles[m] == t;
+            }
+            if (taken || !hexGridTileIsValid(t) || map_tile_is_background(t, c->elevation)
+                || obj_blocking_at(c, t, c->elevation) != NULL) {
+                continue;
+            }
+            if (t != c->tile) {
+                tries++;
+                if (make_path(c, c->tile, t, NULL, 1) <= 0) {
+                    continue;
+                }
+            }
+            tiles[k] = t;
+            assigned++;
+            break;
+        }
+    }
+    return assigned;
+}
+#endif
+
+static bool rt_squad_command(Object* who, int order, Object* target, int tile, const char* noTarget)
 {
 #if FALLOUT_RT_GAME == 2
     if (order < 0 || order >= COMBAT_RT_ORDER_COUNT || !rt_enabled || obj_dude == NULL) {
@@ -21868,6 +22110,7 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
         RT_DIST_STAY_CLOSE, // follow
         RT_DIST_STAY, // hold
         RT_DIST_CHARGE, // charge
+        RT_DIST_NONE, // go: the post is a Stay of its own, the packet keeps its Distance (rt_party_refresh_dist)
         RT_DIST_NONE, // hold-fire
         RT_DIST_NONE, // open-fire
         RT_DIST_NONE, // heal-me
@@ -21883,19 +22126,31 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
     const char* refused = NULL;
     const char* refusalLine = NULL;
 
-    // What the order is about. ATTACK: an enemy (fighting him, or one by nature: the red outline) -- not a neutral,
-    // which an order must not start a fight with, nor one on his side.
+    // What the order is about. ATTACK: anyone alive on this floor who is not on his side -- an enemy (fighting him, or
+    // one by nature: the red outline) or a NEUTRAL (the yellow one).
+    // ⚠️ A NEUTRAL WAS REFUSED UNTIL 2026-11-14 (why=neutral: an order was not to start a fight). In Gecko's junkyard
+    // he put the squad cursor on a peaceful ghoul and "Attack" stayed grey. Asked whether ATTACK should take neutrals
+    // too -- the companions would start the fight themselves, and the whole town could turn on him -- he said „Ano, i
+    // na neutrály“. So it is taken, and the fight starts the VANILLA way: nothing here makes the target hostile. The
+    // companions go for it (rt_focus_wanted asks for a way to it, not for hostility); their first blow that reaches it
+    // -- a hit, or a miss that nothing behind it stops (a ranged miss flies on, and a wall or a passer-by on its line
+    // takes the round instead: attackCompute) -- goes through apply_damage, whose retaliation sets the target's whoHitMe
+    // to that companion; the registry reads a whoHitMe on his side as hostile (rt_refresh_registry), and its team comes
+    // in -- a fighter that sees its own attacked by the guard rule (rt_guard_danger_source), anyone else of it that sees
+    // or hears the fight by the onlooker spread. Self-played: squad-attack-neutral.
     if (order == COMBAT_RT_ORDER_ATTACK) {
         if (target == NULL || !rt_in_registry(target) || !rt_is_targetable(target)) {
             target = NULL;
             refused = noTarget != NULL ? noTarget : "no-target";
         } else if (rt_on_dudes_team(target) || isPartyMember(target)) {
             refused = "friend";
-        } else if (rt_lock_class(target) < 2) {
-            refused = "neutral";
         }
     } else {
         target = NULL;
+    }
+    if (refused == NULL && order == COMBAT_RT_ORDER_GO && !combat_rt_squad_tile_free(tile)) {
+        refused = "tile";
+        refusalLine = "Can't get there.";
     }
     if (refused == NULL && order == COMBAT_RT_ORDER_HEAL_ME
         && rt_hp_with_heal(obj_dude) >= stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS)) {
@@ -21927,6 +22182,13 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
         }
     }
 
+    // GO: a tile each, or nobody can get there.
+    int goTiles[RT_SQUAD_MAX];
+    if (refused == NULL && order == COMBAT_RT_ORDER_GO && rt_squad_go_assign(list, count, tile, goTiles) == 0) {
+        refused = "no-route";
+        refusalLine = "Can't get there.";
+    }
+
     int taken = 0;
     int skipped = 0;
     Object* speaker = NULL;
@@ -21937,14 +22199,15 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
             Object* c = list[i];
             RtActor* a = rt_actor_of(c);
             RtSquadOrder* o = rt_squad_order_find(c);
+            bool posted = o != NULL && o->postTile >= 0;
             bool ownFocus = o != NULL && o->focus != NULL;
             const char* skip = NULL;
 
             if (distances[order] != RT_DIST_NONE) {
                 skip = rt_party_set_distance(c, distances[order]);
                 // FOLLOW is the regroup as well as Stay close: one whose packet cannot take Stay close (Goris, Marcus)
-                // still comes off its own focus -- it keeps its Distance.
-                if (skip != NULL && order == COMBAT_RT_ORDER_FOLLOW && ownFocus) {
+                // still comes off its post and its own focus -- it keeps its Distance.
+                if (skip != NULL && order == COMBAT_RT_ORDER_FOLLOW && (posted || ownFocus)) {
                     trace_event(TRACE_ACTION, "squad-order-keep", "order=%s id=%d pid=%d why=%s part=distance t=%.2f",
                         name, c->id, c->pid, skip, rt_clock);
                     skip = NULL;
@@ -21957,6 +22220,9 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
             if (skip == NULL && order == COMBAT_RT_ORDER_NO_HEALING && combat_rt_medic_treats_player(c)
                 && rt_medic_optout_count >= RT_MEDIC_OPTOUT_MAX) {
                 skip = "full";
+            }
+            if (skip == NULL && order == COMBAT_RT_ORDER_GO && goTiles[i] < 0) {
+                skip = "no-route";
             }
             if (order == COMBAT_RT_ORDER_HEAL_ME && c != healer) {
                 continue; // one heals; the others are not asked, nor counted skipped
@@ -21971,6 +22237,7 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
             switch (order) {
             case COMBAT_RT_ORDER_ATTACK:
                 rt_squad_set_hold_fire(c, false, "attack");
+                rt_squad_post_end(o, "attack");
                 if (who != NULL) {
                     o = rt_squad_order_get(c);
                     if (o != NULL) {
@@ -21993,6 +22260,7 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
                 }
                 break;
             case COMBAT_RT_ORDER_FOLLOW:
+                rt_squad_post_end(o, "follow");
                 rt_focus_own_clear(o, "follow");
                 if (o != NULL) {
                     // One told to follow alone ignores the squad's focus till its next ATTACK: the focus outranks
@@ -22009,16 +22277,36 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
                 }
                 break;
             case COMBAT_RT_ORDER_HOLD:
-                // "They stay where they are": in a fight any walk it is on is cut (rt_party_take_order).
+                // "They stay where they are": in a fight any walk it is on is cut (rt_party_take_order). On its way to
+                // a post it keeps walking: a post is a Stay already (cutting the leg would snap the body to its tile
+                // and walk it on).
                 if (a != NULL) {
-                    rt_party_take_order(a, c, true);
+                    rt_party_take_order(a, c, !posted);
                 }
                 break;
             case COMBAT_RT_ORDER_CHARGE:
                 rt_squad_set_hold_fire(c, false, "charge");
+                rt_squad_post_end(o, "charge");
                 if (a != NULL) {
                     rt_party_take_order(a, c, false);
                 }
+                break;
+            case COMBAT_RT_ORDER_GO:
+                if (a != NULL) {
+                    rt_party_take_order(a, c, true);
+                    if (a->state != RT_IDLE) {
+                        // Off whatever it was fighting: on its way it fights nobody, at its post it fights as Stay.
+                        a->state = RT_IDLE;
+                        a->target = NULL;
+                        a->weapon_checked = false;
+                        a->plan_valid = false;
+                        a->no_path_since = -1.0f;
+                        a->unperceived_since = -1.0f;
+                    }
+                }
+                rt_squad_cut_walk(a, c, "go"); // out of a fight too: its script's follow
+                rt_squad_heal_end(o, "go");
+                rt_squad_post_set(c, goTiles[i], who != NULL ? "go" : "go-all");
                 break;
             case COMBAT_RT_ORDER_HOLD_FIRE:
                 rt_squad_set_hold_fire(c, true, "order");
@@ -22079,8 +22367,16 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
             }
         }
         if (taken == 0) {
-            // Every one skipped: party.txt refused them the Distance, or NO HEALING found the opt-out list full.
-            refused = skipped > 0 ? (order == COMBAT_RT_ORDER_NO_HEALING ? "full" : "unsupported") : "no-companions";
+            // Every one skipped: party.txt refused them the Distance, GO found no way to a tile for any, or NO HEALING
+            // found the opt-out list full.
+            if (skipped == 0) {
+                refused = "no-companions";
+            } else if (order == COMBAT_RT_ORDER_GO) {
+                refused = "no-route";
+                refusalLine = "Can't get there.";
+            } else {
+                refused = order == COMBAT_RT_ORDER_NO_HEALING ? "full" : "unsupported";
+            }
         }
     }
 
@@ -22116,14 +22412,16 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
     }
     char whoText[16];
     rt_squad_who_text(who, whoText, sizeof(whoText));
-    trace_event(TRACE_ACTION, "squad-order", "order=%s target=%s companions=%d skipped=%d why=%s speaker=%d t=%.2f who=%s",
+    trace_event(TRACE_ACTION, "squad-order", "order=%s target=%s companions=%d skipped=%d why=%s speaker=%d t=%.2f who=%s tile=%d",
         name, targetText, refused == NULL ? taken : 0, skipped, refused != NULL ? refused : "ok",
-        refused == NULL && speaker != NULL ? speaker->id : -1, rt_clock, whoText);
+        refused == NULL && speaker != NULL ? speaker->id : -1, rt_clock, whoText,
+        order == COMBAT_RT_ORDER_GO ? tile : -1);
     return refused == NULL;
 #else
     (void)who; // Fallout 1 has no COMBAT CONTROL to order with
     (void)order;
     (void)target;
+    (void)tile;
     (void)noTarget;
     return false;
 #endif
@@ -22132,12 +22430,12 @@ static bool rt_squad_command(Object* who, int order, Object* target, const char*
 // Design B's LT + D-pad: every companion, ATTACK on the LT lock.
 bool combat_rt_squad_order(int order)
 {
-    return rt_squad_command(NULL, order, order == COMBAT_RT_ORDER_ATTACK ? rt_lock_target : NULL, "no-lock");
+    return rt_squad_command(NULL, order, order == COMBAT_RT_ORDER_ATTACK ? rt_lock_target : NULL, -1, "no-lock");
 }
 
-bool combat_rt_squad_command(Object* who, int order, Object* target)
+bool combat_rt_squad_command(Object* who, int order, Object* target, int tile)
 {
-    return rt_squad_command(who, order, target, NULL);
+    return rt_squad_command(who, order, target, tile, NULL);
 }
 
 // --- SQUAD COMMAND: WHAT THE MODE ASKS (gamepad_ui.cc; see combat_rt.h) -------------------------------------------
@@ -22212,9 +22510,23 @@ int combat_rt_squad_kind(Object* obj)
     if (isPartyMember(obj)) {
         return COMBAT_RT_SQUAD_KIND_COMPANION;
     }
-    // design B's ATTACK rule: on this floor, alive, not on his side, and an enemy -- fighting him, or one by nature
-    if (rt_in_registry(obj) && rt_is_targetable(obj) && !rt_on_dudes_team(obj) && rt_lock_class(obj) == 2) {
-        return COMBAT_RT_SQUAD_KIND_ENEMY;
+    // ATTACK's rule (rt_squad_command): on this floor, alive, not on his side. An enemy -- fighting him, or one by
+    // nature: the LT lock's red -- else a neutral, the lock's yellow (rt_aim_outline_type_for), which ATTACK takes
+    // since 2026-11-14 („Ano, i na neutrály“). Fallout 1 has no squad: a neutral stays NONE there.
+    // ⚠️ A NEUTRAL ONLY WHERE THE LOCK WOULD PAINT IT YELLOW (review 2026-11-14): in his sight, or the one he is locked
+    // on -- rt_aim_outlines_update's own rule, his pick of 2026-10-15 for what he can see. The cursor takes a sprite's
+    // box (gamepad_ui.cc), and the box takes whoever a roof or a wall hides: self-played on Klamath's brick building,
+    // the cursor on its wall put a yellow ATTACK over a ghoul inside the player never saw, one A from a fight with its
+    // team (screen-squad-roof). An enemy keeps the old rule, no sight asked: it fights him, or will (by nature).
+    if (rt_in_registry(obj) && rt_is_targetable(obj) && !rt_on_dudes_team(obj)) {
+        if (rt_lock_class(obj) == 2) {
+            return COMBAT_RT_SQUAD_KIND_ENEMY;
+        }
+#if FALLOUT_RT_GAME == 2
+        if (obj == rt_lock_target || rt_lock_in_sight(obj)) {
+            return COMBAT_RT_SQUAD_KIND_NEUTRAL;
+        }
+#endif
     }
     return COMBAT_RT_SQUAD_KIND_NONE;
 }
@@ -22250,6 +22562,33 @@ Object* combat_rt_squad_healer(Object* who, const char** why)
     (void)who;
 #endif
     return NULL;
+}
+
+bool combat_rt_squad_can_reach(Object* who, int tile)
+{
+#if FALLOUT_RT_GAME == 2
+    if (!combat_rt_squad_tile_free(tile)) {
+        return false;
+    }
+    if (who == rt_squad_reach_who && tile == rt_squad_reach_tile && obj_dude->tile == rt_squad_reach_from) {
+        return rt_squad_reach_answer;
+    }
+    Object* list[RT_SQUAD_MAX];
+    int count = rt_squad_who_list(who, list, RT_SQUAD_MAX);
+    bool reach = false;
+    for (int i = 0; i < count && i < RT_SQUAD_GO_TRIES && !reach; i++) {
+        reach = list[i]->tile == tile || make_path(list[i], list[i]->tile, tile, NULL, 1) > 0;
+    }
+    rt_squad_reach_who = who;
+    rt_squad_reach_tile = tile;
+    rt_squad_reach_from = obj_dude->tile;
+    rt_squad_reach_answer = reach;
+    return reach;
+#else
+    (void)who;
+    (void)tile;
+    return false;
+#endif
 }
 
 int combat_rt_squad_weapons(Object* c, Object** out, int max)
@@ -22323,7 +22662,7 @@ bool combat_rt_squad_set_weapon(Object* c, Object* item)
             a->plan_valid = false;
         }
         trace_event(TRACE_FLOW, "squad-weapon", "auto id=%d pid=%d was=%d t=%.2f", c->id, c->pid, was, rt_clock);
-        trace_event(TRACE_ACTION, "squad-order", "order=weapon target=auto companions=1 skipped=0 why=ok speaker=%d t=%.2f who=%s",
+        trace_event(TRACE_ACTION, "squad-order", "order=weapon target=auto companions=1 skipped=0 why=ok speaker=%d t=%.2f who=%s tile=-1",
             c->id, rt_clock, whoText);
         rt_squad_say(c, "Got it.");
         return true;
@@ -22348,7 +22687,7 @@ bool combat_rt_squad_set_weapon(Object* c, Object* item)
         refused = "full";
     }
     if (refused != NULL) {
-        trace_event(TRACE_ACTION, "squad-order", "order=weapon target=%d companions=0 skipped=0 why=%s speaker=-1 t=%.2f who=%s",
+        trace_event(TRACE_ACTION, "squad-order", "order=weapon target=%d companions=0 skipped=0 why=%s speaker=-1 t=%.2f who=%s tile=-1",
             item->pid, refused, rt_clock, whoText);
         if (strcmp(refused, "dry") == 0) {
             rt_squad_say(c, "Out of ammo.");
@@ -22367,7 +22706,7 @@ bool combat_rt_squad_set_weapon(Object* c, Object* item)
     }
     trace_event(TRACE_FLOW, "squad-weapon", "pin id=%d pid=%d wpn=%d was=%d hand=%d t=%.2f", c->id, c->pid, item->pid, was,
         inven_right_hand(c) != NULL ? inven_right_hand(c)->pid : -1, rt_clock);
-    trace_event(TRACE_ACTION, "squad-order", "order=weapon target=%d companions=1 skipped=0 why=ok speaker=%d t=%.2f who=%s",
+    trace_event(TRACE_ACTION, "squad-order", "order=weapon target=%d companions=1 skipped=0 why=ok speaker=%d t=%.2f who=%s tile=-1",
         item->pid, c->id, rt_clock, whoText);
     rt_squad_say(c, "Got it.");
     return true;
@@ -22393,6 +22732,11 @@ void combat_rt_squad_forget_weapon(Object* c, const char* why)
     p->weaponLapsed = false;
     p->weaponHopeless = false;
     rt_squad_pref_tidy(c->id);
+}
+
+int combat_rt_squad_post_of(Object* c)
+{
+    return rt_squad_post_tile(c);
 }
 
 Object* combat_rt_squad_focus_of(Object* c)
@@ -22563,6 +22907,9 @@ void combat_rt_squad_mode_set_open(bool open, const char* why)
             why != NULL ? why : "-", RT_SQUAD_SLOW_SECONDS, rt_squad_slow_probe != NULL ? rt_squad_slow_probe->id : -1,
             rt_squad_slow_probe != NULL ? rt_squad_slow_probe->pid : -1, rt_clock);
     }
+    // The cursor's reach answer belongs to one opening (the companions move between two).
+    rt_squad_reach_who = NULL;
+    rt_squad_reach_tile = -1;
 }
 
 bool combat_rt_squad_mode_is_open()
@@ -25801,8 +26148,8 @@ void combat_rt_notify_critter_removed(Object* removed)
     if (rt_squad_focus == removed) {
         rt_focus_clear("gone"); // the chevron is erased by its tick, from its own tile and offset
     }
-    // SQUAD COMMAND: a companion's own focus on it, the companion's own orders if it is the one going, its chevron and
-    // the mode's own pointers (combat_rt_set_squad_mode_hooks).
+    // SQUAD COMMAND: a companion's own focus on it, the companion's own orders if it is the one going, its chevron,
+    // the mode's own pointers (combat_rt_set_squad_mode_hooks) and the cursor's reach answer.
     for (int i = 0; i < rt_squad_order_count;) {
         RtSquadOrder* o = &rt_squad_orders[i];
         if (o->focus == removed) {
@@ -25812,6 +26159,7 @@ void combat_rt_notify_critter_removed(Object* removed)
             o->fireRefused = NULL;
         }
         if (o->obj == removed) {
+            rt_squad_post_end(o, "gone");
             rt_squad_heal_end(o, "gone");
             rt_focus_own_clear(o, "companion-gone");
             rt_squad_orders[i] = rt_squad_orders[--rt_squad_order_count];
@@ -25820,6 +26168,10 @@ void combat_rt_notify_critter_removed(Object* removed)
         i++;
     }
     rt_squad_mark_forget(removed);
+    if (rt_squad_reach_who == removed) {
+        rt_squad_reach_who = NULL;
+        rt_squad_reach_tile = -1;
+    }
     if (rt_squad_slow_probe == removed) {
         rt_squad_slow_probe = NULL;
     }

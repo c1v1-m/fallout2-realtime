@@ -1,0 +1,52 @@
+# SCREEN: NO ATTACK ON A NEUTRAL HE CANNOT SEE (2026-11-14). Since ATTACK takes a neutral (his „Ano, i na neutrály“)
+# the cursor's box took a ghoul a roof and a wall hid and put a yellow ATTACK on the wall over it -- one A from a fight
+# with somebody the player never saw. A neutral is NEUTRAL now only where the LT lock would paint it yellow: in his
+# sight, or the one he is locked on (combat_rt_squad_kind; the outlines' own rule, his pick of 2026-10-15).
+# Klamath downtown, emptied: the dude on the sidewalk at the brick building's west corner, facing it; Vic beside him; a
+# ghoul (the pid of his Gecko ghoul), neutral, inside the building, 3 tiles ahead -- where the mode's cursor starts
+# with no lock (nobody is in sight to lock). Shots (the screen's 853x480):
+#   1 the mode on the hidden ghoul: grey brackets round its box, no word, the compass's "Attack" grey (a yellow ATTACK
+#     on the wall before)
+#   2 A there buzzed and the mode stayed; the right stick took the cursor onto the dude and Vic on the sidewalk
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-roof.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-squad-roof
+map KLADWTWN.MAP
+seed 1
+duration 8
+cleararea 300
+dude tile 23090 rot 1
+dude hp 400
+dude armor 2
+
+spawn 16777278 23290 rot 1 wield 8 party
+spawn 16777375 23487 rot 4
+
+# LT down (nobody in sight to lock), A = the mode, the cursor 3 tiles ahead: on the ghoul inside; LT up
+axis 600 LT 32767
+tap 800 A
+axis 1100 LT -32768
+shot 2600
+# A on the hidden ghoul: no order there, the buzz, the mode stays
+tap 3000 A
+# the cursor onto the dude and Vic (about 522,190 -> 440,170)
+axis 3400 RX -19100
+axis 3400 RY -4660
+axis 3802 RX 0
+axis 3802 RY 0
+shot 4300
+tap 4700 B
+note 6500 end
+
+# the checks (run.js)
+expect \[FLOW/autotest-spawn\] id=\d+ pid=16777375 tile=23487 wield=-1 hostile=0 team=[1-9]\d*
+# nobody in sight: no lock, the cursor starts ahead -- on the hidden ghoul, which is no target
+expect-not \[ACTION/lock-on\]
+expect \[INPUT/squad-mode\] open members=1 start=ahead x=\d+ y=\d+ tile=23487 kind=none
+expect \[INPUT/squad-cursor\] on kind=none ok=0 obj=\d+ pid=16777375 tile=23487
+expect \[INPUT/squad-a\] kind=none order=- obj=\d+ tile=23487 who=all ok=0
+# off it, the pick takes who stands outside
+expect \[INPUT/squad-cursor\] on kind=(dude|companion) ok=\d obj=\d+
+expect \[INPUT/squad-mode\] close why=b
+# never a neutral, and no order of any kind
+expect-not \[INPUT/squad-cursor\] on kind=neutral
+expect-not \[ACTION/squad-order\]

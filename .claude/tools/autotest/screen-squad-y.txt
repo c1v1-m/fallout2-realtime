@@ -1,7 +1,8 @@
 # SCREEN: Y IN THE SQUAD COMMAND MODE (2026-11-13, his pick when GO went: the LT + A mode stays without GO, and Y in it
 # switches their healing of him -- his preview „A Heal me   X Hold fire   Y No healing   B Back“, after a press
-# „Y Heal me again“). screen-squad-mode's setup: Vic (10mm pistol, stimpaks) 4 tiles left of the dude, Sulik (knife)
-# right below him, the dude hurt (200 of 400), no enemy. Shots (the screen's 853x480):
+# „Y Heal me again“; GO came back on 2026-11-14 and Y stays: the mode opens on free ground, GO's now).
+# screen-squad-mode's setup: Vic (10mm pistol, stimpaks) 4 tiles left of the dude, Sulik (knife) right below him, the
+# dude hurt (200 of 400), no enemy. Shots (the screen's 853x480):
 #   1 LT + A, the cursor on the dude: HEAL ME green, the line from Vic, the legend his preview
 #     "LB RB All  A Heal me  X Hold fire  Y No healing  B Back"
 #   2 Y: NO HEALING to All -- given, so the mode closes, as X's order does; "Saving supplies." over Vic, the one with
@@ -50,7 +51,7 @@ shot 8500
 note 10000 end
 
 # the checks (run.js)
-expect-count 2 \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=none
+expect-count 2 \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=ground
 expect-count 2 \[INPUT/squad-cursor\] on kind=dude ok=1
 expect \[INPUT/squad-y\] order=no-healing who=all ok=1
 expect \[ACTION/squad-order\] order=no-healing target=- companions=2 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all

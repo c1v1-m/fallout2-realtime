@@ -1,0 +1,64 @@
+# SQUAD ORDERS ON A NEUTRAL (2026-11-14, his „Ano, i na neutrály“). In Gecko's junkyard (GECKJUNK) he put the squad
+# cursor on a peaceful ghoul and "Attack" stayed grey: the order was refused, why=neutral. ATTACK takes a neutral now,
+# and the companions start the fight THE VANILLA WAY -- the order makes nobody hostile (squad-focus hostile=0): Vic
+# goes for it, his first blow that reaches it sets its whoHitMe to him (apply_damage's retaliation, which asks for no
+# hit: a miss does it too when nothing behind stops the round -- open desert here; in a town a wall or a passer-by on
+# its line may take it), the registry reads that as hostile (newhostile whoParty=1), and its team comes in -- a
+# fighter by the guard rule (guard-join: it saw its own attacked; the ghouls' packet is a brawler's), anyone else of it
+# who sees or hears the fight by the onlooker spread (aggro-spread).
+# Vic (10mm pistol, his own Stay close) stands left of the dude. Two ghouls of one team -- the pid of his Gecko ghoul,
+# team 1 of its own -- stand 8 and 10 tiles in front of the dude, neutral; a knife raider of another team stands
+# 9 tiles behind him, neutral too. Both ways of ordering it:
+#   1 design B: LT locks the nearer ghoul (nobody fights him, so the neutral in front), Up makes it the squad's focus.
+#     Vic takes it and shoots; it turns on him, and the other ghoul, seeing it, joins against him.
+#   2 the squad command's ATTACK to one (the harness's `squad` step, as the mode gives it): at 9 s the raider becomes
+#     Vic's own focus; he turns on it and his first shot turns it on him -- it was nobody's enemy till then.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-attack-neutral.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-attack-neutral
+map DESERT1.MAP
+seed 1
+duration 18
+dude tile 20100 rot 2
+dude stat PE 10
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party
+spawn 16777375 21700 rot 5
+spawn 16777375 22100 rot 5
+spawn 16777455 18500 rot 2 wield 4 team 51 hp 40
+
+# 1. LT down (locks the nearer ghoul), Up = ATTACK for All, LT up (the lock goes; the focus stays)
+axis 600 LT 32767
+tap 800 UP
+axis 1200 LT -32768
+# 2. ATTACK to Vic alone: the raider behind the dude
+squad 9000 attack 16777278 16777455
+note 17000 end
+
+# the checks (run.js)
+# nobody here is anyone's enemy at the start
+expect \[FLOW/autotest-spawn\] id=\d+ pid=16777375 tile=21700 wield=-1 hostile=0 team=[1-9]\d*
+expect \[FLOW/autotest-spawn\] id=\d+ pid=16777455 tile=18500 wield=4 hostile=0 team=51
+expect \[ACTION/lock-on\] target=\d+ src=LT
+# 1. taken, on a neutral: the focus, its chevron, and Vic on it
+expect \[ACTION/squad-order\] order=attack target=16777375 companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
+expect \[FLOW/squad-focus\] on id=\d+ pid=16777375 tile=\d+ hostile=0
+expect \[FLOW/squad-mark\] on id=\d+ pid=16777375
+expect \[FLOW/squad-focus\] take id=18062 pid=16777278 tgt=\d+ tgtPid=16777375
+expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777375
+# ...and the fight starts the vanilla way: his blow turns it on him, its team-mate joins (by the guard rule or the
+# onlooker spread), and it is hit
+expect \[FLOW/newhostile\] pid=16777375 whoDude=0 whoParty=1
+expect \[FLOW/(guard-join\] id=\d+ pid=16777375 aggr=\d+ threat=18062 |aggro-spread\] onlooker=\d+\(pid=16777375\) <- anchor=)
+expect \[COMBAT/hit\] att=18062 attPid=16777278 def=\d+ defPid=16777375 hit=1
+# 2. taken, on a neutral, for one: his own focus, and the raider turns on him
+expect \[FLOW/autotest\] squad t=\d+ order=attack who=16777278 whoId=18062 arg=16777455 ok=1
+expect \[ACTION/squad-order\] order=attack target=16777455 companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=18062
+expect \[FLOW/squad-focus\] own-on who=18062 id=\d+ pid=16777455 tile=\d+ hostile=0
+expect \[FLOW/squad-focus\] take id=18062 pid=16777278 tgt=\d+ tgtPid=16777455
+expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777455
+expect \[FLOW/newhostile\] pid=16777455 whoDude=0 whoParty=1
+# no refusal of a neutral is left, and the dude himself fired at nobody
+expect-not \[ACTION/squad-order\] .*why=neutral
+expect-not \[COMBAT/attack\] DUDE

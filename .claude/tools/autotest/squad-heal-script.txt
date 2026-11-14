@@ -2,8 +2,8 @@
 # DCVic.int (scripts.lst line 50), whose follow walks him back to the dude once he is more than 9 tiles off and clears
 # his walk (reg_anim_func CLEAR). He stands 12 tiles off, the dude is hurt. HEAL ME: on his way his heartbeat runs with
 # GVAR_PARTY_NO_FOLLOW set (combat_rt_party_follow_held, squad-follow-held heal=1), so his script neither cuts nor
-# redoes the walk, and he doses the dude. Until 2026-11-13 GO's post was the other user of that switch (squad-pad-go,
-# on the branch shelf/squad-orders-with-go); this is the test the switch kept.
+# redoes the walk, and he doses the dude. GO's post is the other user of that switch (squad-pad-go; GO went on
+# 2026-11-13 and came back on 2026-11-14); this is the HEAL ME half.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-heal-script.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-heal-script
 map DESERT1.MAP

@@ -1,0 +1,29 @@
+# SQUAD COMMAND (2026-11-12, his design "A"): GO to All -- one post each round the tile -- then FOLLOW ends the posts.
+# Vic (4 tiles from 20108) and Sulik (8 tiles from it). GO 20108 for All: the nearest to it, Vic, gets the tile itself,
+# Sulik the nearest free tile round it (RT_SQUAD_GO_SPREAD, ring 1 of 20108). Both walk there and arrive. At 7 s FOLLOW
+# for All -- the regroup -- ends both posts (why=follow), and their Distance is back (Stay close).
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-go-all.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-go-all
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party
+spawn 16777313 20300 rot 4 wield 4 party
+
+squad 500 go all 20108
+squad 7000 follow all
+note 11000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=go target=- companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all tile=20108
+expect \[FLOW/squad-post\] set id=\d+ pid=16777278 tile=20108 from=19904 dist=4 why=go-all
+expect \[FLOW/squad-post\] set id=\d+ pid=16777313 tile=(20107|20307|20308|20309|20109|19908) from=20300
+expect \[FLOW/squad-post\] arrive id=\d+ pid=16777278 tile=20108
+expect \[FLOW/squad-post\] arrive id=\d+ pid=16777313 tile=(20107|20307|20308|20309|20109|19908)
+expect \[ACTION/squad-order\] order=follow target=- companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all tile=-1
+expect-count 2 \[FLOW/squad-post\] end id=\d+ pid=(16777278|16777313) tile=\d+ held=[\d.]+ why=follow
+expect \[FLOW/party-distance\] id=\d+ pid=16777313 dist=stay-close was=stay

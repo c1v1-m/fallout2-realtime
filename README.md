@@ -22,7 +22,7 @@ You need your own copy of Fallout 2 from [Steam](https://store.steampowered.com/
 - A stimpack heals over the next few seconds in a fight, so hits still hurt while it works. Hold the button and you inject one after another.
 - The whole game plays on a gamepad: fighting, looting, barter, dialogue, the Pip-Boy, the character screen and your followers' combat settings. The interface bar shows the pad's buttons, the action icon carries an A, and arrows on it mark when the D-pad has more to offer.
 - Two quick slots beside the interface bar: LB for a stimpack or any drug or tool, RB for a grenade. Radial menus for skills, weapons, ammo and drugs.
-- Squad orders on LT + D-pad: your followers go for the enemy you aim at, follow you, hold their ground or charge. LT + A slows the world to a stop and opens the squad command: pick who with LB and RB, then send them at an enemy or to heal you, give one a weapon, tell them to hold fire, or switch off their healing of you with Y. In a fight they keep to the Distance from their combat settings.
+- Squad orders on LT + D-pad: your followers go for whoever you aim at, follow you, hold their ground or charge. Point them at someone peaceful and they start the fight. LT + A slows the world to a stop and opens the squad command: pick who with LB and RB, then send them to a spot to hold it, at anyone not on your side or to heal you, give one a weapon, tell them to hold fire, or switch off their healing of you with Y. In a fight they keep to the Distance from their combat settings.
 - Autosaves when you go to another map or a quest moves on, and a quick save on the controller.
 - On the Steam Deck it starts straight from the Steam library, in Game Mode.
 - Widescreen at the original scale, smooth movement and VSync.

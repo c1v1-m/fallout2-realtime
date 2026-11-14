@@ -1,0 +1,52 @@
+# SCREEN: ATTACK ON A NEUTRAL IN THE SQUAD COMMAND MODE (2026-11-14, his „Ano, i na neutrály“). In Gecko's junkyard
+# the cursor on a peaceful ghoul left the compass's "Attack" grey and A buzzed; now a neutral takes ATTACK as an enemy
+# does, in the yellow the LT lock gives a neutral (red stays an enemy's). Vic (10mm pistol) 4 tiles left of the dude,
+# Sulik (knife) right below him; a ghoul (the pid of his Gecko ghoul), neutral, 8 tiles in front. LT locks it (nobody
+# fights him: the neutral in front), A opens the mode with the cursor on it. Shots (the screen's 853x480):
+#   1 after the hold: ATTACK in YELLOW over the ghoul, yellow corner brackets round it, the dotted lines from Vic and
+#     Sulik (who = All), the compass's "Attack" white, the legend "LB RB All  A Attack  X Hold fire  Y No healing  B Back"
+#   2 A: ATTACK to All -- given, the mode closes; "On it." over the nearest, the red chevron over the ghoul (the focus)
+#   3 the fight their order started: the ghoul turned on them
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-neutral.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-squad-neutral
+map DESERT1.MAP
+seed 1
+duration 10
+dude tile 20100 rot 2
+dude stat PE 10
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party
+spawn 16777313 20302 rot 4 wield 4 party
+spawn 16777375 21700 rot 5
+
+# LT down (locks the ghoul), A = the mode with the cursor on it; LT up -- the mode stays; the world holds from ~2.3 s
+axis 600 LT 32767
+tap 800 A
+axis 1100 LT -32768
+shot 2600
+# A: ATTACK to All, the mode closes
+tap 3000 A
+shot 3400
+shot 6500
+note 9000 end
+
+# the checks (run.js)
+expect \[FLOW/autotest-spawn\] id=\d+ pid=16777375 tile=21700 wield=-1 hostile=0 team=[1-9]\d*
+expect \[ACTION/lock-on\] target=\d+ src=LT
+expect \[INPUT/squad-mode\] open members=2 start=lock x=\d+ y=\d+ tile=\d+ kind=neutral
+expect \[INPUT/squad-cursor\] on kind=neutral ok=1 obj=\d+ pid=16777375
+expect \[INPUT/squad-a\] kind=neutral order=attack obj=\d+ tile=\d+ who=all ok=1
+expect \[ACTION/squad-order\] order=attack target=16777375 companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
+expect \[FLOW/squad-focus\] on id=\d+ pid=16777375 tile=\d+ hostile=0
+expect \[FLOW/squad-mark\] on id=\d+ pid=16777375
+expect \[INPUT/squad-mode\] close why=a
+expect \[FLOW/squad-mode\] close why=a slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+# the order made it nobody's enemy; their blow did
+expect \[FLOW/newhostile\] pid=16777375 whoDude=0 whoParty=1
+# the A was the mode's both times: no interaction, no attack of the dude's own; no refusal of a neutral
+expect-not \[ACTION/interact-(queue|do)\]
+expect-not \[COMBAT/attack\] DUDE
+expect-not \[ACTION/squad-order\] .*why=neutral
+expect-not \[INPUT/squad-a\] kind=neutral .*ok=0

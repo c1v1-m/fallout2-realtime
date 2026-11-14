@@ -67,12 +67,13 @@ bool combat_rt_death_anim_pending();
 bool combat_rt_is_engaging(Object* obj);
 
 // SQUAD ORDERS (Fallout 2 Realtime, 2026-11-11): LT held + a D-pad tap orders every companion at once (gamepad_ui.cc).
-// ATTACK = the LT-locked enemy is the squad's focus, attacked first while it lives; FOLLOW / HOLD / CHARGE = COMBAT
-// CONTROL's Distance "Stay close" / "Stay" / "Charge", written as the dialogue's panel writes it (saved, shown there).
+// ATTACK = the LT-locked target -- an enemy, or since 2026-11-14 a neutral, whose fight they then start -- is the
+// squad's focus, attacked first while it lives; FOLLOW / HOLD / CHARGE = COMBAT CONTROL's Distance "Stay close" /
+// "Stay" / "Charge", written as the dialogue's panel writes it (saved, shown there).
 // The realtime fight keeps to every Distance from now on. True when a companion took the order (the nearest says so
 // over its head); false = refused, no lock or nobody who can take it -- the caller buzzes. Fallout 1: always false.
-// Since design A it is combat_rt_squad_command(NULL, order, <the LT lock for ATTACK>): the order names below. No order
-// NUMBER is saved anywhere (RTSQ keeps hold fire and the weapon pid, the traces print the names), so the list may
+// Since design A it is combat_rt_squad_command(NULL, order, <the LT lock for ATTACK>, -1): the order names below. No
+// order NUMBER is saved anywhere (RTSQ keeps hold fire and the weapon pid, the traces print the names), so the list may
 // change, but every table indexed by it must follow: combat_rt.cc's three assert their length, gamepad_ui.cc's
 // gpui_squad_order_name keeps its own copy of the names.
 enum {
@@ -80,6 +81,7 @@ enum {
     COMBAT_RT_ORDER_FOLLOW, // design B, Down
     COMBAT_RT_ORDER_HOLD, // design B, Left
     COMBAT_RT_ORDER_CHARGE, // design B, Right
+    COMBAT_RT_ORDER_GO, // design A: walk to a tile and hold it (the post)
     COMBAT_RT_ORDER_HOLD_FIRE, // design A: start no attack
     COMBAT_RT_ORDER_OPEN_FIRE, // design A: hold fire lifted
     COMBAT_RT_ORDER_HEAL_ME, // design A: come and dose the dude
@@ -91,31 +93,40 @@ bool combat_rt_squad_order(int order);
 
 // --- SQUAD COMMAND (Fallout 2 Realtime, 2026-11-12, his design "A": „přidej nestřílej a vyléčit mě, změň zbraň, můžu
 // mu i říkat kam má jít?“). LT + A opens the squad command mode (gamepad_ui.cc); everything it orders lands here.
-// Its last part, GO -- a tile they walked to and held, the post -- was TAKEN OUT again on 2026-11-13, his „dej pryč
-// ovládání a přikazování companions kam mají přesně chodit … nehodí se to do této action oriented verze“; his picks
-// then: the mode stays without it, and Y in it switches their healing of him (NO HEALING / HEAL AGAIN).
+// GO -- a tile they walk to and hold, the post -- was taken out on 2026-11-13 („nehodí se to do této action oriented
+// verze“; Y's healing switch, NO HEALING / HEAL AGAIN, came in then and stays) and came back on 2026-11-14, his „no to
+// jsem myslel že vrátíš“.
 // `who` everywhere: NULL = every companion on the dude's map and floor, alive and not knocked out ("All"), else that
 // one party member. Nothing here draws or plays a sound -- the mode clicks on true and buzzes on false. Every order
 // floats one line over the nearest companion of `who` that took it ("On it.", "Coming.", "Holding.", "Charging!",
-// "Holding fire.", "Weapons free.", "Hold still.", "Saving supplies.", "I'll patch you up.", "Got it."), a refusal with
-// words to it over the nearest one asked ("No meds.", "You're fine.", "Out of ammo."; "Can't reach you." comes later,
-// from a HEAL ME that gives up). Traced as [ACTION/squad-order] order= target= companions= skipped= why= speaker= t=
-// who=. Fallout 1: every order false, every query empty.
+// "Moving.", "Holding fire.", "Weapons free.", "Hold still.", "Saving supplies.", "I'll patch you up.", "Got it."), a
+// refusal with words to it over the nearest one asked ("No meds.", "You're fine.", "Can't get there.", "Out of
+// ammo."; "Can't reach you." comes later, from a HEAL ME that gives up). Traced as [ACTION/squad-order] order= target=
+// companions= skipped= why= speaker= t= who= tile=. Fallout 1: every order false, every query empty.
 //
 // Hold fire and the weapon pick are SAVED (the realtime chunk's RTSQ section, by object id) and kept across maps, and
-// so is NO HEALING (it is the dialogue's opt-out, saved in the chunk's own list); every focus and a HEAL ME on its way
-// end with a map change or a load. A load or a new game resets all of it before the save's own are read.
+// so is NO HEALING (it is the dialogue's opt-out, saved in the chunk's own list); the posts, every focus and a HEAL ME
+// on its way end with a map change or a load. A load or a new game resets all of it before the save's own are read.
 
 // The order to `who`. Returns true when at least one companion took it.
-//   ATTACK     `target` must be an enemy (combat_rt_squad_kind == ENEMY): NULL / dead / gone -> false why=no-target,
-//              his side -> why=friend, a neutral -> why=neutral. For All it becomes the squad's focus (design B: a
-//              red chevron over it, everyone's own focus cleared); for one, that one's own focus (a chevron too). Lifts
-//              hold fire.
-//   FOLLOW     Distance "Stay close" (design B) plus the regroup: own foci end; for All the squad's focus too; for
-//              one, it ignores the squad's focus till its next ATTACK.
-//   HOLD       Distance "Stay" (design B).
-//   CHARGE     Distance "Charge" (design B); lifts hold fire. party.txt-refused ones are skipped (Vic will not
-//              charge): skipped=, and false when nobody could.
+//   ATTACK     `target` must be an enemy or a neutral, alive on this floor and not on his side (the mode offers it where
+//              combat_rt_squad_kind says ENEMY or NEUTRAL -- a neutral only in his sight): NULL / dead / gone ->
+//              false why=no-target, his side -> why=friend. A neutral is taken since 2026-11-14 (his „Ano, i na
+//              neutrály“), and the order does not make it hostile: the companions go for it, and their first blow that
+//              reaches it (a hit, or a miss with nothing behind it to take the round) turns it and its team on them, by
+//              vanilla's retaliation. For All it becomes the squad's focus (design B: a red chevron over it, everyone's
+//              own focus cleared); for one, that one's own focus (a chevron too). Lifts hold fire and ends the post of
+//              whoever took it.
+//   FOLLOW     Distance "Stay close" (design B) plus the regroup: posts and own foci end; for All the squad's focus
+//              too; for one, it ignores the squad's focus till its next ATTACK.
+//   HOLD       Distance "Stay" (design B). Posts stay.
+//   CHARGE     Distance "Charge" (design B); lifts hold fire and ends the post. party.txt-refused ones are skipped
+//              (Vic will not charge): skipped=, and false when nobody could.
+//   GO         `tile` (combat_rt_squad_tile_free): they walk there and hold it -- "Stay" at that tile, in a fight and
+//              out of one, until FOLLOW, another GO, CHARGE, ATTACK, a floor or map change, or a load. All: the
+//              nearest the tile itself, the others the nearest free tiles round it, one each. A tile nothing may stand
+//              on -> false why=tile; nobody can reach it -> false why=no-route; both "Can't get there." (a pathfinder
+//              search per companion: on A, never per frame).
 //   HOLD FIRE / OPEN FIRE   no new attack / attacks again. Ask combat_rt_squad_holds_fire(who) which one X gives.
 //   HEAL ME    the one chosen, or for All the nearest that carries a stimpak, super stimpak, healing powder or a kit
 //              (and is a biped), comes and doses the dude past the medic's threshold, cooldown and opt-out. Refused:
@@ -129,8 +140,8 @@ bool combat_rt_squad_order(int order);
 //              word: no medic beat at all (combat_rt_medic_beat_enabled false) -> why=medic-off; the opt-out list full
 //              (RT_MEDIC_OPTOUT_MAX ids, one per companion: no real party gets there) -> that one skipped, why=full
 //              when nobody took it.
-// `target` is read for ATTACK only.
-bool combat_rt_squad_command(Object* who, int order, Object* target);
+// `target` is read for ATTACK only, `tile` for GO only.
+bool combat_rt_squad_command(Object* who, int order, Object* target, int tile);
 
 // The companions the mode steps through with LB / RB after "All": every one on the dude's floor, alive, awake, nearest
 // the dude first. Fills out[] (up to max) and returns how many. Pointers are valid until the next frame of the world
@@ -148,15 +159,19 @@ bool combat_rt_squad_holds_fire(Object* who);
 // below; the dialogue hides its line on that test) the mode has no Y at all. Fallout 1: always false.
 bool combat_rt_squad_medic_off(Object* who);
 
-// What the cursor is on, for the label over it: ENEMY "ATTACK" (red), DUDE "HEAL ME", COMPANION "WEAPON", NONE (no label,
-// A buzzes -- anything else: free ground, a wall, a neutral, the black past the map's edge). ENEMY is design B's ATTACK
-// rule, the same red outline the LT lock uses: on this floor, alive, not on his side, and fighting him or hostile by
-// nature.
+// What the critter under the cursor is, for the label over it: ENEMY "ATTACK" (red), NEUTRAL "ATTACK" (yellow), DUDE
+// "HEAL ME", COMPANION "WEAPON", NONE (no label, A buzzes -- one on his side who is no companion, a neutral he cannot
+// see, anything else; free ground is asked separately: combat_rt_squad_tile_free, GO). ENEMY and NEUTRAL are ATTACK's
+// rule: on this floor, alive, not on his side. ENEMY is the red outline the LT lock uses -- fighting him or hostile by
+// nature; NEUTRAL is everyone else there whom the lock would paint yellow: in his sight, or the one he is locked on
+// (2026-11-14, his „Ano, i na neutrály“: ATTACK on one starts that fight; one a roof or a wall hides reads NONE).
+// Fallout 1 (no squad): never NEUTRAL.
 enum {
     COMBAT_RT_SQUAD_KIND_NONE,
     COMBAT_RT_SQUAD_KIND_ENEMY,
     COMBAT_RT_SQUAD_KIND_DUDE,
     COMBAT_RT_SQUAD_KIND_COMPANION,
+    COMBAT_RT_SQUAD_KIND_NEUTRAL,
 };
 int combat_rt_squad_kind(Object* obj);
 
@@ -164,6 +179,13 @@ int combat_rt_squad_kind(Object* obj);
 // heal still coming in reaches his maximum), "no-meds" (nobody of `who` carries anything to heal with, or only
 // non-bipeds do) or "no-companions". The label greys out on NULL. Cheap (inventory scans).
 Object* combat_rt_squad_healer(Object* who, const char** why);
+
+// GO's tile test, cheap enough for every frame: a valid tile on the dude's floor, nothing standing on it (wall,
+// scenery, critter -- the dude too), not the black past the map's edge.
+bool combat_rt_squad_tile_free(int tile);
+// Can somebody of `who` get there? A pathfinder search (up to 12000 nodes, the nearest few companions): ask on a
+// cursor tile change, not every frame; the last answer is kept. The order itself searches again when given.
+bool combat_rt_squad_can_reach(Object* who, int tile);
 
 // WEAPON. The weapons companion `c` carries that its body has the art to hold (one per kind: the one in hand, else the
 // fullest), for the radial wheel titled with object_name(c), plus the mode's own "Auto" segment. Returns how many.
@@ -180,6 +202,8 @@ bool combat_rt_squad_set_weapon(Object* c, Object* item);
 // The pick forgotten without a word -- COMBAT CONTROL's "Use best weapon" (game_dialog.cc) chooses for it instead.
 void combat_rt_squad_forget_weapon(Object* c, const char* why);
 
+// Its post's tile (GO), or -1 -- for drawing the posts while the mode is up.
+int combat_rt_squad_post_of(Object* c);
 // Its focus now -- its own (ATTACK to it alone), else the squad's -- or NULL; `c` NULL = the squad's. Every live focus
 // has a red chevron over it, drawn by combat_rt.
 Object* combat_rt_squad_focus_of(Object* c);
@@ -212,9 +236,9 @@ typedef void (*CombatRtSquadOverlayFn)(struct Rect* rect, int elevation);
 typedef void (*CombatRtSquadForgetFn)(Object* obj);
 void combat_rt_set_squad_mode_hooks(CombatRtSquadOverlayFn overlay, CombatRtSquadForgetFn forget);
 
-// scripts.cc, around a companion's critter_p_proc heartbeat: true while a HEAL ME on its way must not be undone by its
-// party script's follow. The heartbeat then runs with GVAR_PARTY_NO_FOLLOW set -- vanilla's own switch, which every
-// companion's follow asks first.
+// scripts.cc, around a companion's critter_p_proc heartbeat: true while a post (GO) or a HEAL ME must not be undone by
+// its party script's follow. The heartbeat then runs with GVAR_PARTY_NO_FOLLOW set -- vanilla's own switch, which
+// every companion's follow asks first.
 bool combat_rt_party_follow_held(Object* critter);
 
 // Manual END COMBAT -- the realtime replacement for vanilla's Enter key / the interface bar's

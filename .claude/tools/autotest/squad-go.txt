@@ -1,0 +1,39 @@
+# SQUAD COMMAND (2026-11-12, his design "A", „můžu mu i říkat kam má jít?“): GO to one companion -- the post.
+# Vic stands 4 tiles left of the dude. GO sends him to 20108 (8 tiles left of the dude, 4 from Vic): he walks there and
+# HOLDS it -- Distance "Stay" at that tile (party-distance dist=stay), and out of a fight his party script's follow is
+# held off (GVAR_PARTY_NO_FOLLOW around his heartbeat, squad-follow-held), so when the dude walks off to the right for
+# 3 s Vic does not come after him (squad-post kept: the dude farther than the party's own follow would allow).
+# The order goes straight to combat_rt (the `squad` timeline step = what the squad command mode gives); the pad-driven
+# version is screen-squad-mode.txt.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-go.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-go
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party script 50
+
+# GO onto the dude's own tile: refused (nothing may stand there), and nobody moves
+squad 300 go 16777278 20100
+# GO for Vic, 4 tiles further left
+squad 800 go 16777278 20108
+# the dude walks off to the right for 3 s
+axis 3000 LX 32767
+axis 6000 LX 0
+note 13000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=go target=- companions=0 skipped=0 why=tile speaker=-1 t=[\d.]+ who=\d+ tile=20100
+expect \[ACTION/squad-order\] order=go target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=\d+ tile=20108
+expect \[FLOW/squad-post\] set id=\d+ pid=16777278 tile=20108 from=19904
+expect \[FLOW/squad-post\] walk id=\d+ pid=16777278 tile=20108
+expect \[FLOW/squad-post\] arrive id=\d+ pid=16777278 tile=20108
+expect \[FLOW/party-distance\] id=\d+ pid=16777278 dist=stay
+expect \[FLOW/squad-follow-held\] id=\d+ pid=16777278 heal=0 post=20108
+expect \[FLOW/squad-post\] kept id=\d+ pid=16777278 tile=20108 dude=\d+
+# held: once there, nothing walks him anywhere (his script's follow traces make-path like any move)
+expect-not \[FLOW/make-path\] id=\d+ pid=16777278 from=20108
+expect-not \[FLOW/squad-post\] (off|end) id=\d+ pid=16777278

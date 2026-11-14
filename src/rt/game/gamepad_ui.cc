@@ -8475,12 +8475,9 @@ static void gpui_useon_arm(SDL_GameController* pad)
 //
 // His ask of 2026-11-11: „přidej nestřílej a vyléčit mě, změň zbraň, můžu mu i říkat kam má jít?“ -- hold fire, heal me,
 // change weapon, and can I tell him where to go. Design "A" of the squad orders he approved (the mock-up's left half;
-// the right half, LT + D-pad, is design "B", gpui_button_shortcuts).
-// ⚠️ "WHERE TO GO" WAS TAKEN OUT AGAIN (2026-11-13): „dej pryč ovládání a přikazování companions kam mají přesně chodit
-// … nehodí se to do této action oriented verze“ -- commanding companions exactly where to go does not fit this action
-// version. That was GO: A on free ground sent who to that tile to hold it (the post), green where somebody chosen could
-// get there, with the pathfinder asked once the cursor rested. His picks with it: the mode STAYS, without GO, and Y in
-// it switches their healing of him. GO as it was lives on the branch shelf/squad-orders-with-go.
+// the right half, LT + D-pad, is design "B", gpui_button_shortcuts). "Where to go" -- GO, A on free ground -- was taken
+// out on 2026-11-13 („nehodí se to do této action oriented verze“) and came back on 2026-11-14, his „no to jsem myslel
+// že vrátíš“; Y's healing switch, which came in when it went, stays.
 // LT + A, in the world, opens this mode. The world first SLOWS DOWN, eased, over 1.5 s (his pick 2026-11-12: „ten efekt
 // bude nejdříve zpomalení a pak zastavení“ -- combat_rt_squad_mode_set_open, RT_SQUAD_SLOW_SECONDS) and then holds
 // still, exactly as under a radial wheel (the engine's own background processes too, gpui_world_hold_sync); the mode
@@ -8490,13 +8487,16 @@ static void gpui_useon_arm(SDL_GameController* pad)
 //           nearest first -> All. Every one chosen wears an outline round his sprite (GPUI_SQUAD_OUTLINE_RGB) and his
 //           name in green over his head.
 //   CURSOR  a point on the map, moved by the right stick (the left one too, once it has been back in the centre: it is
-//           the walk stick), starting on the LT-locked enemy, else a few tiles in front of the dude. On a critter's
+//           the walk stick), starting on the LT-locked target, else a few tiles in front of the dude. On a critter's
 //           sprite it takes that critter, else the tile under it; corner brackets frame what it takes.
 //   A       the order for what the cursor is on, named over it and in the legend: an enemy, red ATTACK (corner
-//           brackets round it); the dude, HEAL ME (grey when he is unhurt or nobody chosen has anything to heal with);
-//           a companion, WEAPON (a wheel of what he can hold, and "Auto"). Anything else -- free ground (GO's, until
-//           2026-11-13), a wall, a neutral, the map's black edge: no word, grey brackets round its tile or its sprite,
-//           and A buzzes.
+//           brackets round it); a neutral he can see, the same ATTACK in the yellow the LT lock gives a neutral
+//           (2026-11-14, his „Ano, i na neutrály“ -- the companions start that fight, and its team may join it; "see"
+//           is the lock's own rule, combat_rt_squad_kind); free ground, green GO (corner brackets round its tile --
+//           grey where nobody chosen can get; they go there and hold it); the dude, HEAL ME (grey when he is unhurt or
+//           nobody chosen has anything to heal with); a companion, WEAPON (a wheel of what he can hold, and "Auto").
+//           Anything else -- a wall, one on his side who is no companion, a neutral a roof or a wall hides, the map's
+//           black edge: no word, grey brackets round its tile or its sprite, and A buzzes.
 //   X       HOLD FIRE, or OPEN FIRE when every one chosen already holds it -- the legend says which.
 //   Y       NO HEALING, or HEAL ME AGAIN when every one chosen already keeps his supplies from him -- the legend says
 //           which, as for X (his pick 2026-11-13, his preview „A Heal me   X Hold fire   Y No healing   B Back“, after
@@ -8505,17 +8505,21 @@ static void gpui_useon_arm(SDL_GameController* pad)
 //           way round. Their medic beat only -- A on the dude still brings him a stimpak whatever Y says. With the
 //           medic beat switched off (combat_rt_medic_beat_enabled, the test the dialogue hides its line by) the legend
 //           has no Y and Y does nothing, not even the buzz.
-//   D-pad   design B's four for who (Up ATTACK the enemy under the cursor, Down FOLLOW, Left HOLD, Right CHARGE), a
-//           compass of four words beside the cursor.
+//   D-pad   design B's four for who (Up ATTACK the enemy or the neutral under the cursor, Down FOLLOW, Left HOLD, Right
+//           CHARGE), a compass of four words beside the cursor.
 //   B       back out, no order.
-// Every order closes the mode (combat_rt_squad_command: the nearest one who took it says so, "On it.", "Holding
-// fire."...); one refused buzzes and leaves it open. LB / RB and the cursor never close it. Its own marks -- the
-// outlines round who, the dotted line from who to the target (to an enemy from every one chosen, to him from the one
-// who would bring the stimpak), the brackets round the target -- are drawn by the tile overlay (gpui_squad_overlay,
-// after combat_rt's own), its words in small windows of their own over the world, each with the world under it as its
-// background (gpui_squad_text_window; the prompt word's way, interact_prompt.cc ip_place_word).
+// Every order closes the mode (combat_rt_squad_command: the nearest one who took it says so, "On it.", "Moving.",
+// "Holding fire."...); one refused buzzes and leaves it open. LB / RB and the cursor never close it. Its own marks --
+// the outlines round who, the dotted line from who to the target (to an enemy, a neutral or a GO tile from every one
+// chosen, to him from the one who would bring the stimpak), the brackets round the target -- are drawn by the tile
+// overlay (gpui_squad_overlay, after combat_rt's own), its words in small windows of their own over the world, each
+// with the world under it as its background (gpui_squad_text_window; the prompt word's way, interact_prompt.cc
+// ip_place_word).
 #define GPUI_SQUAD_MAX 8 // companions it steps through: the party is a handful
 #define GPUI_SQUAD_WPN_AUTO_ID (-2) // the weapon wheel's "Auto" (never -1, radial_wheel_highlight_id's "none")
+// The cursor rests on a free tile this long before GO asks the pathfinder whether anyone chosen can get there
+// (combat_rt_squad_can_reach: up to 12000 nodes a companion) -- a stick sweeping the map asks nothing.
+#define GPUI_SQUAD_REACH_SETTLE_MS 120
 #define GPUI_SQUAD_DASH 3 // the dotted line: this many pixels on, as many off
 #define GPUI_SQUAD_BRACKET 6 // an arm of a corner bracket, in pixels
 #define GPUI_SQUAD_BRACKET_GAP 2 // brackets stand this far off the box they frame (a sprite's, a tile's hex)
@@ -8533,13 +8537,19 @@ static void gpui_useon_arm(SDL_GameController* pad)
 #define GPUI_SQUAD_GUARD_MS 250
 
 enum {
-    GPUI_SQUAD_ON_NONE, // free ground, a wall, a neutral, the map's black edge: no order there (free ground was GO's)
+    GPUI_SQUAD_ON_NONE, // a wall, one on his side who is no companion, a hidden neutral, the black past the map: no
+                        // order
     GPUI_SQUAD_ON_ENEMY,
     GPUI_SQUAD_ON_DUDE,
     GPUI_SQUAD_ON_COMPANION,
+    GPUI_SQUAD_ON_NEUTRAL, // ATTACK as on an enemy, in yellow (2026-11-14): the companions start that fight
+    GPUI_SQUAD_ON_GROUND, // a free tile on this floor: GO
+    GPUI_SQUAD_ON_COUNT,
 };
 
-static const char* const gpui_squad_kind_names[] = { "none", "enemy", "dude", "companion" };
+static const char* const gpui_squad_kind_names[] = { "none", "enemy", "dude", "companion", "neutral", "ground" };
+static_assert((int)(sizeof(gpui_squad_kind_names) / sizeof(gpui_squad_kind_names[0])) == GPUI_SQUAD_ON_COUNT,
+    "one trace name per GPUI_SQUAD_ON_*");
 
 static Object* gpui_squad_members[GPUI_SQUAD_MAX]; // this frame's companions, nearest first (combat_rt_squad_members)
 static int gpui_squad_member_count = 0;
@@ -8550,6 +8560,10 @@ static int gpui_squad_tile = -1; // the tile under it
 static Object* gpui_squad_on = NULL; // the critter whose sprite is under it, or NULL
 static int gpui_squad_kind = GPUI_SQUAD_ON_NONE;
 static bool gpui_squad_ok = false; // A's order can be given there (else its word is grey)
+static unsigned int gpui_squad_tile_since = 0; // when the cursor came onto its tile
+static int gpui_squad_reach_tile = -1; // GO's reach answer, for that tile and who
+static Object* gpui_squad_reach_who = NULL;
+static bool gpui_squad_reach = true;
 static bool gpui_squad_a_armed = false; // A has been up since the open: the opening press is not an order
 static bool gpui_squad_left_armed = false; // the left stick has been back in the centre since the open
 static bool gpui_squad_just_opened = false; // the open's own tick: the buttons are taken as they are
@@ -8632,6 +8646,13 @@ static int gpui_squad_red()
     return colorTable[(31 << 10) | (0 << 5) | 0]; // the blast dots' and the focus chevron's red
 }
 
+// The yellow of a neutral under the LT lock: combat_rt's rt_aim_outline_type_for gives it OUTLINE_TYPE_ITEM, which the
+// engine's outline renderer draws in _colorTable[30632] (object.cc) -- 29, 29, 8 in 5-bit RGB, this very entry.
+static int gpui_squad_yellow()
+{
+    return colorTable[(29 << 10) | (29 << 5) | 8];
+}
+
 static int gpui_squad_grey()
 {
     return colorTable[(18 << 10) | (18 << 5) | 18];
@@ -8645,6 +8666,20 @@ static int gpui_squad_white()
 static int gpui_squad_outline_color()
 {
     return colorTable[GPUI_SQUAD_OUTLINE_RGB];
+}
+
+// ATTACK is A's order, and D-pad Up's, on an enemy and -- since 2026-11-14, his „Ano, i na neutrály“ -- on a neutral.
+static bool gpui_squad_on_attackable()
+{
+    return gpui_squad_kind == GPUI_SQUAD_ON_ENEMY || gpui_squad_kind == GPUI_SQUAD_ON_NEUTRAL;
+}
+
+// ATTACK's word and brackets: red on an enemy (the focus chevron's red, as before -- not the LT lock's outline, which
+// the engine cycles through its fire colours), and on a neutral the yellow the LT lock outlines it in
+// (OUTLINE_TYPE_ITEM, gpui_squad_yellow) -- the yellow reads "not fighting you yet", and the order starts that fight.
+static int gpui_squad_attack_color()
+{
+    return gpui_squad_kind == GPUI_SQUAD_ON_NEUTRAL ? gpui_squad_yellow() : gpui_squad_red();
 }
 
 static void gpui_squad_text_hide(GpuiSquadText* t)
@@ -8831,13 +8866,18 @@ static bool gpui_squad_tile_centre(int tile, int* x, int* y)
 }
 
 // What the cursor is on, and whether A's order can be given there (the word's colour). Asked when the cursor moves,
-// who changes, or the mode opens. Free ground is no order since GO went (2026-11-13): it stays NONE, like a wall.
+// who changes, or the mode opens; GO's reach once the cursor has rested on its tile (GPUI_SQUAD_REACH_SETTLE_MS). A
+// critter under it first -- whatever it is, even one with no order (a neutral a roof hides): its box is what the
+// cursor is on --, else a free tile on this floor is GO's ground, else nothing.
 static void gpui_squad_classify(bool moved)
 {
     int x = (int)gpui_squad_cx;
     int y = (int)gpui_squad_cy;
     int tile = tile_num(x, y, map_elevation);
-    gpui_squad_tile = tile;
+    if (tile != gpui_squad_tile) {
+        gpui_squad_tile = tile;
+        gpui_squad_tile_since = get_time();
+    }
     if (moved) {
         gpui_squad_on = gpui_squad_critter_at(x, y);
     }
@@ -8848,6 +8888,9 @@ static void gpui_squad_classify(bool moved)
         case COMBAT_RT_SQUAD_KIND_ENEMY:
             kind = GPUI_SQUAD_ON_ENEMY;
             break;
+        case COMBAT_RT_SQUAD_KIND_NEUTRAL:
+            kind = GPUI_SQUAD_ON_NEUTRAL;
+            break;
         case COMBAT_RT_SQUAD_KIND_DUDE:
             kind = GPUI_SQUAD_ON_DUDE;
             break;
@@ -8855,11 +8898,14 @@ static void gpui_squad_classify(bool moved)
             kind = GPUI_SQUAD_ON_COMPANION;
             break;
         }
+    } else if (tile >= 0 && combat_rt_squad_tile_free(tile)) {
+        kind = GPUI_SQUAD_ON_GROUND;
     }
 
     bool ok = false;
     switch (kind) {
     case GPUI_SQUAD_ON_ENEMY:
+    case GPUI_SQUAD_ON_NEUTRAL:
         ok = true;
         break;
     case GPUI_SQUAD_ON_DUDE:
@@ -8870,6 +8916,21 @@ static void gpui_squad_classify(bool moved)
         ok = combat_rt_squad_weapons(gpui_squad_on, weapons, RADIAL_WHEEL_MAX - 1) > 0;
         break;
     }
+    case GPUI_SQUAD_ON_GROUND:
+        // Green until the pathfinder has had its say: a sweep across the map asks it nothing.
+        if (tile != gpui_squad_reach_tile || gpui_squad_who != gpui_squad_reach_who) {
+            if (get_time() - gpui_squad_tile_since >= GPUI_SQUAD_REACH_SETTLE_MS) {
+                gpui_squad_reach = combat_rt_squad_can_reach(gpui_squad_who, tile);
+                gpui_squad_reach_tile = tile;
+                gpui_squad_reach_who = gpui_squad_who;
+                trace_event(TRACE_INPUT, "squad-reach", "tile=%d who=%d reach=%d", tile,
+                    gpui_squad_who != NULL ? gpui_squad_who->id : -1, gpui_squad_reach ? 1 : 0);
+            }
+            ok = true;
+        } else {
+            ok = gpui_squad_reach;
+        }
+        break;
     }
 
     // Traced when what it is on changes, not every tile a sweep crosses (the rest is traced when the stick lets go).
@@ -9146,15 +9207,16 @@ static void gpui_squad_paint_marks(Object** chosen, int chosenCount)
         }
     }
 
-    // The target: the critter's tile. A line only ever goes to a critter -- the cursor's own tile was GO's, and GO went
-    // on 2026-11-13.
+    // The target: the critter's tile, or the cursor's.
     int tx = 0;
     int ty = 0;
-    bool target = gpui_squad_on != NULL && gpui_squad_tile_centre(gpui_squad_on->tile, &tx, &ty);
-    int wordColor = gpui_squad_kind == GPUI_SQUAD_ON_ENEMY ? gpui_squad_red() : (gpui_squad_ok ? green : grey);
+    bool target = gpui_squad_on != NULL ? gpui_squad_tile_centre(gpui_squad_on->tile, &tx, &ty)
+                                        : gpui_squad_tile_centre(gpui_squad_tile, &tx, &ty);
+    // ATTACK: red round an enemy, yellow round a neutral (gpui_squad_attack_color).
+    int wordColor = gpui_squad_on_attackable() ? gpui_squad_attack_color() : (gpui_squad_ok ? green : grey);
 
-    // Corner brackets round what the cursor is on: the critter's sprite, else its tile's hex -- grey there: nothing is
-    // ordered on the ground (GO's green went with it). One or the other, never both, so they cannot collide.
+    // Corner brackets round what the cursor is on: the critter's sprite, else its tile's hex -- GO's spot, green where
+    // GO can be given, grey where nothing can be ordered. One or the other, never both, so they cannot collide.
     if (gpui_squad_on != NULL) {
         Rect b;
         obj_bound(gpui_squad_on, &b);
@@ -9174,16 +9236,16 @@ static void gpui_squad_paint_marks(Object** chosen, int chosenCount)
             d.bracketBox[1] = y - GPUI_SQUAD_BRACKET_GAP;
             d.bracketBox[2] = x + 31 + GPUI_SQUAD_BRACKET_GAP;
             d.bracketBox[3] = y + 15 + GPUI_SQUAD_BRACKET_GAP;
-            d.bracketColor = grey;
+            d.bracketColor = gpui_squad_kind == GPUI_SQUAD_ON_GROUND && gpui_squad_ok ? green : grey;
         }
     }
 
-    // The dotted line from who to it: from every one chosen to an enemy; to him only from the one that would come with
-    // the stimpak (HEAL ME); none to a companion (WEAPON is about him) or to nothing.
+    // The dotted line from who to it: from every one chosen to an enemy or a neutral (ATTACK) or a GO tile; to him only
+    // from the one that would come with the stimpak (HEAL ME); none to a companion (WEAPON is about him) or to nothing.
     if (target) {
         Object* from[GPUI_SQUAD_MAX];
         int fromCount = 0;
-        if (gpui_squad_kind == GPUI_SQUAD_ON_ENEMY) {
+        if (gpui_squad_on_attackable() || gpui_squad_kind == GPUI_SQUAD_ON_GROUND) {
             for (int i = 0; i < chosenCount; i++) {
                 from[fromCount++] = chosen[i];
             }
@@ -9223,9 +9285,10 @@ static void gpui_squad_paint_marks(Object** chosen, int chosenCount)
 
 // "LB RB All   A Heal me   X Hold fire   Y No healing   B Back" (his preview of 2026-11-13) across the top-left of the
 // world, in the bar's badges (dark pill or disc, gold letter) with the mock-up's light words; who in the names' green;
-// A's word grey where it cannot be given ("A Order" on free ground and anything else). Y only while the medic beat is
-// on (combat_rt_medic_beat_enabled). With a companion's weapon wheel up: "A Pick   B Back". The longest it gets --
-// "Pariah Dog", "Open fire", "Heal me again" -- is about 430 px, inside even a 640-wide view.
+// A's word grey where it cannot be given ("A Go" on free ground nobody chosen can get to, "A Order" on anything else).
+// Y only while the medic beat is on (combat_rt_medic_beat_enabled). With a companion's weapon wheel up: "A Pick
+// B Back". The longest it gets -- "Pariah Dog", "Open fire", "Heal me again" -- is about 430 px, inside even a 640-wide
+// view.
 static void gpui_squad_paint_legend(bool wheel)
 {
     const int gap = 9; // between one button's words and the next button
@@ -9239,7 +9302,11 @@ static void gpui_squad_paint_legend(bool wheel)
     if (!wheel) {
         switch (gpui_squad_kind) {
         case GPUI_SQUAD_ON_ENEMY:
+        case GPUI_SQUAD_ON_NEUTRAL:
             aWord = "Attack";
+            break;
+        case GPUI_SQUAD_ON_GROUND:
+            aWord = "Go";
             break;
         case GPUI_SQUAD_ON_DUDE:
             aWord = "Heal me";
@@ -9355,8 +9422,9 @@ static bool gpui_squad_covers_someone(int x, int y, int w, int h, Object** chose
 }
 
 // Design B's four for who, beside the cursor (the mock-up's right half): Attack over the cross -- grey unless an enemy
-// is under the cursor -- Hold left of it, Charge right, Follow under it. Right of `box`, or left of it near the edge or
-// where the right side would cover the dude or one chosen (his words would sit on a sprite he is giving orders about).
+// or a neutral is under the cursor -- Hold left of it, Charge right, Follow under it. Right of `box`, or left of it
+// near the edge or where the right side would cover the dude or one chosen (his words would sit on a sprite he is
+// giving orders about).
 static void gpui_squad_paint_compass(const Rect* box, Object** chosen, int chosenCount)
 {
     int lineH = text_height() + 1;
@@ -9394,7 +9462,7 @@ static void gpui_squad_paint_compass(const Rect* box, Object** chosen, int chose
     }
     int white = gpui_squad_white();
     gpui_squad_put_text(buf, w, h, cx - wAttack / 2, 0, "Attack",
-        gpui_squad_kind == GPUI_SQUAD_ON_ENEMY ? white : gpui_squad_grey());
+        gpui_squad_on_attackable() ? white : gpui_squad_grey());
     gpui_squad_put_text(buf, w, h, 0, lineH, "Hold", white);
     gpui_squad_cross(buf, w, h, cx, lineH + lineH / 2 - 1);
     gpui_squad_put_text(buf, w, h, wHold + gap + cross + gap, lineH, "Charge", white);
@@ -9428,7 +9496,7 @@ static void gpui_squad_paint_words(Object** chosen, int chosenCount)
     }
 
     // The order's word over what the cursor is on (over its name when that is one chosen), and the compass beside it --
-    // beside the tile's hex too, where there is no word (free ground: GO's, until 2026-11-13).
+    // beside the tile's hex too (GO's on free ground; no word where nothing can be ordered).
     Rect box;
     bool haveBox = false;
     if (gpui_squad_on != NULL) {
@@ -9448,7 +9516,11 @@ static void gpui_squad_paint_words(Object** chosen, int chosenCount)
     const char* word = NULL;
     switch (gpui_squad_kind) {
     case GPUI_SQUAD_ON_ENEMY:
+    case GPUI_SQUAD_ON_NEUTRAL:
         word = "ATTACK";
+        break;
+    case GPUI_SQUAD_ON_GROUND:
+        word = "GO";
         break;
     case GPUI_SQUAD_ON_DUDE:
         word = "HEAL ME";
@@ -9464,8 +9536,8 @@ static void gpui_squad_paint_words(Object** chosen, int chosenCount)
                 bottom = nameTop[i] - 1;
             }
         }
-        int color = gpui_squad_kind == GPUI_SQUAD_ON_ENEMY ? gpui_squad_red()
-                                                            : (gpui_squad_ok ? gpui_squad_green() : gpui_squad_grey());
+        int color = gpui_squad_on_attackable() ? gpui_squad_attack_color()
+                                               : (gpui_squad_ok ? gpui_squad_green() : gpui_squad_grey());
         gpui_squad_word(&gpui_squad_label, word, color, (box.ulx + box.lrx) / 2, bottom);
     } else {
         gpui_squad_text_hide(&gpui_squad_label);
@@ -9544,6 +9616,8 @@ static void gpui_squad_forget(Object* obj)
         gpui_squad_on = NULL;
         gpui_squad_who = NULL;
         gpui_squad_mute = NULL;
+        gpui_squad_reach_who = NULL;
+        gpui_squad_reach_tile = -1;
         gpui_squad_member_count = 0;
         gpui_squad_wpn_who = NULL;
         gpui_squad_wpn_count = 0;
@@ -9571,6 +9645,10 @@ static void gpui_squad_forget(Object* obj)
     }
     if (gpui_squad_mute == obj) {
         gpui_squad_mute = NULL;
+    }
+    if (gpui_squad_reach_who == obj) {
+        gpui_squad_reach_who = NULL;
+        gpui_squad_reach_tile = -1;
     }
     if (gpui_squad_wpn_who == obj) {
         gpui_squad_weapon_close();
@@ -9618,8 +9696,9 @@ static void gpui_squad_open_mode()
         gpui_squad_guard_on = true;
     }
 
-    // The cursor starts on the LT-locked enemy when it is on screen, else a few tiles in front of the dude (where the
-    // use-on crosshair parks, gpui_useon_park_cursor). Not the pointer: the engine's cursor is off while the world holds.
+    // The cursor starts on the LT-locked target (an enemy or a neutral) when it is on screen, else a few tiles in front
+    // of the dude (where the use-on crosshair parks, gpui_useon_park_cursor). Not the pointer: the engine's cursor is
+    // off while the world holds.
     Rect world;
     bool haveWorld = display_win != -1 && win_get_rect(display_win, &world) == 0;
     const char* start = "ahead";
@@ -9660,6 +9739,8 @@ static void gpui_squad_open_mode()
     gpui_squad_on = NULL;
     gpui_squad_kind = GPUI_SQUAD_ON_NONE;
     gpui_squad_tile = -1;
+    gpui_squad_reach_tile = -1;
+    gpui_squad_reach_who = NULL;
     gpui_squad_a_armed = false;
     gpui_squad_left_armed = false;
     gpui_squad_just_opened = true;
@@ -9688,8 +9769,8 @@ static void gpui_squad_open_mode()
 // --- the orders ---
 
 // An order given: a click, and the mode closes; refused: the buzz, and it stays open. A refusal with words to it
-// (HEAL ME's "No meds.", "You're fine.") floats over the nearest one asked -- where his name is, so the name stands
-// aside for it. X's and Y's refusals have no words: the buzz alone.
+// (HEAL ME's "No meds.", "You're fine.", GO's "Can't get there.") floats over the nearest one asked -- where his name
+// is, so the name stands aside for it. X's and Y's refusals have no words: the buzz alone.
 static bool gpui_squad_given(bool ok, int order, const char* src)
 {
     if (ok) {
@@ -9698,7 +9779,7 @@ static bool gpui_squad_given(bool ok, int order, const char* src)
         return true;
     }
     gsound_play_sfx_file("iisxxxx1");
-    if (order == COMBAT_RT_ORDER_HEAL_ME) {
+    if (order == COMBAT_RT_ORDER_GO || order == COMBAT_RT_ORDER_HEAL_ME) {
         Object* chosen[GPUI_SQUAD_MAX];
         if (gpui_squad_chosen(chosen) > 0) {
             gpui_squad_mute = chosen[0]; // nearest first: the one combat_rt had say it
@@ -9708,12 +9789,12 @@ static bool gpui_squad_given(bool ok, int order, const char* src)
 }
 
 // The trace's name of a COMBAT_RT_ORDER_*, combat_rt's own names in combat_rt's order (combat_rt.h): one entry per
-// order, or the build stops -- a stale list compiles and names every order after a removed one wrong (GO's went
-// 2026-11-13).
+// order, or the build stops -- a stale list compiles and names every order after a moved one wrong (GO's went
+// 2026-11-13 and came back 2026-11-14).
 static const char* gpui_squad_order_name(int order)
 {
-    static const char* const names[] = { "attack", "follow", "hold", "charge", "hold-fire", "open-fire", "heal-me",
-        "no-healing", "heal-again" };
+    static const char* const names[] = { "attack", "follow", "hold", "charge", "go", "hold-fire", "open-fire",
+        "heal-me", "no-healing", "heal-again" };
     static_assert((int)(sizeof(names) / sizeof(names[0])) == COMBAT_RT_ORDER_COUNT, "one name per COMBAT_RT_ORDER_*");
     return order >= 0 && order < (int)(sizeof(names) / sizeof(names[0])) ? names[order] : "?";
 }
@@ -10075,7 +10156,7 @@ static void gpui_squad_mode(SDL_GameController* pad)
     // X: hold fire for who -- or open fire, when every one of them already holds it (what the legend says X does).
     if (xEdge) {
         int order = combat_rt_squad_holds_fire(gpui_squad_who) ? COMBAT_RT_ORDER_OPEN_FIRE : COMBAT_RT_ORDER_HOLD_FIRE;
-        bool ok = combat_rt_squad_command(gpui_squad_who, order, NULL);
+        bool ok = combat_rt_squad_command(gpui_squad_who, order, NULL, -1);
         trace_event(TRACE_INPUT, "squad-x", "order=%s who=%s ok=%d", gpui_squad_order_name(order), whoText, ok ? 1 : 0);
         if (gpui_squad_given(ok, order, "x")) {
             return;
@@ -10091,14 +10172,15 @@ static void gpui_squad_mode(SDL_GameController* pad)
     // beat switched off there is nothing to switch: no Y in the legend, and the press does nothing at all.
     if (yEdge && combat_rt_medic_beat_enabled()) {
         int order = combat_rt_squad_medic_off(gpui_squad_who) ? COMBAT_RT_ORDER_HEAL_AGAIN : COMBAT_RT_ORDER_NO_HEALING;
-        bool ok = combat_rt_squad_command(gpui_squad_who, order, NULL);
+        bool ok = combat_rt_squad_command(gpui_squad_who, order, NULL, -1);
         trace_event(TRACE_INPUT, "squad-y", "order=%s who=%s ok=%d", gpui_squad_order_name(order), whoText, ok ? 1 : 0);
         if (gpui_squad_given(ok, order, "y")) {
             return;
         }
     }
 
-    // The D-pad: design B's four, for who -- Up attacks the enemy under the cursor (nothing to attack: the buzz).
+    // The D-pad: design B's four, for who -- Up attacks the enemy or the neutral under the cursor (nothing to attack:
+    // the buzz).
     for (int i = 0; i < 4; i++) {
         if (!dirEdge[i]) {
             continue;
@@ -10112,8 +10194,9 @@ static void gpui_squad_mode(SDL_GameController* pad)
         static const char* const dirNames[4] = { "up", "down", "left", "right" };
         int order = orders[i];
         bool ok = false;
-        if (order != COMBAT_RT_ORDER_ATTACK || gpui_squad_kind == GPUI_SQUAD_ON_ENEMY) {
-            ok = combat_rt_squad_command(gpui_squad_who, order, order == COMBAT_RT_ORDER_ATTACK ? gpui_squad_on : NULL);
+        if (order != COMBAT_RT_ORDER_ATTACK || gpui_squad_on_attackable()) {
+            ok = combat_rt_squad_command(gpui_squad_who, order, order == COMBAT_RT_ORDER_ATTACK ? gpui_squad_on : NULL,
+                -1);
         }
         trace_event(TRACE_INPUT, "squad-dpad", "dir=%s order=%s who=%s ok=%d", dirNames[i], gpui_squad_order_name(order),
             whoText, ok ? 1 : 0);
@@ -10123,19 +10206,24 @@ static void gpui_squad_mode(SDL_GameController* pad)
         break; // one direction a tick
     }
 
-    // A: the order for what the cursor is on. Anything else -- free ground (GO's until 2026-11-13) too -- is no order:
-    // the trace says kind=none order=-, the buzz, and the mode stays.
+    // A: the order for what the cursor is on. Anything else -- a wall, a hidden neutral, the black past the map -- is
+    // no order: the trace says kind=none order=-, the buzz, and the mode stays.
     if (aEdge) {
         bool ok = false;
         int order = -1;
         switch (gpui_squad_kind) {
         case GPUI_SQUAD_ON_ENEMY:
+        case GPUI_SQUAD_ON_NEUTRAL: // the companions start that fight (2026-11-14)
             order = COMBAT_RT_ORDER_ATTACK;
-            ok = combat_rt_squad_command(gpui_squad_who, order, gpui_squad_on);
+            ok = combat_rt_squad_command(gpui_squad_who, order, gpui_squad_on, -1);
+            break;
+        case GPUI_SQUAD_ON_GROUND:
+            order = COMBAT_RT_ORDER_GO;
+            ok = combat_rt_squad_command(gpui_squad_who, order, NULL, gpui_squad_tile);
             break;
         case GPUI_SQUAD_ON_DUDE:
             order = COMBAT_RT_ORDER_HEAL_ME;
-            ok = combat_rt_squad_command(gpui_squad_who, order, NULL);
+            ok = combat_rt_squad_command(gpui_squad_who, order, NULL, -1);
             break;
         case GPUI_SQUAD_ON_COMPANION:
             if (gpui_squad_weapon_open(gpui_squad_on)) {

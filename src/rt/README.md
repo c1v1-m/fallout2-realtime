@@ -228,8 +228,9 @@ perk card now says so (fallout1-ce's note). `[COMBAT/aim-health]` on a change, `
 once — Up ATTACK, Down FOLLOW, Left HOLD, Right CHARGE (`gamepad_ui.cc`, module delta, `FALLOUT_RT_GAME == 2`: taken on
 the PRESS like LT+Y, spent so no tap or hold follows, only from a D-pad at rest; a D-pad hold opens no screen while LT
 is down; given on the safe tick, a click or the error buzz). `combat_rt.cc` `combat_rt_squad_order`: ATTACK makes the
-LT-locked enemy the squad's focus (`rt_squad_focus`; no lock or a neutral one is refused), which every companion that
-can get at it goes for first (`rt_focus_wanted` — a shot from where it stands or a route, asked once a second) until it
+LT-locked target the squad's focus (`rt_squad_focus`; no lock, or one on his side, is refused — a neutral one is taken
+since 2026-11-14, see "ATTACK on a neutral" below), which every companion that can get at it goes for first
+(`rt_focus_wanted` — a shot from where it stands or a route, asked once a second) until it
 dies, leaves the floor, the map changes or a load comes, another ATTACK replaces it, or the fight is ended (END COMBAT,
 a script's `terminate_combat`) or the target joins his side, with a red chevron over its
 head (the prompt arrows' 5 x 3, through the tile overlay, `rt_squad_mark_tick`). FOLLOW / HOLD / CHARGE write COMBAT
@@ -245,19 +246,44 @@ go after its target lets the target go (`rt_party_chase_holds`), so no fight is 
 `[ACTION/squad-order]`, `[FLOW/squad-focus] on|take|off`, `[FLOW/squad-mark]`, `[FLOW/party-distance]`,
 `[FLOW/party-hold]`, `[FLOW/party-drop]`, `[FLOW/party-leash]`, `[FLOW/party-look]`, `[FLOW/party-charge]`,
 `[FLOW/party-snipe]`, `follow-step ... limit= why=`. "LT + D-pad Squad orders" is a CONTROLS row (`pipboy.cc`).
-`squad-hold.txt`, `squad-follow.txt`, `squad-attack.txt`, `squad-charge.txt`. Not in fallout1-ce (it has no COMBAT
-CONTROL).
+`squad-hold.txt`, `squad-follow.txt`, `squad-attack.txt`, `squad-charge.txt`, `squad-attack-neutral.txt`. Not in
+fallout1-ce (it has no COMBAT CONTROL).
+
+**ATTACK on a neutral** (2026-11-14, his „Ano, i na neutrály“, after Gecko's junkyard: the squad cursor on a peaceful
+ghoul left "Attack" grey and the trace said why=neutral). `rt_squad_command` takes any target alive on the floor that
+is not on his side — refused only with none, a dead or a gone one (`no-target` / `no-lock`) or one on his team or in
+the party (`friend`); `combat_rt_squad_kind` gives `COMBAT_RT_SQUAD_KIND_NEUTRAL` for lock class 1 (ENEMY stays class
+2; Fallout 1, with no squad, never NEUTRAL). The order makes nobody hostile (`[FLOW/squad-focus] on|own-on ...
+hostile=0`): the fight starts the VANILLA way. The companions go for the focus — nothing on the way asks for
+hostility: `rt_focus_wanted` / `rt_party_pick`, the CHASE and ATTACK states, `rt_do_attack`, the friendly-fire care
+(it counts only the shooter's own team), the stop rule (a focus is no lost foe) and `rt_focus_end_why` (gone, dead, on
+his side) — and their first blow that reaches it — a hit, or a miss with nothing behind it (`_apply_damage`'s
+`_combatai_check_retaliation` asks for no hit; a ranged miss flies on, and a wall or a passer-by on its line takes the
+round instead, `attackCompute`) — sets the target's whoHitMe to that companion; the registry reads a whoHitMe on his
+side as hostile (`[FLOW/newhostile] ... whoParty=1`), and its team comes in by the guard rule (`guard-join`, the Gecko
+ghouls' packet is a brawler's) or the onlooker spread (`aggro-spread`). The pad shows it as an enemy (A and D-pad Up
+give ATTACK, the compass's Attack is white, the legend says "A Attack", the dotted lines go from every one chosen) but
+its word and brackets take the yellow the LT lock gives a neutral (`OUTLINE_TYPE_ITEM`, the engine's
+`_colorTable[30632]`, palette 58), red staying an enemy's; the trace's kind is `neutral`. The mode calls a neutral
+NEUTRAL only where the lock would paint it yellow — in his sight (`rt_lock_in_sight`) or the one he is locked on,
+`rt_aim_outlines_update`'s rule, his pick of 2026-10-15 for what he can see — else NONE: the cursor takes a sprite's
+box, and the box took a ghoul a roof and a wall hid (Klamath's brick building: a yellow ATTACK on the wall, one A from
+a fight with somebody the player never saw). An enemy needs no sight; `rt_squad_command` itself asks none (design B's
+lock was in sight when taken). Tests: `squad-attack-neutral.txt` (design B on the Gecko ghoul, whose team-mate joins;
+the `squad` step's ATTACK to one on a raider of another team), `squad-pad-neutral-up.txt` (the mode's D-pad Up on the
+ghoul), `screen-squad-neutral.txt` (shots: the yellow ATTACK, the order given, the fight it started),
+`screen-squad-roof.txt` (Klamath's brick building: the cursor on a ghoul inside — no word, grey brackets, A buzzes;
+then the dude and Vic outside).
 
 **Squad command** (2026-11-12, his design "A", „přidej nestřílej a vyléčit mě, změň zbraň, můžu mu i říkat kam má
 jít?“) — the behaviours and their API in `combat_rt.cc` / `combat_rt.h` (the LT + A mode that gives the orders lives in
-`gamepad_ui.cc`). Its last part, GO — A on free ground: a tile they walked to and held, the POST (Distance "Stay" there
-in a fight and out of one, All spread round it, the pathfinder's reach under the cursor) — was TAKEN OUT again on
-2026-11-13 at his ask, „dej pryč ovládání a přikazování companions kam mají přesně chodit … nehodí se to do této
-action oriented verze“ (it does not fit the action version); Y's healing switch came instead, and GO as it was, code
-and tests, lives on the branch `shelf/squad-orders-with-go` (ad1fe7a). One function
+`gamepad_ui.cc`). GO — A on free ground — was taken out on 2026-11-13 („nehodí se to do této action oriented verze“;
+Y's healing switch came in then and stays) and came back on 2026-11-14, his „no to jsem myslel že vrátíš“. One function
 gives every order, to All (`who` NULL: the party on the dude's floor, alive and awake) or to one companion:
-`combat_rt_squad_command(who, order, target)`; design B's `combat_rt_squad_order` is now `who` = All with ATTACK on the
-LT lock. New orders: HOLD FIRE / OPEN FIRE (`rt_squad_holds_fire`: a fight it is in is dropped at the top of
+`combat_rt_squad_command(who, order, target, tile)`; design B's `combat_rt_squad_order` is now `who` = All with ATTACK
+on the LT lock. New orders: GO (a tile: they walk there and hold it — the POST, Distance "Stay" at that tile in a fight
+and out of one, `rt_squad_post_step`; All spreads round the tile, one free reachable tile each; "Can't get there."),
+HOLD FIRE / OPEN FIRE (`rt_squad_holds_fire`: a fight it is in is dropped at the top of
 `rt_update_actor`, its idle pick takes nobody, the arbiter skips it, END COMBAT does not wait on it; it still follows,
 flees, heals), HEAL ME (the chosen one, or the nearest with supplies, walks to him with `rt_party_step_to_dude` and doses
 him with `rt_medic_dose` — the medic beat's dose, past its threshold, cooldown and opt-out; his own heal order Stimpak /
@@ -271,34 +297,39 @@ pick is taken out at the next free beat and `rt_ensure_weapon_drawn` keeps to it
 or gone, the AI chooses and it says "Out of ammo." once; hopeless by min_to_hit, the AI chooses for the rest of that
 fight instead of the flight; COMBAT CONTROL's "Use best weapon" forgets it). ATTACK to one companion is its OWN focus
 (`RtSquadOrder.focus`, before the squad's); FOLLOW to one ignores the squad's focus till its next ATTACK; every live
-focus has a chevron (`rt_marks[]`). ATTACK / CHARGE lift hold fire, FOLLOW ends own foci — for B's LT + D-pad too. Two
-tables keyed by object id: `RtSquadPref` (hold fire, the weapon pid; SAVED as the chunk's `RTSQ` section, before RTPB;
-cleared on load / new game) and `RtSquadOrder` (own focus, heal on its way; this map only, `rt_abandon_encounter`). Out
-of a fight a heal on its way keeps the party script's follow off by running that heartbeat with `GVAR_PARTY_NO_FOLLOW`
-set (`scripts.cc`, `combat_rt_party_follow_held` — vanilla's own switch, every companion's follow asks it first). The
+focus has a chevron (`rt_marks[]`). ATTACK / CHARGE lift hold fire and end posts, FOLLOW ends posts and own foci — for
+B's LT + D-pad too. Two tables keyed by object id: `RtSquadPref` (hold fire, the weapon pid; SAVED as the chunk's
+`RTSQ` section, before RTPB; cleared on load / new game) and `RtSquadOrder` (post, own focus, heal on its way; this map
+only, `rt_abandon_encounter`). Out of a fight a post (or a heal on its way) keeps the party script's follow off by
+running that heartbeat with `GVAR_PARTY_NO_FOLLOW` set (`scripts.cc`, `combat_rt_party_follow_held` — vanilla's own
+switch, every companion's follow asks it first). The
 mode draws on top of the world overlay and is told about freed objects (`combat_rt_set_squad_mode_hooks`). Engine
 hunks: `scripts.cc` (the GVAR around the heartbeat; the game clock's rate), `game_dialog.cc` ("Use best weapon" forgets
-the pick), `animation.cc` (the animation clock, below). Traces: `[ACTION/squad-order] ... who=` (at the END of B's
-line), `[FLOW/squad-follow-held]`, `[FLOW/squad-fire] hold|open|drop|refuse`, `[FLOW/squad-heal] order|wait|dose|end`,
-`[FLOW/squad-weapon] pin|auto|take|keep|lapse|resume|hopeless`, `[FLOW/squad-focus] own-on|own-off`, `[FLOW/squad-mode]
+the pick), `animation.cc` (the animation clock, below). Traces: `[ACTION/squad-order] ... who= tile=` (at the END of
+B's line), `[FLOW/squad-post] set|walk|arrive|off|kept|end`, `[FLOW/squad-follow-held] ... heal= post=`,
+`[FLOW/squad-fire] hold|open|drop|refuse`, `[FLOW/squad-heal] order|wait|dose|end`, `[FLOW/squad-weapon]
+pin|auto|take|keep|lapse|resume|hopeless`, `[FLOW/squad-focus] own-on|own-off`, `[FLOW/squad-mode]
 open|slow|freeze|close`, `[STATE/squad-save|squad-load]`, `[FLOW/medic] ... why=beat|heal-me`, `[FLOW/medic-optout] id=
 treats= count=` (NO HEALING / HEAL AGAIN write the dialogue toggle's own line). The harness's `squad <ms> <order> <who>
-[arg]` timeline step (`autotest.cc`, F2: attack, follow, hold, charge, holdfire, openfire, healme, noheal, healagain,
-weapon, auto) gives an order straight to combat_rt: `squad-holdfire.txt`, `squad-noheal.txt` (the medic beat's own
-dose of the dude, held off and back), `squad-heal.txt`, `squad-heal-script.txt` (HEAL ME against the companion's own
-party script, `script 50` = DCVic: the follow held), `squad-weapon.txt`, `squad-attack-one.txt`.
+[arg]` timeline step (`autotest.cc`, F2: attack, follow, hold, charge, go, holdfire, openfire, healme, noheal,
+healagain, weapon, auto) gives an order straight to combat_rt: `squad-go.txt`, `squad-go-all.txt`, `squad-go-fight.txt`,
+`squad-holdfire.txt`, `squad-noheal.txt` (the medic beat's own dose of the dude, held off and back), `squad-heal.txt`,
+`squad-heal-script.txt` (HEAL ME against the companion's own party script, `script 50` = DCVic: the follow held),
+`squad-weapon.txt`, `squad-attack-one.txt`.
 
 **The squad command mode** (`gamepad_ui.cc` `gpui_squad_*`, F2): LT + A in the world (a companion on the floor, no
 menu, conversation, inventory, wheel, armed cursor or script scene) opens it on the safe tick; the A is spent (no
 interaction, no loot, no use-on hold). WHO starts at All, LB / RB step All → each companion nearest first → All (a
 white outline round and a green name over every one chosen). The CURSOR is a point moved by the right stick (the left
 one too once it has been back in the centre: it is the walk stick) on the pointer's curve, kept in the view, starting on
-the LT-locked enemy or 3 tiles in front of the dude; on a critter's sprite it takes that critter and follows it, else
+the LT-locked target or 3 tiles in front of the dude; on a critter's sprite it takes that critter and follows it, else
 the tile under it — corner brackets frame which. A gives the order for what is under it (red ATTACK + red brackets on
-an enemy, green or grey HEAL ME on the dude, WEAPON on a companion: a radial wheel of what his art can hold plus Auto,
-B back to the mode; anything else — free ground too, since GO went — no word, grey brackets, and A buzzes); X hold
-fire / open fire and Y no healing / heal me again for who (the legend says which: "X Hold fire" or "X Open fire", "Y
-No healing" or "Y Heal me again" — his preview „A Heal me X Hold fire Y No healing B Back“; no Y at all while the
+an enemy, the same in the lock's yellow on a neutral he can see since 2026-11-14, green GO + green brackets round the
+tile on free ground — grey where nobody chosen can get, reach asked of the pathfinder only after the cursor rests
+120 ms —, green or grey HEAL ME on the dude, WEAPON on a companion: a radial wheel of what his art can hold plus Auto,
+B back to the mode; anything else — a wall, a neutral a roof or a wall hides — no word, grey brackets, and A buzzes); X
+hold fire / open fire and Y no healing / heal me again for who (the legend says which: "X Hold fire" or "X Open fire",
+"Y No healing" or "Y Heal me again" — his preview „A Heal me X Hold fire Y No healing B Back“; no Y at all while the
 medic beat is off, cfg `medic_enabled=0`, as the dialogue then has no line either); the D-pad design B's four for who
 (a compass of four words beside the cursor); B closes. Every order closes it, a refusal buzzes and leaves it open. A
 Y held on after its order is spent like X (the close bumps the input epoch; the Y-hold weapon wheel stands aside while
@@ -329,21 +360,26 @@ nothing changes otherwise) and the game clock (`scripts.cc`); a free walk the st
 (`rt_fm_last_angle`). Not folded into `compute_tpf`: an animation takes its ticksPerFrame when it starts (only walk and
 run steps re-time), so a swing in the air would keep full speed and one started in the slowdown would stay slow
 after it. LT + D-pad (design B) opens no mode and slows nothing. Traces: `[INPUT/squad-press|squad-mode|squad-who|
-squad-cursor|squad-a|squad-x|squad-y|squad-dpad|squad-b|squad-weapon-wheel]`, `[FLOW/squad-mode] open why= slow=
-probe= | slow f= after= rt=+ probe= moved= | freeze after= rtSlowed= | close why= slowed= frozen= heldMs= rtHeld=
+squad-cursor|squad-reach|squad-a|squad-x|squad-y|squad-dpad|squad-b|squad-weapon-wheel]`, `[FLOW/squad-mode] open why=
+slow= probe= | slow f= after= rt=+ probe= moved= | freeze after= rtSlowed= | close why= slowed= frozen= heldMs= rtHeld=
 probeHeld=` (the probe is the critter on the move nearest the dude at the opening, measured from a fixed hex),
 `[FLOW/world-hold] on|off why=squad`. CONTROLS row "LT + A Squad command" (`pipboy.cc`; Y is the mode's own, no row).
 Tests through the real pad: `squad-mode-slow.txt` (the slowdown — its walker a HEAL ME on its way —, the hold, an
 order in the slowdown, B's D-pad slowing nothing), `squad-mode-coast.txt` (the dude's walk coasting to the stop),
-`squad-mode-none.txt` (no companion: LT + A is A), `squad-mode-pad.txt` (A on free ground, B, X, Y, LB / RB, the
-D-pad), `squad-save.txt` + `squad-load.txt` (the RTSQ section round trip; they overwrite the test folder's SLOT01),
-`squad-pad-holdfire.txt`, `squad-pad-noheal.txt` (Y with LT still down and held on past the close, shots of the legend
-and the two lines), `squad-pad-heal.txt`, `squad-pad-weapon.txt`, `squad-pad-attack.txt` (with shots),
-`screen-squad-mode.txt` (shots: free ground — no word, grey brackets —, who, HEAL ME grey and green under his legend
-„A Heal me X Hold fire Y No healing B Back“, WEAPON, the wheel, the erase), `screen-squad-walk.txt` (shots: the outline
-going with a HEAL ME walk through the slowdown, standing at the hold, gone after a close at the hold and after one in
-the slowdown), `screen-squad-y.txt` (shots: his legend with "Y No healing", "Saving supplies.", the legend again with
-"Y Heal me again", "I'll patch you up.").
+`squad-mode-none.txt` (no companion: LT + A is A), `squad-mode-pad.txt` (B, X, Y, LB / RB, the D-pad),
+`squad-save.txt` + `squad-load.txt` (the RTSQ section round trip; they overwrite the test folder's SLOT01),
+`squad-pad-go.txt` (a post out of a fight against the companion's own party script, FOLLOW ends it),
+`squad-pad-go-fight.txt`, `squad-pad-holdfire.txt`, `squad-pad-noheal.txt` (Y with LT still down and held on past the
+close, shots of the legend and the two lines), `squad-pad-heal.txt`, `squad-pad-weapon.txt`, `squad-pad-attack.txt`
+(with shots), `squad-pad-neutral-up.txt` (the D-pad's Up on a neutral),
+`screen-squad-mode.txt` (shots: GO on free ground — green word, brackets and lines —, who, HEAL ME grey and green under
+his legend „A Heal me X Hold fire Y No healing B Back“, WEAPON, the wheel, the erase), `screen-squad-walk.txt` (shots:
+the outline going with a HEAL ME walk through the slowdown, standing at the hold, gone after a close at the hold and
+after one in the slowdown), `screen-squad-y.txt` (shots: his legend with "Y No healing", "Saving supplies.", the
+legend again with "Y Heal me again", "I'll patch you up."), `screen-squad-neutral.txt` (shots: ATTACK and its brackets
+in yellow on a neutral ghoul, the compass's Attack white, "A Attack"; the order; the fight it started),
+`screen-squad-roof.txt` (shots: the cursor on a ghoul a roof and a wall hide — no word, grey brackets; then on the dude
+and Vic outside).
 
 **Resyncing from fallout1-ce** (last: 99edef7 → 0be4c88, v0.1.0, 2026-10-23): the modules by a three-way
 merge — `git merge-file -L F2 -L F1-old -L F1-new <ours> <F1 old> <F1 new>`, the two F1 copies taken with

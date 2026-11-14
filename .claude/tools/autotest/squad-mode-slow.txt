@@ -6,7 +6,7 @@
 # (world-hold on; neither rt_clock nor Vic moves until B). B: everything runs at full speed at once, Vic comes on and
 # doses the dude. Then an order given DURING the slowdown (X, hold fire, 0.4 s after the open) is given at once and the
 # world never holds. Then LT + D-pad (design B) opens nothing and slows nothing. (GO's walk to a post was the walker
-# until GO went, 2026-11-13.)
+# until GO went, 2026-11-13; GO came back on 2026-11-14, and the HEAL ME walk stayed the walker.)
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-mode-slow.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-mode-slow
 map DESERT1.MAP

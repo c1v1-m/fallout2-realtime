@@ -1,13 +1,13 @@
 # SCREEN: THE SQUAD COMMAND MODE, OUT OF A FIGHT (2026-11-12, his design "A", „přidej nestřílej a vyléčit mě, změň
-# zbraň, můžu mu i říkat kam má jít?“; GO, its last part, was taken out on 2026-11-13 and Y's healing switch came in).
-# LT + A opens it; the world slows for 1.5 s, then holds. Vic (10mm pistol, stimpaks) stands 4 tiles left of the dude,
-# Sulik (knife, nothing to heal with) right below him; the dude is hurt (200 of 400). No enemy: the cursor starts 3
-# tiles in front of the dude, on free ground. Shots (the screen's 853x480):
-#   1 who = All on free ground -- nothing to order there since GO went: no word, GREY corner brackets round the tile,
-#     no dotted line; both names in green over their heads and a white outline round each (2026-11-12, his „Obrys
-#     postavy“: no more green hexes), the legend "LB RB All  A Order  X Hold fire  Y No healing  B Back" with A's word
-#     grey, the compass
-#   2 RB: who = Sulik (the nearest) -- his name and outline only, Vic's gone; the legend says Sulik
+# zbraň, můžu mu i říkat kam má jít?“; GO went on 2026-11-13 and came back on 2026-11-14, his „no to jsem myslel že
+# vrátíš“; Y's healing switch, which came in when GO went, stays). LT + A opens it; the world slows for 1.5 s, then
+# holds. Vic (10mm pistol, stimpaks) stands 4 tiles left of the dude, Sulik (knife, nothing to heal with) right below
+# him; the dude is hurt (200 of 400). No enemy: the cursor starts 3 tiles in front of the dude, on free ground. Shots
+# (the screen's 853x480):
+#   1 who = All on free ground: green GO, green corner brackets round the tile, green dotted lines from Vic and Sulik,
+#     both names in green over their heads and a white outline round each (2026-11-12, his „Obrys postavy“: no more
+#     green hexes), the legend "LB RB All  A Go  X Hold fire  Y No healing  B Back", the compass
+#   2 RB: who = Sulik (the nearest) -- his name, outline and line only, Vic's all gone; the legend says Sulik
 #   3 the cursor on the dude: HEAL ME grey (Sulik carries nothing to heal with), no line
 #   4 LB: who = All -- HEAL ME green, the line from Vic (the one who would come), the legend his preview of 2026-11-13:
 #     "A Heal me  X Hold fire  Y No healing  B Back"
@@ -60,9 +60,10 @@ shot 9400
 note 11500 end
 
 # the checks (run.js)
-# free ground is the mode's "anything else" since GO went: kind none, nothing to give there
-expect \[INPUT/squad-cursor\] on kind=none ok=0 obj=-1 pid=-1 tile=20700
-expect \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=none
+# free ground is GO's again (2026-11-14): green, and once the cursor rests the pathfinder says both can get there
+expect \[INPUT/squad-cursor\] on kind=ground ok=1 obj=-1 pid=-1 tile=20700
+expect \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=ground
+expect \[INPUT/squad-reach\] tile=20700 who=-1 reach=1
 expect \[FLOW/squad-mode\] open why=lt\+a slow=1\.50
 expect \[FLOW/squad-mode\] freeze after=1\.5\d
 expect \[FLOW/world-hold\] on why=squad

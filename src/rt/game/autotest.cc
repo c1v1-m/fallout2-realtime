@@ -179,9 +179,9 @@ namespace fallout {
 //   wmat <ms> <area>                   (Fallout 2) the party stands on that world map place (wmTeleportToArea)
 //   squad <ms> <order> <who> [arg]     (Fallout 2) a SQUAD COMMAND order given straight to combat_rt, as the squad
 //                                      command mode (LT + A) gives it: who = `all` or a companion's pid (the nearest
-//                                      one of it); order attack <target pid> | follow | hold | charge | holdfire |
-//                                      openfire | healme | noheal | healagain | weapon <weapon pid> | auto (noheal /
-//                                      healagain: Y's healing switch, 2026-11-13). Traced `squad ... ok=`
+//                                      one of it); order attack <target pid> | follow | hold | charge | go <tile> |
+//                                      holdfire | openfire | healme | noheal | healagain | weapon <weapon pid> | auto
+//                                      (noheal / healagain: Y's healing switch, 2026-11-13). Traced `squad ... ok=`
 //   hostile <ms> <pid>                 the nearest critter of that pid turns on the dude (as a script's attack(); it
 //                                      still has to perceive him) -- a fight that starts when the scenario says
 //
@@ -688,7 +688,7 @@ static bool at_parse_step(char** tok, int n)
         return true;
     }
     if (squad) {
-        // squad <ms> <order> <who: all | a companion's pid> [the target's pid | the weapon's pid]
+        // squad <ms> <order> <who: all | a companion's pid> [the target's pid | the tile | the weapon's pid]
         if (n < 4) {
             at_bad_line("too short", tok[0]);
             return true;
@@ -1609,8 +1609,8 @@ static Object* at_nearest_of_pid(int pid)
 
 // `squad`: one SQUAD COMMAND order straight into combat_rt, exactly as the squad command mode gives it (combat_rt.h)
 // -- the behaviour, without steering a cursor by stick timings. order: attack <target pid> | follow | hold | charge |
-// holdfire | openfire | healme | noheal | healagain | weapon <weapon pid> | auto. (GO's `go <tile>` went with GO,
-// 2026-11-13: a leftover `go` step is no order any more, and its line says ok=0.)
+// go <tile> | holdfire | openfire | healme | noheal | healagain | weapon <weapon pid> | auto. (`go` went with GO on
+// 2026-11-13 and came back with it on 2026-11-14.)
 static void at_squad_step(const AtStep* st, int t)
 {
 #if FALLOUT_RT_GAME == 2
@@ -1622,6 +1622,7 @@ static void at_squad_step(const AtStep* st, int t)
         { "follow", COMBAT_RT_ORDER_FOLLOW },
         { "hold", COMBAT_RT_ORDER_HOLD },
         { "charge", COMBAT_RT_ORDER_CHARGE },
+        { "go", COMBAT_RT_ORDER_GO },
         { "holdfire", COMBAT_RT_ORDER_HOLD_FIRE },
         { "openfire", COMBAT_RT_ORDER_OPEN_FIRE },
         { "healme", COMBAT_RT_ORDER_HEAL_ME },
@@ -1652,7 +1653,7 @@ static void at_squad_step(const AtStep* st, int t)
             }
         }
         Object* target = order == COMBAT_RT_ORDER_ATTACK && st->value >= 0 ? at_nearest_of_pid(st->value) : NULL;
-        ok = order >= 0 && combat_rt_squad_command(who, order, target);
+        ok = order >= 0 && combat_rt_squad_command(who, order, target, order == COMBAT_RT_ORDER_GO ? st->value : -1);
     }
     trace_event(TRACE_FLOW, "autotest", "squad t=%d order=%s who=%d whoId=%d arg=%d ok=%d", t, st->text, st->index,
         who != NULL ? who->id : -1, st->value, ok ? 1 : 0);

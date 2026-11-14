@@ -1,9 +1,9 @@
 # SQUAD COMMAND MODE by the pad: its buttons (2026-11-12, his design "A"). LT + A opens the mode (the world slows,
-# then holds); A on free ground is no order since GO went (2026-11-13): the buzz, and the mode stays; B closes it with
-# no order; LT + A then X gives HOLD FIRE to All and closes it; LT + A, RB (Sulik, the nearest), RB (Vic), D-pad Down
-# gives FOLLOW to Vic alone and closes it; LT + A then Y (his pick of 2026-11-13) gives NO HEALING to All and closes it.
-# The opening A is the mode's: no interaction, no loot, no use-on cursor. The cursor's orders by the pad are
-# squad-pad-heal, -weapon, -attack, -holdfire, -noheal; the slowdown and the hold are squad-mode-slow; the pictures are
+# then holds), B closes it with no order; LT + A then X gives HOLD FIRE to All and closes it; LT + A, RB (Sulik, the
+# nearest), RB (Vic), D-pad Down gives FOLLOW to Vic alone and closes it; LT + A then Y (his pick of 2026-11-13) gives
+# NO HEALING to All and closes it. The opening A is the mode's: no interaction, no loot, no use-on cursor. The cursor's
+# orders by the pad are squad-pad-go, -go-fight, -heal, -weapon, -attack, -holdfire, -noheal (A on free ground is GO
+# again since 2026-11-14: squad-pad-go); the slowdown and the hold are squad-mode-slow; the pictures are
 # screen-squad-mode and squad-pad-attack.
 # Vic (pistol) 4 tiles left of the dude; Sulik (knife) beside him; no enemy, so nothing moves the world but the orders.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-mode-pad.txt 1 --exe build/Release/fallout2-ce.exe
@@ -19,11 +19,9 @@ dude armor 2
 spawn 16777278 19904 rot 5 wield 8 item 29 3 item 40 2 party
 spawn 16777313 20300 rot 4 wield 4 party
 
-# 1. LT + A: the mode opens, the cursor on free ground 3 tiles ahead; A there: no order, the buzz, the mode stays; B (in
-#    the slowdown): it closes with no order.
+# 1. LT + A: the mode opens; B (in the slowdown): it closes with no order.
 axis 500 LT 32767
 tap 700 A
-tap 1100 A
 tap 1500 B
 axis 1800 LT -32768
 # 2. LT + A, X (after the hold): HOLD FIRE to All; the order closes the mode.
@@ -47,7 +45,6 @@ note 12500 end
 
 # the checks (run.js)
 expect-count 4 \[FLOW/squad-mode\] open why=lt\+a slow=1\.50
-expect \[INPUT/squad-a\] kind=none order=- obj=-1 tile=\d+ who=all ok=0
 expect \[FLOW/squad-mode\] close why=b slowed=0\.\d\d frozen=0
 expect \[FLOW/squad-mode\] close why=x slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
 expect \[ACTION/squad-order\] order=hold-fire target=- companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
@@ -61,9 +58,9 @@ expect \[ACTION/squad-order\] order=no-healing target=- companions=2 skipped=0 w
 expect \[FLOW/medic-optout\] id=18062 treats=0
 expect \[FLOW/medic-optout\] id=18097 treats=0
 expect \[FLOW/squad-mode\] close why=y slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
-# A on free ground was refused (the mode stayed for B), and nothing of a GO is left
-expect-count 1 \[INPUT/squad-mode\] close why=b
-expect-not \[INPUT/squad-a\] kind=ground
+# the mode opens on free ground (GO's, since 2026-11-14), but no A there: no post was set
+expect \[INPUT/squad-mode\] open members=2 start=ahead x=\d+ y=\d+ tile=\d+ kind=ground
+expect-not \[FLOW/squad-post\] set
 # the opening A is spent: no interaction (interact_prompt's request / its walk-then-act), no world click
 expect-not \[ACTION/interact-(queue|do)\]
 expect-not \[INPUT/key\] code=-2

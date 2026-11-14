@@ -1,0 +1,28 @@
+# SQUAD COMMAND (2026-11-12, his design "A"): a post in a fight is Distance "Stay" at that tile.
+# Vic is sent to 20108 (4 tiles left of where he stands, 8 left of the dude) as a pistol raider 10 tiles right of the
+# dude comes into the fight. At his post Vic takes no step for the fight -- no chase leg, no tactic's step, no follow --
+# and shoots the raider from there (14 tiles: in a 10mm pistol's reach), and the post holds the whole fight.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-go-fight.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-go-fight
+map DESERT1.MAP
+seed 1
+duration 20
+dude tile 20100 rot 2
+dude stat PE 8
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 1 wield 8 item 29 3 party
+spawn 16777454 22100 rot 5 wield 8 item 29 2 hostile hp 30
+
+squad 300 go 16777278 20108
+note 19000 end
+
+# the checks (run.js)
+expect \[FLOW/squad-post\] set id=\d+ pid=16777278 tile=20108
+expect \[FLOW/squad-post\] arrive id=\d+ pid=16777278 tile=20108
+expect \[FLOW/party-distance\] id=\d+ pid=16777278 dist=stay
+expect \[COMBAT/attack\] NPC aid=\d+ ->pid=16777454
+# Stay at the post: none of the fight's movers, and the post never left
+expect-not \[FLOW/(walk-seg|chase-move|back-off|spread-step|party-leash|follow-step|flank-start|firepos)\] id=\d+ pid=16777278
+expect-not \[FLOW/squad-post\] (off|end) id=\d+ pid=16777278

@@ -848,14 +848,13 @@ static void _script_chk_critters()
                     proc = slaveRunHeartbeatProc(script);
                 }
                 if (proc != -1 && !combat_rt_critter_fighting(script->owner)) {
-                    // ⚠️ SQUAD COMMAND (Fallout 2 Realtime, 2026-11-12, his „vyléčit mě“): a companion on its way to
-                    // him with a stimpak (HEAL ME) must not be walked back to the dude by its own party script's
-                    // follow -- animate_move_obj_to_tile once it is 3FD/2 tiles off, and reg_anim_func(CLEAR) on its
-                    // walk. Every companion's follow asks GVAR_PARTY_NO_FOLLOW first, vanilla's own switch (the
-                    // scenes set it), so its heartbeat runs with that switch on and the rest of its critter_p_proc --
-                    // its karma checks, leaving the party -- as ever. Put back after, unless the script wrote it
-                    // itself. (GO's post, a tile he sent them to, was held the same way until he took GO out on
-                    // 2026-11-13: „nehodí se to do této action oriented verze“.)
+                    // ⚠️ SQUAD COMMAND (Fallout 2 Realtime, 2026-11-12, his „můžu mu i říkat kam má jít?“): a companion
+                    // sent to a post (GO), or on its way to him with a stimpak (HEAL ME), must not be walked back to
+                    // the dude by its own party script's follow -- animate_move_obj_to_tile once it is 3FD/2 tiles off,
+                    // and reg_anim_func(CLEAR) on its walk. Every companion's follow asks GVAR_PARTY_NO_FOLLOW first,
+                    // vanilla's own switch (the scenes set it), so its heartbeat runs with that switch on and the
+                    // rest of its critter_p_proc -- its karma checks, leaving the party -- as ever. Put back after,
+                    // unless the script wrote it itself. (GO went on 2026-11-13 and came back on 2026-11-14.)
                     bool followHeld = combat_rt_party_follow_held(script->owner);
                     int noFollowWas = followHeld ? gameGetGlobalVar(GVAR_PARTY_NO_FOLLOW) : 0;
                     if (followHeld) {

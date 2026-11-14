@@ -6,7 +6,7 @@
 # mode (shot 5) and he comes on and doses him. Then Sulik, 8 tiles off with a stimpak, is called over the same way,
 # LT + A opens the mode on his walk and B closes it 0.5 s into the slowdown, the world still moving: nothing of either
 # outline (who = All: both are outlined) stays where they were or where they are (shots 6 and 7). (GO's walk to a post
-# was the walker until GO went, 2026-11-13.)
+# was the walker until GO went, 2026-11-13; GO came back on 2026-11-14, and the HEAL ME walk stayed the walker.)
 # ⚠️ A shot is taken inside the background processes (autotest at_tl_bk), after this frame's animation step and before
 # the mode's tick measures it again: a shot can show the outline one frame behind a walk frame that changed in that very
 # frame. The screen never does -- the frame is presented after the tick (main.cc).
