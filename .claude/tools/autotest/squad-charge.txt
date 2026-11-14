@@ -1,0 +1,43 @@
+# SQUAD ORDERS (2026-11-11, his design "B"): LT + D-pad Right = CHARGE (COMBAT CONTROL Distance "Charge"), and the
+# D-pad's own meaning around it.
+# Myron (10mm pistol, his packet's Snipe) and Vic (10mm pistol, Stay close; party.txt does not let Vic charge) against
+# a pistol raider 12 tiles off. LT + Right: Myron takes CHARGE, Vic keeps his own (skipped why=unsupported). Myron must
+# close in to the tile beside the raider before he fires, gun and all (party-charge, then chase-why engage=1 dist=1).
+# Then a D-pad Down held with LT coming down during the hold: no character sheet may open (dpad-hold-lt), and a D-pad
+# tap without LT gives no order -- it keeps its old meaning.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-charge.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-charge
+map DESERT1.MAP
+seed 1
+duration 25
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777376 20302 rot 2 wield 8 item 29 3 party
+spawn 16777278 19902 rot 2 wield 8 item 29 3 party
+spawn 16777454 22500 rot 5 wield 8 item 29 2 hostile
+
+# LT down, Right = CHARGE, LT up
+axis 300 LT 32767
+tap 500 RIGHT
+axis 800 LT -32768
+# Down held 700 ms, LT pulled 100 ms into it: the hold opens nothing
+pad 2500 DOWN 1
+axis 2600 LT 32767
+pad 3200 DOWN 0
+axis 3400 LT -32768
+# a tap of Up with no LT: no order
+tap 4200 UP
+note 23000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=charge target=- companions=1 skipped=1 why=ok speaker=\d+
+expect \[ACTION/squad-order-skip\] order=charge id=\d+ pid=16777278 why=unsupported
+expect \[FLOW/party-distance\] id=\d+ pid=16777376 dist=charge was=snipe
+expect \[FLOW/party-charge\] id=\d+ pid=16777376 tgt=\d+ tgtPid=16777454
+# a gun (range two digits) and still in to the next tile before the shot
+expect \[FLOW/chase-why\] id=\d+ pid=16777376 mode=\d+ range=\d\d engage=1 dist=1 inRange=1
+expect \[INPUT/dpad-hold-lt\] dir=1
+expect-not \[FLOW/autotest\] modal win=
+expect-count 1 \[ACTION/squad-order\]

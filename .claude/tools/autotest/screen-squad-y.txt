@@ -1,0 +1,70 @@
+# SCREEN: Y IN THE SQUAD COMMAND MODE (2026-11-13, his pick when GO went: the LT + A mode stays without GO, and Y in it
+# switches their healing of him -- his preview „A Heal me   X Hold fire   Y No healing   B Back“, after a press
+# „Y Heal me again“). screen-squad-mode's setup: Vic (10mm pistol, stimpaks) 4 tiles left of the dude, Sulik (knife)
+# right below him, the dude hurt (200 of 400), no enemy. Shots (the screen's 853x480):
+#   1 LT + A, the cursor on the dude: HEAL ME green, the line from Vic, the legend his preview
+#     "LB RB All  A Heal me  X Hold fire  Y No healing  B Back"
+#   2 Y: NO HEALING to All -- given, so the mode closes, as X's order does; "Saving supplies." over Vic, the one with
+#     the stimpaks, though Sulik stands nearer
+#   3 LT + A again, the cursor on the dude: every one of All keeps his supplies now, so the legend says
+#     "Y Heal me again"
+#   4 Y: HEAL AGAIN -- the mode closes; "I'll patch you up." over Vic again
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-y.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-squad-y
+map DESERT1.MAP
+seed 1
+duration 11
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 200
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 item 40 2 party
+spawn 16777313 20302 rot 4 wield 4 party
+
+# LT + A: the mode (the world holds from about 2.3 s), LT up -- the mode stays
+axis 600 LT 32767
+tap 800 A
+axis 1100 LT -32768
+# the cursor onto the dude (474,226 -> 426,168)
+axis 2800 RX -12535
+axis 2800 RY -15146
+axis 3159 RX 0
+axis 3159 RY 0
+shot 3600
+# Y: NO HEALING to All, the mode closes
+tap 4000 Y
+shot 4400
+# LT + A again, the cursor onto the dude
+axis 5000 LT 32767
+tap 5200 A
+axis 5500 LT -32768
+axis 6900 RX -12535
+axis 6900 RY -15146
+axis 7259 RX 0
+axis 7259 RY 0
+shot 7700
+# Y: HEAL AGAIN, the mode closes
+tap 8100 Y
+shot 8500
+note 10000 end
+
+# the checks (run.js)
+expect-count 2 \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=none
+expect-count 2 \[INPUT/squad-cursor\] on kind=dude ok=1
+expect \[INPUT/squad-y\] order=no-healing who=all ok=1
+expect \[ACTION/squad-order\] order=no-healing target=- companions=2 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
+expect \[FLOW/medic-optout\] id=18062 treats=0
+expect \[FLOW/medic-optout\] id=18097 treats=0
+expect \[INPUT/squad-y\] order=heal-again who=all ok=1
+expect \[ACTION/squad-order\] order=heal-again target=- companions=2 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
+expect \[FLOW/medic-optout\] id=18062 treats=1
+expect \[FLOW/medic-optout\] id=18097 treats=1
+# ...and the list is empty again (nearest first: Sulik, then Vic)
+expect \[FLOW/medic-optout\] id=\d+ treats=1 count=0
+expect-count 2 \[INPUT/squad-mode\] close why=y
+# the Y was the mode's both times: no LT + Y firing mode, no Y-hold weapon wheel, no interaction, no other order
+expect-not \[INPUT/fire-mode\]
+expect-not \[FLOW/world-hold\] on why=wheel
+expect-not \[ACTION/interact-(queue|do)\]
+expect-not \[ACTION/squad-order\] order=(?!no-healing|heal-again)

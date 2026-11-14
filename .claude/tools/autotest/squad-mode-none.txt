@@ -1,0 +1,21 @@
+# SQUAD COMMAND MODE: nobody to order (2026-11-12, his design "A"). With no companion on the map LT + A stays what A
+# always was: no mode, no slowdown, no hold -- the world runs on.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-mode-none.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-mode-none
+map DESERT1.MAP
+seed 1
+duration 6
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+axis 500 LT 32767
+tap 700 A
+axis 1000 LT -32768
+note 5500 end
+
+# the checks (run.js)
+expect \[INPUT/btn\] a down
+expect-not \[INPUT/squad-press\]
+expect-not \[FLOW/squad-mode\]
+expect-not \[FLOW/world-hold\] on

@@ -1,0 +1,44 @@
+# SQUAD ORDERS (2026-11-11, his design "B"): LT + D-pad Up = ATTACK, the LT-locked enemy is the squad's focus.
+# Vic (10mm pistol, his own Distance Stay close) faces a knife raider 9 tiles off (behind the dude, nearer Vic than
+# anything else) and picks it on his own. The dude faces a pistol raider 12 tiles off in front (15 from Vic); LT locks
+# that one (in front beats behind, PE 10 = reach 20) and Up makes it the focus. Vic must turn on the focus at once
+# (squad-focus take) -- although it is not the nearest to him, he does not even see it, and it stands past his Stay
+# close leash (ATTACK outranks FOLLOW's leash) -- and shoot it; the red chevron sits over it (squad-mark).
+# At 9 s LT + Down = FOLLOW, the regroup: it ends the focus, and the chevron goes with it.
+# The raider has 30 HP so it lives to the FOLLOW: Vic hits 10-20 % at that range (a kill would end the focus first).
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-attack.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-attack
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude stat PE 10
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party
+spawn 16777455 18500 rot 2 wield 4 hostile hp 30
+spawn 16777454 22500 rot 5 wield 8 item 29 2 hostile hp 30
+
+# LT down (locks the pistol raider in front), Up = ATTACK, LT up (the lock goes; the focus stays)
+axis 600 LT 32767
+tap 800 UP
+axis 1200 LT -32768
+# LT down, Down = FOLLOW (the regroup), LT up
+axis 9000 LT 32767
+tap 9200 DOWN
+axis 9600 LT -32768
+note 14000 end
+
+# the checks (run.js)
+expect \[ACTION/lock-on\] target=\d+ src=LT
+expect \[ACTION/squad-order\] order=attack target=16777454 companions=1 skipped=0 why=ok speaker=\d+
+expect \[FLOW/squad-focus\] on id=\d+ pid=16777454
+expect \[FLOW/squad-mark\] on id=\d+ pid=16777454
+expect \[FLOW/squad-focus\] take id=\d+ pid=16777278 tgt=\d+ tgtPid=16777454
+expect \[COMBAT/attack\] NPC aid=\d+ ->pid=16777454
+expect \[ACTION/squad-order\] order=follow target=- companions=1 skipped=0 why=ok
+expect \[FLOW/squad-focus\] off id=\d+ pid=16777454 why=follow
+expect \[FLOW/squad-mark\] off
+# the lock let go of with LT is not the end of the focus, nor is anything else before the FOLLOW
+expect-not \[FLOW/squad-focus\] off .*why=(replaced|gone|map|dead)

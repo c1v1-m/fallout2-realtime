@@ -1,0 +1,56 @@
+# SCREEN: THE SQUAD COMMAND MODE'S OUTLINE FOLLOWS A WALKER THROUGH THE SLOWDOWN (2026-11-12, his pick „Obrys postavy“
+# for the marks of who is chosen). The dude is hurt; Vic, 12 tiles off with a stimpak, is told HEAL ME and comes to him;
+# 0.7 s into his walk LT + A opens the mode. The world eases to a standstill over 1.5 s of real time: Vic comes on,
+# slower and slower, and the white outline goes with every frame of his walk and every glide between its steps (shots
+# 1-3, 0.3 / 0.7 / 1.1 s into the slowdown), then stands with him at the hold (shot 4). B: the outline goes with the
+# mode (shot 5) and he comes on and doses him. Then Sulik, 8 tiles off with a stimpak, is called over the same way,
+# LT + A opens the mode on his walk and B closes it 0.5 s into the slowdown, the world still moving: nothing of either
+# outline (who = All: both are outlined) stays where they were or where they are (shots 6 and 7). (GO's walk to a post
+# was the walker until GO went, 2026-11-13.)
+# ⚠️ A shot is taken inside the background processes (autotest at_tl_bk), after this frame's animation step and before
+# the mode's tick measures it again: a shot can show the outline one frame behind a walk frame that changed in that very
+# frame. The screen never does -- the frame is presented after the tick (main.cc).
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-walk.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-squad-walk
+map DESERT1.MAP
+seed 1
+duration 10
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 200
+dude armor 2
+
+spawn 16777278 20112 rot 5 wield 8 item 29 3 item 40 1 party
+spawn 16777313 18500 rot 2 wield 4 item 40 1 party
+
+# Vic comes to dose him (HEAL ME, 12 tiles off); 0.7 s into his walk, LT + A
+squad 300 healme 16777278
+axis 800 LT 32767
+tap 1000 A
+axis 1300 LT -32768
+shot 1300
+shot 1700
+shot 2100
+shot 3000
+# B: the mode goes, the world runs at full speed at once
+tap 3400 B
+shot 3800
+# Sulik is called over (HEAL ME, 8 tiles off); LT + A on his walk, B in the slowdown
+squad 6000 healme 16777313
+axis 6300 LT 32767
+tap 6500 A
+axis 6800 LT -32768
+tap 7000 B
+shot 7100
+shot 7600
+note 9500 end
+
+# the checks (run.js)
+expect \[FLOW/squad-mode\] open why=lt\+a slow=1\.50 probe=\d+ probePid=16777278
+expect \[FLOW/squad-mode\] freeze after=1\.5\d
+expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+expect \[FLOW/squad-heal\] dose id=\d+ pid=16777278 item=40 kind=1 ok=1
+expect \[FLOW/squad-mode\] open why=lt\+a slow=1\.50 probe=\d+ probePid=16777313
+expect \[FLOW/squad-mode\] close why=b slowed=0\.[3-7]\d frozen=0 heldMs=0
+expect \[FLOW/squad-heal\] dose id=\d+ pid=16777313 item=40 kind=1 ok=1
+expect-count 2 \[FLOW/squad-mode\] open why=lt\+a

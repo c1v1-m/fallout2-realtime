@@ -88,6 +88,7 @@ namespace fallout {
 //   spawn <pid> <tile> [rot <r>] [wield <pid>] [item <pid> <qty>]... [hostile] [team <n>] [hp <n>] [empty] [dead]
 //                                      `hostile` = an enemy that still has to SEE you before it comes
 //                                      `dead` = a body on the floor with its items (a looting test)
+//                                      [party] a follower; [script <n>] (Fallout 2) the script on scripts.lst line n
 //   at <seconds> <policy> [tile]       the bot's plan; policies:
 //        idle                          do nothing
 //        fight                         hold LT, attack the locked enemy when it is in weapon range,
@@ -176,6 +177,13 @@ namespace fallout {
 //   area <ms> <area> [state]           (Fallout 2) a world map place shown (state 1, the default) or hidden
 //                                      (0), as a script's mark_area_known does (wmAreaSetVisibleState)
 //   wmat <ms> <area>                   (Fallout 2) the party stands on that world map place (wmTeleportToArea)
+//   squad <ms> <order> <who> [arg]     (Fallout 2) a SQUAD COMMAND order given straight to combat_rt, as the squad
+//                                      command mode (LT + A) gives it: who = `all` or a companion's pid (the nearest
+//                                      one of it); order attack <target pid> | follow | hold | charge | holdfire |
+//                                      openfire | healme | noheal | healagain | weapon <weapon pid> | auto (noheal /
+//                                      healagain: Y's healing switch, 2026-11-13). Traced `squad ... ok=`
+//   hostile <ms> <pid>                 the nearest critter of that pid turns on the dude (as a script's attack(); it
+//                                      still has to perceive him) -- a fight that starts when the scenario says
 //
 //   buttons: a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown
 //            dpleft dpright, or A B X Y BACK START L3 R3 LB RB UP DOWN LEFT RIGHT
@@ -230,6 +238,10 @@ typedef struct AtSpawn {
     bool empty; // "empty": the wielded gun starts with no rounds in it
     bool dead; // "dead": killed where it stands, a body to loot
     bool party; // "party": joins the dude's party (partyMemberAdd) -- a real follower, not just his team
+    // "script <n>" (Fallout 2): the critter runs the script on line n of scripts.lst (1-based, as an encounter table's
+    // Script= names it), its proto's own replaced -- a companion's party script (DCVic.int is line 50), heartbeat and
+    // all, so its own follow and its other habits are part of the test.
+    int script;
     // "stat <ST..LK> <n>": ⚠️ sets the PROTO's base stat (stat_set_base on a critter writes its proto),
     // so every critter of that pid gets it -- give the one under test a pid of its own.
     int statIndex[4];
@@ -341,6 +353,8 @@ enum {
     AT_STEP_CLOCK, // index = game hours added
     AT_STEP_AREA, // index = world map area, value = its CityState
     AT_STEP_WMAT, // index = world map area the party is put on
+    AT_STEP_SQUAD, // text = order, index = who (a companion's pid, -1 = all), value = its argument
+    AT_STEP_HOSTILE, // index = pid: the nearest critter of it turns on the dude, as a script's attack() does
 };
 
 enum {
@@ -626,7 +640,10 @@ static bool at_parse_step(char** tok, int n)
     bool clock = strcmp(tok[0], "clock") == 0;
     bool area = strcmp(tok[0], "area") == 0;
     bool wmat = strcmp(tok[0], "wmat") == 0;
-    if (!button && !tap && !axis && !open && !note && !walkto && !talk && !shot && !mapgo && !clock && !area && !wmat) {
+    bool squad = strcmp(tok[0], "squad") == 0;
+    bool hostile = strcmp(tok[0], "hostile") == 0;
+    if (!button && !tap && !axis && !open && !note && !walkto && !talk && !shot && !mapgo && !clock && !area && !wmat
+        && !squad && !hostile) {
         return false;
     }
     if (shot && n >= 2) {
@@ -664,6 +681,23 @@ static bool at_parse_step(char** tok, int n)
     }
     if (wmat) {
         at_add_step(ms, AT_STEP_WMAT, atoi(tok[2]), 0);
+        return true;
+    }
+    if (hostile) {
+        at_add_step(ms, AT_STEP_HOSTILE, atoi(tok[2]), 0);
+        return true;
+    }
+    if (squad) {
+        // squad <ms> <order> <who: all | a companion's pid> [the target's pid | the weapon's pid]
+        if (n < 4) {
+            at_bad_line("too short", tok[0]);
+            return true;
+        }
+        AtStep* st = at_add_step(ms, AT_STEP_SQUAD, strcmp(tok[3], "all") == 0 ? -1 : atoi(tok[3]),
+            n >= 5 ? atoi(tok[4]) : -1);
+        if (st != NULL) {
+            SDL_strlcpy(st->text, tok[2], sizeof(st->text));
+        }
         return true;
     }
     if (button || tap) {
@@ -865,6 +899,8 @@ static bool at_parse(const char* path)
                     sp->party = true;
                 } else if (strcmp(tok[i], "empty") == 0) {
                     sp->empty = true;
+                } else if (strcmp(tok[i], "script") == 0 && i + 1 < n) {
+                    sp->script = atoi(tok[++i]);
                 } else if (strcmp(tok[i], "stat") == 0 && i + 2 < n && sp->statCount < 4) {
                     int st = at_stat_index(tok[i + 1]);
                     if (st >= 0) {
@@ -1212,6 +1248,19 @@ void autotest_setup_world()
             // As a script's "attack the player" does: hostile, but it still has to perceive you.
             combat_rt_notify_attack(critter, obj_dude);
         }
+#if FALLOUT_RT_GAME == 2
+        if (sp->script > 0) {
+            // As an encounter's Script= does (worldmap.cc): the proto's own goes, this one runs from its first event.
+            // Before the party add: _obj_new_sid_inst gives the critter a new object id, and partyMemberAdd then sets
+            // the companion's own ((pid & 0xFFFFFF) + 18000) on it and its script alike.
+            if (critter->sid != -1) {
+                scriptRemove(critter->sid);
+                critter->sid = -1;
+            }
+            int rc = _obj_new_sid_inst(critter, SCRIPT_TYPE_CRITTER, sp->script - 1);
+            trace_event(TRACE_FLOW, "autotest", "script pid=%d line=%d rc=%d", critter->pid, sp->script, rc);
+        }
+#endif
         if (sp->party) {
             // A follower the way a recruiting script makes one (party_add): the game's own party list,
             // which is what realtime's friendly side reads (isPartyMember), not only the dude's team.
@@ -1540,6 +1589,78 @@ static const char* at_axis_name(int axis)
     return name != NULL ? name : "?";
 }
 
+// The nearest critter of `pid` on the dude's floor that is not dead, or NULL (a squad step's companion or target).
+static Object* at_nearest_of_pid(int pid)
+{
+    Object* best = NULL;
+    Object** list = NULL;
+    int count = obj_create_list(-1, obj_dude->elevation, OBJ_TYPE_CRITTER, &list);
+    for (int i = 0; i < count; i++) {
+        if (list[i]->pid == pid && !critter_is_dead(list[i])
+            && (best == NULL || obj_dist(obj_dude, list[i]) < obj_dist(obj_dude, best))) {
+            best = list[i];
+        }
+    }
+    if (list != NULL) {
+        obj_delete_list(list);
+    }
+    return best;
+}
+
+// `squad`: one SQUAD COMMAND order straight into combat_rt, exactly as the squad command mode gives it (combat_rt.h)
+// -- the behaviour, without steering a cursor by stick timings. order: attack <target pid> | follow | hold | charge |
+// holdfire | openfire | healme | noheal | healagain | weapon <weapon pid> | auto. (GO's `go <tile>` went with GO,
+// 2026-11-13: a leftover `go` step is no order any more, and its line says ok=0.)
+static void at_squad_step(const AtStep* st, int t)
+{
+#if FALLOUT_RT_GAME == 2
+    static const struct {
+        const char* name;
+        int order;
+    } orders[] = {
+        { "attack", COMBAT_RT_ORDER_ATTACK },
+        { "follow", COMBAT_RT_ORDER_FOLLOW },
+        { "hold", COMBAT_RT_ORDER_HOLD },
+        { "charge", COMBAT_RT_ORDER_CHARGE },
+        { "holdfire", COMBAT_RT_ORDER_HOLD_FIRE },
+        { "openfire", COMBAT_RT_ORDER_OPEN_FIRE },
+        { "healme", COMBAT_RT_ORDER_HEAL_ME },
+        { "noheal", COMBAT_RT_ORDER_NO_HEALING }, // Y in the mode: the medic opt-out for who (2026-11-13)
+        { "healagain", COMBAT_RT_ORDER_HEAL_AGAIN },
+    };
+    Object* who = st->index >= 0 ? at_nearest_of_pid(st->index) : NULL;
+    bool ok = false;
+    if (st->index >= 0 && who == NULL) {
+        ok = false;
+    } else if (strcmp(st->text, "weapon") == 0 || strcmp(st->text, "auto") == 0) {
+        Object* item = NULL;
+        if (who != NULL && strcmp(st->text, "weapon") == 0) {
+            Inventory* inventory = &(who->data.inventory);
+            for (int i = 0; i < inventory->length && item == NULL; i++) {
+                if (inventory->items[i].item->pid == st->value) {
+                    item = inventory->items[i].item;
+                }
+            }
+        }
+        ok = who != NULL && (item != NULL || strcmp(st->text, "auto") == 0)
+            && combat_rt_squad_set_weapon(who, item);
+    } else {
+        int order = -1;
+        for (size_t i = 0; i < sizeof(orders) / sizeof(orders[0]); i++) {
+            if (strcmp(st->text, orders[i].name) == 0) {
+                order = orders[i].order;
+            }
+        }
+        Object* target = order == COMBAT_RT_ORDER_ATTACK && st->value >= 0 ? at_nearest_of_pid(st->value) : NULL;
+        ok = order >= 0 && combat_rt_squad_command(who, order, target);
+    }
+    trace_event(TRACE_FLOW, "autotest", "squad t=%d order=%s who=%d whoId=%d arg=%d ok=%d", t, st->text, st->index,
+        who != NULL ? who->id : -1, st->value, ok ? 1 : 0);
+#else
+    trace_event(TRACE_WARN, "autotest", "squad t=%d not in this game (%s)", t, st->text);
+#endif
+}
+
 // Which screen is up: the topmost modal window, traced whenever it changes. Every screen the pad
 // reaches registers WINDOW_MODAL -- the editor and its age / sex / options windows, dialog_out, the
 // inventory, the Pip-Boy, the automap, the options menu -- so its id, place and size say which.
@@ -1703,6 +1824,21 @@ static void at_tl_bk()
 #else
             trace_event(TRACE_WARN, "autotest", "wmat t=%d not in this game", t);
 #endif
+            break;
+        }
+        case AT_STEP_SQUAD:
+            at_squad_step(st, t);
+            break;
+        case AT_STEP_HOSTILE: {
+            // A fight that starts when the scenario says so -- after a squad command mode was used out of one, say: a
+            // critter spawned neutral (and off the screen, where LT cannot lock it) turns on the dude now. It still
+            // has to perceive him, as after a script's attack().
+            Object* critter = at_nearest_of_pid(st->index);
+            if (critter != NULL) {
+                combat_rt_notify_attack(critter, obj_dude);
+            }
+            trace_event(TRACE_FLOW, "autotest", "hostile t=%d pid=%d id=%d tile=%d", t, st->index,
+                critter != NULL ? critter->id : -1, critter != NULL ? critter->tile : -1);
             break;
         }
         }

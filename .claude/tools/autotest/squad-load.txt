@@ -1,0 +1,16 @@
+# SQUAD COMMAND (2026-11-12, his design "A"): load the quick save squad-save.txt wrote -- Vic's hold fire and his knife
+# pick come back from the chunk's RTSQ section (cleared first: nothing of the game running before the load survives).
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-load.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-load
+map DESERT1.MAP
+loadslot 1
+seed 1
+duration 6
+
+note 500 loaded
+note 5500 end
+
+# the checks (run.js)
+expect \[FLOW/autotest\] loadslot 1 rc=0
+expect \[STATE/squad-load\] saved=1 holdFire=1 weapons=1
+expect-not load-handler-failed

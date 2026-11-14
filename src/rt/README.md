@@ -26,16 +26,23 @@ fallout1-ce's hunks re-applied by hand, keeping Fallout 2's own rules (sfall exp
 tables, its AI packets).
 
 **Module deltas** — the places where a `src/rt/game` file differs from fallout1-ce (re-apply after a resync):
-- `gamepad_ui.cc`: `inWorld` needs `combat_rt_enabled()`; `gpui_acquire` prefers the padtest pad (`rt_padtest_controller_index`).
+- `gamepad_ui.cc`: `inWorld` needs `combat_rt_enabled()`; `gpui_acquire` prefers the padtest pad (`rt_padtest_controller_index`);
+  LT + D-pad squad orders and the LT + A squad command mode (`FALLOUT_RT_GAME == 2`, see "Squad orders" and "Squad
+  command" below; the mode's flag exists in both games so the wheels and the hook can stand aside for it).
 - `mods_page.cc`: `FALLOUT_RT_GAME` res ini name and `mods_row_visible`.
 - `combat_rt.cc`: `rt_plan_attack` passes the target to `combatai_pick_hit_mode` (F2's AI weighs it);
   the corpse that must stay standing is read off the proto (`CRITTER_FLAT`, `rt_settle_corpse_flat` and
   the dying reaction) — fallout1-ce names three F1 pids, which are other critters in F2; the Master's
   boss fight (guards, horde, psychic scream: found by F1 pids and maps) is `#if FALLOUT_RT_GAME == 1`,
-  with an empty `rt_horde_reset` for F2.
+  with an empty `rt_horde_reset` for F2; the squad orders read and write COMBAT CONTROL's Distance
+  (`aiGetDistance` / `aiSetDistance`, `FALLOUT_RT_GAME == 2`; Fallout 1 reads no Distance and keeps today's fight);
+  the squad command (see "Squad command" below: its orders, the `RTSQ` save section and the Healing Powder / Fallout 2
+  kits are `FALLOUT_RT_GAME == 2`; Fallout 1's tables stay empty, so none of it runs there).
 - `autotest.cc`: the `worldmap_script_jump` step is `#if FALLOUT_RT_GAME == 1` (F1's world map); two
   scenario keywords fallout1-ce does not have yet: `census` (every critter on every floor, traced at the
-  start) and `party` on a spawn (`partyMemberAdd`, a real follower).
+  start) and `party` on a spawn (`partyMemberAdd`, a real follower); the `squad` timeline step (F2); the `hostile
+  <ms> <pid>` timeline step (a fight that starts when the scenario says) and `script <scripts.lst line>` on a spawn
+  (F2: a companion's own party script, attached before `party` so the party id holds).
 
 **Fallout 1 Realtime's saves (2026-10-24):** `loadsave.cc` `SaveGameSlot` (vanilla's quick save body with no
 boxes, refuses a dead/KO dude), `QuickSaveGame` (START held → SLOT01 "Quick Save"), `AutoSaveLocation`
@@ -216,6 +223,127 @@ only, never the dude. The to-hit canvas (ACTTOHIT.FRM, 50 x 21) is widened to 14
 `artWidenToHitCanvas`, fallout1-ce's trick for its Awareness line), the crosshair where it was. Awareness's
 perk card now says so (fallout1-ce's note). `[COMBAT/aim-health]` on a change, `screen-aim-health.txt` /
 `screen-aim-health-aware.txt`.
+
+**Squad orders** (2026-11-11, his design "B", „Obojí, nejdřív B“): LT held + a D-pad press orders every companion at
+once — Up ATTACK, Down FOLLOW, Left HOLD, Right CHARGE (`gamepad_ui.cc`, module delta, `FALLOUT_RT_GAME == 2`: taken on
+the PRESS like LT+Y, spent so no tap or hold follows, only from a D-pad at rest; a D-pad hold opens no screen while LT
+is down; given on the safe tick, a click or the error buzz). `combat_rt.cc` `combat_rt_squad_order`: ATTACK makes the
+LT-locked enemy the squad's focus (`rt_squad_focus`; no lock or a neutral one is refused), which every companion that
+can get at it goes for first (`rt_focus_wanted` — a shot from where it stands or a route, asked once a second) until it
+dies, leaves the floor, the map changes or a load comes, another ATTACK replaces it, or the fight is ended (END COMBAT,
+a script's `terminate_combat`) or the target joins his side, with a red chevron over its
+head (the prompt arrows' 5 x 3, through the tile overlay, `rt_squad_mark_tick`). FOLLOW / HOLD / CHARGE write COMBAT
+CONTROL's Distance (Stay close / Stay / Charge) the way the dialogue's panel does: Custom first (`aiSetDisposition` 0,
+the packet `aiSave` keeps), then `aiSetDistance` — only a value party.txt allows (Vic will not charge), never on a
+generic packet. The nearest companion that took it floats "On it." / "Coming." / "Holding." / "Charging!". And the
+fight now keeps to every companion's Distance (it ignored it; module delta, Fallout 1 reads `RT_DIST_NONE` = no rule):
+vanilla's regroup distances (5 / 7 / 7 / 7 / never), Stay close fights from within 5 tiles of the dude (pulled back
+past 5 + 2, `rt_party_leash`), Stay takes no step for the fight and turns toward what comes (`rt_party_hold_look`,
+and `combat_rt_critter_fighting` keeps its party script from walking it), Charge closes to the next tile before it
+attacks, Snipe backs off by vanilla's rule (`rt_party_snipe_step`), and a companion whose Distance will not let it
+go after its target lets the target go (`rt_party_chase_holds`), so no fight is kept on for nobody. Traces:
+`[ACTION/squad-order]`, `[FLOW/squad-focus] on|take|off`, `[FLOW/squad-mark]`, `[FLOW/party-distance]`,
+`[FLOW/party-hold]`, `[FLOW/party-drop]`, `[FLOW/party-leash]`, `[FLOW/party-look]`, `[FLOW/party-charge]`,
+`[FLOW/party-snipe]`, `follow-step ... limit= why=`. "LT + D-pad Squad orders" is a CONTROLS row (`pipboy.cc`).
+`squad-hold.txt`, `squad-follow.txt`, `squad-attack.txt`, `squad-charge.txt`. Not in fallout1-ce (it has no COMBAT
+CONTROL).
+
+**Squad command** (2026-11-12, his design "A", „přidej nestřílej a vyléčit mě, změň zbraň, můžu mu i říkat kam má
+jít?“) — the behaviours and their API in `combat_rt.cc` / `combat_rt.h` (the LT + A mode that gives the orders lives in
+`gamepad_ui.cc`). Its last part, GO — A on free ground: a tile they walked to and held, the POST (Distance "Stay" there
+in a fight and out of one, All spread round it, the pathfinder's reach under the cursor) — was TAKEN OUT again on
+2026-11-13 at his ask, „dej pryč ovládání a přikazování companions kam mají přesně chodit … nehodí se to do této
+action oriented verze“ (it does not fit the action version); Y's healing switch came instead, and GO as it was, code
+and tests, lives on the branch `shelf/squad-orders-with-go` (ad1fe7a). One function
+gives every order, to All (`who` NULL: the party on the dude's floor, alive and awake) or to one companion:
+`combat_rt_squad_command(who, order, target)`; design B's `combat_rt_squad_order` is now `who` = All with ATTACK on the
+LT lock. New orders: HOLD FIRE / OPEN FIRE (`rt_squad_holds_fire`: a fight it is in is dropped at the top of
+`rt_update_actor`, its idle pick takes nobody, the arbiter skips it, END COMBAT does not wait on it; it still follows,
+flees, heals), HEAL ME (the chosen one, or the nearest with supplies, walks to him with `rt_party_step_to_dude` and doses
+him with `rt_medic_dose` — the medic beat's dose, past its threshold, cooldown and opt-out; his own heal order Stimpak /
+Super Stimpak / Healing Powder, then a kit; "No meds.", "You're fine.", "Can't reach you."), NO HEALING / HEAL AGAIN
+(2026-11-13, Y in the mode: the medic opt-out the party dialogue line "(Stop patching me up. Save your supplies.)"
+toggles — `combat_rt_medic_set_treats_player` for each of who, the very state the dialogue reads and the realtime
+chunk's opt-out list saves; `combat_rt_squad_medic_off(who)`, every one of who refusing, makes Y HEAL AGAIN; "Saving
+supplies." / "I'll patch you up."; only the medic beat asks it, HEAL ME goes past it; no Distance, no hold fire, a HEAL
+ME on its way goes on; refused why=medic-off while there is no medic beat), WEAPON (`combat_rt_squad_set_weapon`: the
+pick is taken out at the next free beat and `rt_ensure_weapon_drawn` keeps to it while it is carried and can fire; dry
+or gone, the AI chooses and it says "Out of ammo." once; hopeless by min_to_hit, the AI chooses for the rest of that
+fight instead of the flight; COMBAT CONTROL's "Use best weapon" forgets it). ATTACK to one companion is its OWN focus
+(`RtSquadOrder.focus`, before the squad's); FOLLOW to one ignores the squad's focus till its next ATTACK; every live
+focus has a chevron (`rt_marks[]`). ATTACK / CHARGE lift hold fire, FOLLOW ends own foci — for B's LT + D-pad too. Two
+tables keyed by object id: `RtSquadPref` (hold fire, the weapon pid; SAVED as the chunk's `RTSQ` section, before RTPB;
+cleared on load / new game) and `RtSquadOrder` (own focus, heal on its way; this map only, `rt_abandon_encounter`). Out
+of a fight a heal on its way keeps the party script's follow off by running that heartbeat with `GVAR_PARTY_NO_FOLLOW`
+set (`scripts.cc`, `combat_rt_party_follow_held` — vanilla's own switch, every companion's follow asks it first). The
+mode draws on top of the world overlay and is told about freed objects (`combat_rt_set_squad_mode_hooks`). Engine
+hunks: `scripts.cc` (the GVAR around the heartbeat; the game clock's rate), `game_dialog.cc` ("Use best weapon" forgets
+the pick), `animation.cc` (the animation clock, below). Traces: `[ACTION/squad-order] ... who=` (at the END of B's
+line), `[FLOW/squad-follow-held]`, `[FLOW/squad-fire] hold|open|drop|refuse`, `[FLOW/squad-heal] order|wait|dose|end`,
+`[FLOW/squad-weapon] pin|auto|take|keep|lapse|resume|hopeless`, `[FLOW/squad-focus] own-on|own-off`, `[FLOW/squad-mode]
+open|slow|freeze|close`, `[STATE/squad-save|squad-load]`, `[FLOW/medic] ... why=beat|heal-me`, `[FLOW/medic-optout] id=
+treats= count=` (NO HEALING / HEAL AGAIN write the dialogue toggle's own line). The harness's `squad <ms> <order> <who>
+[arg]` timeline step (`autotest.cc`, F2: attack, follow, hold, charge, holdfire, openfire, healme, noheal, healagain,
+weapon, auto) gives an order straight to combat_rt: `squad-holdfire.txt`, `squad-noheal.txt` (the medic beat's own
+dose of the dude, held off and back), `squad-heal.txt`, `squad-heal-script.txt` (HEAL ME against the companion's own
+party script, `script 50` = DCVic: the follow held), `squad-weapon.txt`, `squad-attack-one.txt`.
+
+**The squad command mode** (`gamepad_ui.cc` `gpui_squad_*`, F2): LT + A in the world (a companion on the floor, no
+menu, conversation, inventory, wheel, armed cursor or script scene) opens it on the safe tick; the A is spent (no
+interaction, no loot, no use-on hold). WHO starts at All, LB / RB step All → each companion nearest first → All (a
+white outline round and a green name over every one chosen). The CURSOR is a point moved by the right stick (the left
+one too once it has been back in the centre: it is the walk stick) on the pointer's curve, kept in the view, starting on
+the LT-locked enemy or 3 tiles in front of the dude; on a critter's sprite it takes that critter and follows it, else
+the tile under it — corner brackets frame which. A gives the order for what is under it (red ATTACK + red brackets on
+an enemy, green or grey HEAL ME on the dude, WEAPON on a companion: a radial wheel of what his art can hold plus Auto,
+B back to the mode; anything else — free ground too, since GO went — no word, grey brackets, and A buzzes); X hold
+fire / open fire and Y no healing / heal me again for who (the legend says which: "X Hold fire" or "X Open fire", "Y
+No healing" or "Y Heal me again" — his preview „A Heal me X Hold fire Y No healing B Back“; no Y at all while the
+medic beat is off, cfg `medic_enabled=0`, as the dialogue then has no line either); the D-pad design B's four for who
+(a compass of four words beside the cursor); B closes. Every order closes it, a refusal buzzes and leaves it open. A
+Y held on after its order is spent like X (the close bumps the input epoch; the Y-hold weapon wheel stands aside while
+the mode is up): no hand swap, no LT + Y firing mode, no wheel. The marks ride on combat_rt's world overlay
+(`gpui_squad_overlay`): the dotted lines, over them the OUTLINES (his pick 2026-11-12 „Obrys postavy“, after „nelíbí se
+mi zelené kruhy“ about the green hexes they replaced), on top the brackets. An outline is 1 px round the sprite's
+current frame, the engine's own outline shape (every see-through pixel next to a solid one, up, down, left or right),
+traced by the overlay from what the tick measured — fid, frame, facing and the place the renderer draws it, the
+smooth-movement glide included (`gpui_squad_sprite_of`, as `_obj_render_object` places it) — with the art locked by
+fid: the overlay reads no object. Never the object's own `outline` field (vanilla's combat outlines and the LT lock own
+it, a fight starting in the slowdown rewrites it, a save keeps it); `objectDrawOutline` is not reused for the same
+reason (it takes its colour from that field and writes the object's sx / sy). White, `GPUI_SQUAD_OUTLINE_RGB`: no
+outline of the game's is white (team green, enemy red, the yellow of an item / a neutral under the lock / a friendly
+the stick points at, vanilla's ochre for a critter out of the line of fire; the badges' gold, the other candidate, sits
+by that ochre and that yellow and fades on desert sand). A walk frame or a glide that moves on changes what the tick
+measured, so the old outline's box and the new one's are repainted. The words are small MOVE_ON_TOP windows copying
+the world under them (the prompt word's way), all erased on every way out (the input epoch is bumped so the buttons it
+took are spent; a close after the hold repaints the whole view once, since an order given then cuts a walk while the
+smooth-movement glides stand still). **First a slowdown, then the stop** (his pick 2026-11-12: „ten efekt
+bude nejdříve zpomalení a pak zastavení … 1 nebo 2“): from the opening the whole world eases from full speed to a
+standstill over `RT_SQUAD_SLOW_SECONDS` 1.5 s of real time (smoothstep, floored at 0.05 like the limb picker's slow
+motion) and only then holds still as under a radial wheel (`rt_world_frozen`; gamepad_ui suspends the background
+processes when `combat_rt_squad_mode_frozen`); the mode answers the pad from its first frame and an order given during
+the slowdown is given at once; its close lets everything run at full speed at once. One rate, `combat_rt_world_rate`:
+combat_rt_update's dt (after `combat_rt_time_scale`), the ANIMATION CLOCK (`animation.cc` `anim_clock_now`: frame
+waits, the smooth-movement glides, stride and cadence holds all read it — it is getTicks() until the first slowdown, so
+nothing changes otherwise) and the game clock (`scripts.cc`); a free walk the stick had going coasts to the stop
+(`rt_fm_last_angle`). Not folded into `compute_tpf`: an animation takes its ticksPerFrame when it starts (only walk and
+run steps re-time), so a swing in the air would keep full speed and one started in the slowdown would stay slow
+after it. LT + D-pad (design B) opens no mode and slows nothing. Traces: `[INPUT/squad-press|squad-mode|squad-who|
+squad-cursor|squad-a|squad-x|squad-y|squad-dpad|squad-b|squad-weapon-wheel]`, `[FLOW/squad-mode] open why= slow=
+probe= | slow f= after= rt=+ probe= moved= | freeze after= rtSlowed= | close why= slowed= frozen= heldMs= rtHeld=
+probeHeld=` (the probe is the critter on the move nearest the dude at the opening, measured from a fixed hex),
+`[FLOW/world-hold] on|off why=squad`. CONTROLS row "LT + A Squad command" (`pipboy.cc`; Y is the mode's own, no row).
+Tests through the real pad: `squad-mode-slow.txt` (the slowdown — its walker a HEAL ME on its way —, the hold, an
+order in the slowdown, B's D-pad slowing nothing), `squad-mode-coast.txt` (the dude's walk coasting to the stop),
+`squad-mode-none.txt` (no companion: LT + A is A), `squad-mode-pad.txt` (A on free ground, B, X, Y, LB / RB, the
+D-pad), `squad-save.txt` + `squad-load.txt` (the RTSQ section round trip; they overwrite the test folder's SLOT01),
+`squad-pad-holdfire.txt`, `squad-pad-noheal.txt` (Y with LT still down and held on past the close, shots of the legend
+and the two lines), `squad-pad-heal.txt`, `squad-pad-weapon.txt`, `squad-pad-attack.txt` (with shots),
+`screen-squad-mode.txt` (shots: free ground — no word, grey brackets —, who, HEAL ME grey and green under his legend
+„A Heal me X Hold fire Y No healing B Back“, WEAPON, the wheel, the erase), `screen-squad-walk.txt` (shots: the outline
+going with a HEAL ME walk through the slowdown, standing at the hold, gone after a close at the hold and after one in
+the slowdown), `screen-squad-y.txt` (shots: his legend with "Y No healing", "Saving supplies.", the legend again with
+"Y Heal me again", "I'll patch you up.").
 
 **Resyncing from fallout1-ce** (last: 99edef7 → 0be4c88, v0.1.0, 2026-10-23): the modules by a three-way
 merge — `git merge-file -L F2 -L F1-old -L F1-new <ours> <F1 old> <F1 new>`, the two F1 copies taken with

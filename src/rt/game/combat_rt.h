@@ -66,6 +66,157 @@ bool combat_rt_death_anim_pending();
 // caught by faction aggro carries it for the rest of the map's life even if it never acts.
 bool combat_rt_is_engaging(Object* obj);
 
+// SQUAD ORDERS (Fallout 2 Realtime, 2026-11-11): LT held + a D-pad tap orders every companion at once (gamepad_ui.cc).
+// ATTACK = the LT-locked enemy is the squad's focus, attacked first while it lives; FOLLOW / HOLD / CHARGE = COMBAT
+// CONTROL's Distance "Stay close" / "Stay" / "Charge", written as the dialogue's panel writes it (saved, shown there).
+// The realtime fight keeps to every Distance from now on. True when a companion took the order (the nearest says so
+// over its head); false = refused, no lock or nobody who can take it -- the caller buzzes. Fallout 1: always false.
+// Since design A it is combat_rt_squad_command(NULL, order, <the LT lock for ATTACK>): the order names below. No order
+// NUMBER is saved anywhere (RTSQ keeps hold fire and the weapon pid, the traces print the names), so the list may
+// change, but every table indexed by it must follow: combat_rt.cc's three assert their length, gamepad_ui.cc's
+// gpui_squad_order_name keeps its own copy of the names.
+enum {
+    COMBAT_RT_ORDER_ATTACK, // design B, Up
+    COMBAT_RT_ORDER_FOLLOW, // design B, Down
+    COMBAT_RT_ORDER_HOLD, // design B, Left
+    COMBAT_RT_ORDER_CHARGE, // design B, Right
+    COMBAT_RT_ORDER_HOLD_FIRE, // design A: start no attack
+    COMBAT_RT_ORDER_OPEN_FIRE, // design A: hold fire lifted
+    COMBAT_RT_ORDER_HEAL_ME, // design A: come and dose the dude
+    COMBAT_RT_ORDER_NO_HEALING, // design A: Y, the medic opt-out -- they keep their supplies from him
+    COMBAT_RT_ORDER_HEAL_AGAIN, // design A: Y, the opt-out lifted
+    COMBAT_RT_ORDER_COUNT,
+};
+bool combat_rt_squad_order(int order);
+
+// --- SQUAD COMMAND (Fallout 2 Realtime, 2026-11-12, his design "A": „přidej nestřílej a vyléčit mě, změň zbraň, můžu
+// mu i říkat kam má jít?“). LT + A opens the squad command mode (gamepad_ui.cc); everything it orders lands here.
+// Its last part, GO -- a tile they walked to and held, the post -- was TAKEN OUT again on 2026-11-13, his „dej pryč
+// ovládání a přikazování companions kam mají přesně chodit … nehodí se to do této action oriented verze“; his picks
+// then: the mode stays without it, and Y in it switches their healing of him (NO HEALING / HEAL AGAIN).
+// `who` everywhere: NULL = every companion on the dude's map and floor, alive and not knocked out ("All"), else that
+// one party member. Nothing here draws or plays a sound -- the mode clicks on true and buzzes on false. Every order
+// floats one line over the nearest companion of `who` that took it ("On it.", "Coming.", "Holding.", "Charging!",
+// "Holding fire.", "Weapons free.", "Hold still.", "Saving supplies.", "I'll patch you up.", "Got it."), a refusal with
+// words to it over the nearest one asked ("No meds.", "You're fine.", "Out of ammo."; "Can't reach you." comes later,
+// from a HEAL ME that gives up). Traced as [ACTION/squad-order] order= target= companions= skipped= why= speaker= t=
+// who=. Fallout 1: every order false, every query empty.
+//
+// Hold fire and the weapon pick are SAVED (the realtime chunk's RTSQ section, by object id) and kept across maps, and
+// so is NO HEALING (it is the dialogue's opt-out, saved in the chunk's own list); every focus and a HEAL ME on its way
+// end with a map change or a load. A load or a new game resets all of it before the save's own are read.
+
+// The order to `who`. Returns true when at least one companion took it.
+//   ATTACK     `target` must be an enemy (combat_rt_squad_kind == ENEMY): NULL / dead / gone -> false why=no-target,
+//              his side -> why=friend, a neutral -> why=neutral. For All it becomes the squad's focus (design B: a
+//              red chevron over it, everyone's own focus cleared); for one, that one's own focus (a chevron too). Lifts
+//              hold fire.
+//   FOLLOW     Distance "Stay close" (design B) plus the regroup: own foci end; for All the squad's focus too; for
+//              one, it ignores the squad's focus till its next ATTACK.
+//   HOLD       Distance "Stay" (design B).
+//   CHARGE     Distance "Charge" (design B); lifts hold fire. party.txt-refused ones are skipped (Vic will not
+//              charge): skipped=, and false when nobody could.
+//   HOLD FIRE / OPEN FIRE   no new attack / attacks again. Ask combat_rt_squad_holds_fire(who) which one X gives.
+//   HEAL ME    the one chosen, or for All the nearest that carries a stimpak, super stimpak, healing powder or a kit
+//              (and is a biped), comes and doses the dude past the medic's threshold, cooldown and opt-out. Refused:
+//              dude unhurt -> why=fine "You're fine."; nobody with supplies -> why=no-meds "No meds.".
+//   NO HEALING / HEAL AGAIN   the party dialogue's "(Stop patching me up. Save your supplies.)" / "(You can patch me
+//              up again.)" for every one of `who`: the very state that line toggles
+//              (combat_rt_medic_set_treats_player), saved with it. Only the medic beat asks it -- HEAL ME goes past it
+//              -- and nothing else changes (no Distance, no hold fire; a HEAL ME on its way goes on). One already so
+//              counts as taken, as with X. Its line comes from the nearest one that carries something to heal with
+//              (else the nearest). Ask combat_rt_squad_medic_off(who) which one Y gives. Refused without a
+//              word: no medic beat at all (combat_rt_medic_beat_enabled false) -> why=medic-off; the opt-out list full
+//              (RT_MEDIC_OPTOUT_MAX ids, one per companion: no real party gets there) -> that one skipped, why=full
+//              when nobody took it.
+// `target` is read for ATTACK only.
+bool combat_rt_squad_command(Object* who, int order, Object* target);
+
+// The companions the mode steps through with LB / RB after "All": every one on the dude's floor, alive, awake, nearest
+// the dude first. Fills out[] (up to max) and returns how many. Pointers are valid until the next frame of the world
+// (or a combat_rt_set_squad_mode_hooks forget call names one).
+int combat_rt_squad_members(Object** out, int max);
+
+// Whether `who` holds its fire -- for All, true only when every one of them does (the legend's "X Open fire"); false
+// with nobody there. X then gives HOLD_FIRE when false, OPEN_FIRE when true.
+bool combat_rt_squad_holds_fire(Object* who);
+
+// Whether `who` keeps its supplies from him -- the medic opt-out the party dialogue line toggles, which NO HEALING sets
+// (combat_rt_medic_treats_player false) -- for All, true only when every one of them does (the legend's "Y Heal me
+// again"); false with nobody there. Y then gives NO_HEALING when false, HEAL_AGAIN when true. The same list as the
+// order's, so the legend turns with a press. While combat_rt_medic_beat_enabled() is false (the medic opt-out block
+// below; the dialogue hides its line on that test) the mode has no Y at all. Fallout 1: always false.
+bool combat_rt_squad_medic_off(Object* who);
+
+// What the cursor is on, for the label over it: ENEMY "ATTACK" (red), DUDE "HEAL ME", COMPANION "WEAPON", NONE (no label,
+// A buzzes -- anything else: free ground, a wall, a neutral, the black past the map's edge). ENEMY is design B's ATTACK
+// rule, the same red outline the LT lock uses: on this floor, alive, not on his side, and fighting him or hostile by
+// nature.
+enum {
+    COMBAT_RT_SQUAD_KIND_NONE,
+    COMBAT_RT_SQUAD_KIND_ENEMY,
+    COMBAT_RT_SQUAD_KIND_DUDE,
+    COMBAT_RT_SQUAD_KIND_COMPANION,
+};
+int combat_rt_squad_kind(Object* obj);
+
+// Who would answer HEAL ME from `who` now, or NULL -- then `why` (may be NULL) is "fine" (he is unhurt: his HP plus a
+// heal still coming in reaches his maximum), "no-meds" (nobody of `who` carries anything to heal with, or only
+// non-bipeds do) or "no-companions". The label greys out on NULL. Cheap (inventory scans).
+Object* combat_rt_squad_healer(Object* who, const char** why);
+
+// WEAPON. The weapons companion `c` carries that its body has the art to hold (one per kind: the one in hand, else the
+// fullest), for the radial wheel titled with object_name(c), plus the mode's own "Auto" segment. Returns how many.
+int combat_rt_squad_weapons(Object* c, Object** out, int max);
+// Its current pick: the weapon's pid, -1 = Auto (the AI's own choice).
+int combat_rt_squad_weapon_pick(Object* c);
+// Can it fire that one now (rounds in it, or rounds for it in its pack; melee and thrown always)? For greying a dry gun.
+bool combat_rt_squad_weapon_ready(Object* c, Object* item);
+// The pick: `item` (one of combat_rt_squad_weapons) or NULL = Auto. The weapon goes in its hand at its next free
+// beat -- after the mode, the world moving again -- and the realtime AI keeps to it while it carries it and can fire
+// it; without either it falls back to the AI's choice and says "Out of ammo." once. False = refused: not its own, no
+// art for it, or dry with nothing to load ("Out of ammo."). Says "Got it." on true. Logged order=weapon.
+bool combat_rt_squad_set_weapon(Object* c, Object* item);
+// The pick forgotten without a word -- COMBAT CONTROL's "Use best weapon" (game_dialog.cc) chooses for it instead.
+void combat_rt_squad_forget_weapon(Object* c, const char* why);
+
+// Its focus now -- its own (ATTACK to it alone), else the squad's -- or NULL; `c` NULL = the squad's. Every live focus
+// has a red chevron over it, drawn by combat_rt.
+Object* combat_rt_squad_focus_of(Object* c);
+
+// The mode is up (true) or gone (false). From the opening the whole world SLOWS DOWN, eased, over 1.5 s of real time
+// (his pick 2026-11-12: first a slowdown, then the stop) and then holds still exactly as under a radial wheel (the
+// combat model, AP, cooldowns; gamepad_ui stops the engine's own processes with map_disable_bk_processes once
+// combat_rt_squad_mode_frozen says so). The pad is the mode's from the first frame (the stick walks nobody). On the
+// close everything runs at full speed at once. Call on every open and close edge; `why` is traced ([FLOW/squad-mode]
+// open|close why=; slow and freeze lines in between). A load or a new game closes it here too (the mode must reset
+// itself then: its forget hook is called with NULL).
+void combat_rt_squad_mode_set_open(bool open, const char* why);
+bool combat_rt_squad_mode_is_open();
+// The mode is up and its slowdown has run out: the world holds still (gamepad_ui's hold of the background processes).
+bool combat_rt_squad_mode_frozen();
+
+// How fast the world runs against real time, for the clocks outside combat_rt -- the animation scheduler's
+// (animation.cc) and the game clock's (scripts.cc): 1 normally, the squad command mode's eased slowdown while it runs
+// (never under 0.05), 0 once the mode holds the world still. Fallout 1: always 1.
+float combat_rt_world_rate();
+
+// The mode's two hooks into combat_rt, both optional (NULL = none). `overlay` draws on top of the world overlay (after
+// the blast rings, the tracers and the chevrons) for every repainted rect: window coordinates, tile_overlay_line into
+// `rect`, nothing that reads objects without checking them. `forget(obj)` is called right before `obj` is freed (a
+// script's destroy, a corpse removed), and forget(NULL) before every object goes (a map change, a load, a new game,
+// the game's end) -- clear every pointer the mode keeps. It may be called while the mode is closed, or before it
+// was ever opened.
+struct Rect;
+typedef void (*CombatRtSquadOverlayFn)(struct Rect* rect, int elevation);
+typedef void (*CombatRtSquadForgetFn)(Object* obj);
+void combat_rt_set_squad_mode_hooks(CombatRtSquadOverlayFn overlay, CombatRtSquadForgetFn forget);
+
+// scripts.cc, around a companion's critter_p_proc heartbeat: true while a HEAL ME on its way must not be undone by its
+// party script's follow. The heartbeat then runs with GVAR_PARTY_NO_FOLLOW set -- vanilla's own switch, which every
+// companion's follow asks first.
+bool combat_rt_party_follow_held(Object* critter);
+
 // Manual END COMBAT -- the realtime replacement for vanilla's Enter key / the interface bar's
 // END COMBAT button, both of which live in the dormant turn-based path and are unreachable here.
 // It is NOT an escape hatch: exactly like vanilla's combat_end(), it only succeeds when every
@@ -208,7 +359,8 @@ const char* combat_rt_aim_refusal();
 void combat_rt_aim_highlight_on();
 void combat_rt_aim_highlight_off();
 
-// Per-companion "stop patching me up", set from the dialogue. Keyed by object id so it survives
+// Per-companion "stop patching me up", set from the dialogue -- and since 2026-11-13 by Y in the
+// squad command mode too (NO HEALING / HEAL AGAIN, the same state). Keyed by object id so it survives
 // map changes and loads. Only the PLAYER is refused -- the medic still doses itself and other
 // allies. combat_rt_medic_optout_load treats a missing chunk as "not in this save" and defaults
 // to everyone healing you, which is what makes the save format change backward compatible.
@@ -217,6 +369,8 @@ void combat_rt_aim_highlight_off();
 // the conversation closes. Pass NULL to cancel a standing request.
 void combat_rt_request_step_back(Object* npc);
 
+// Is there a medic beat at all (cfg medic_enabled, realtime on)? Without one the dialogue offers no
+// "stop patching me up" line and the squad command mode no Y.
 bool combat_rt_medic_beat_enabled();
 bool combat_rt_medic_treats_player(Object* npc);
 void combat_rt_medic_set_treats_player(Object* npc, bool treats);

@@ -1,0 +1,34 @@
+# SQUAD COMMAND (2026-11-12, his design "A", „přidej nestřílej“): HOLD FIRE, then OPEN FIRE -- and HEAL ME refused on an
+# unhurt dude.
+# The dude is unhurt: HEAL ME is refused (why=fine, "You're fine."). Vic (10mm pistol) is told to hold his fire before a
+# pistol raider 10 tiles right of the dude (13 from Vic) comes into the fight. Vic sees it and would take it -- the
+# refusal is traced (squad-fire refuse) -- and attacks nobody until OPEN FIRE at 7 s, after which he shoots it.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-holdfire.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-holdfire
+map DESERT1.MAP
+seed 1
+duration 18
+dude tile 20100 rot 2
+dude stat PE 8
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 1 wield 8 item 29 3 item 40 1 party
+spawn 16777454 22100 rot 5 wield 8 item 29 2 hostile hp 40
+
+squad 150 healme all
+squad 300 holdfire all
+squad 7000 openfire all
+note 17000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=heal-me target=- companions=0 skipped=0 why=fine speaker=-1 t=[\d.]+ who=all
+expect \[ACTION/squad-order\] order=hold-fire target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
+expect \[FLOW/squad-fire\] hold id=\d+ pid=16777278 why=order
+expect \[FLOW/squad-fire\] refuse id=\d+ pid=16777278 tgt=\d+ tgtPid=16777454
+expect \[ACTION/squad-order\] order=open-fire target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
+expect \[FLOW/squad-fire\] open id=\d+ pid=16777278 why=order
+expect \[COMBAT/attack\] NPC aid=\d+ ->pid=16777454 did=\d+ hm=\d+ t=([7-9]|\d\d)\.
+# held: no attack of Vic's before the OPEN FIRE (t is rt_clock, ~ the timeline's seconds); his id is (pid & 0xFFFFFF) + 18000
+expect-not \[COMBAT/attack\] NPC aid=18062 .*t=[0-6]\.
+expect-not \[FLOW/squad-heal\] order

@@ -1,0 +1,41 @@
+# SQUAD ORDERS (2026-11-11, his design "B"): LT + D-pad Left = HOLD (COMBAT CONTROL Distance "Stay").
+# Vic (10mm pistol, reach 25) stands 4 tiles left of the dude with his BACK to two knife raiders that come at the dude
+# from 20-21 tiles (23-24 from Vic: in his reach, out of his sight). First LT + Up with nobody in the lock's reach (PE 5
+# = 10 tiles): ATTACK is refused, no lock. Then LT + Left: HOLD. Vic must turn toward what comes (party-look), shoot it
+# from his tile, and never take a step -- not even when the dude walks off to the right, which a Vic on his own Stay
+# close would follow (follow-step).
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-hold.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-hold
+map DESERT1.MAP
+seed 1
+duration 30
+dude tile 20100 rot 2
+dude stat PE 5
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party
+spawn 16777455 24300 rot 5 wield 4 hostile hp 20
+spawn 16777455 24100 rot 5 wield 4 hostile hp 20
+
+# LT down; Up with nothing locked (refused, buzz); Left = HOLD; LT up
+axis 500 LT 32767
+tap 700 UP
+tap 1100 LEFT
+axis 1500 LT -32768
+# the dude walks off to the right for 2.5 s
+axis 2500 LX 32767
+axis 5000 LX 0
+note 28000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=attack target=- companions=0 skipped=0 why=no-lock
+expect \[ACTION/squad-order\] order=hold target=- companions=1 skipped=0 why=ok speaker=\d+
+expect \[FLOW/party-distance\] id=\d+ pid=16777278 dist=stay was=stay-close
+expect \[FLOW/party-look\] id=\d+ pid=16777278
+expect \[COMBAT/attack\] NPC aid=\d+ ->pid=16777455
+# held: no follow, no chase leg, no tactic's step, never off his tile
+expect-not \[FLOW/follow-step\] id=\d+ pid=16777278
+expect-not \[FLOW/(walk-seg|chase-move|back-off|spread-step|party-leash|squad-walk-cut)\] id=\d+ pid=16777278
+expect-not \[FLOW/ff-care\] id=\d+ pid=16777278 .*moved=1
+expect-not \[STATE/critter\] id=\d+ pid=16777278 tile=(?!19904 )\d+

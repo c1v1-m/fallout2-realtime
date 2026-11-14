@@ -432,8 +432,9 @@ typedef struct PipboyControl {
 // TO CONTROLS NIC VÍC ... LT+Y JE ZMĚNA MODU A LT+X JE RELOAD". So: one archive entry, his words,
 // LT + X for the reload (X's tap reloads with or without LT; he wants it written as the combo). BACK,
 // START and the quick save hold were his additions or the only way to those screens; BACK hold, the run
-// to an exit and its wheel, came with that wheel (2026-11-10) -- a pad action nobody can find is a
-// missing one. No drawn pad, no
+// to an exit and its wheel, came with that wheel (2026-11-10), and LT + D-pad, the squad orders, with
+// them (his design "B", 2026-11-11), and LT + A, the squad command mode, with it (his design "A",
+// 2026-11-12) -- a pad action nobody can find is a missing one. No drawn pad, no
 // SCREENS / MENUS / KEYBOARD pages (git history has them). On a Steam Deck the names are spelled the
 // Deck's way on the way out (ctrl_deck_names).
 static const PipboyControl ctrl_lines[] = {
@@ -459,6 +460,8 @@ static const PipboyControl ctrl_lines[] = {
     { "Y hold", "Weapons, ammo" },
     { "LT + X", "Reload" },
     { "LT + Y", "Firing mode" },
+    { "LT + D-pad", "Squad orders" },
+    { "LT + A", "Squad command" },
     { NULL, NULL },
     { "BACK", "Inventory" },
     { "BACK hold", "Run to exit" },

@@ -1,0 +1,29 @@
+# SQUAD COMMAND (2026-11-12, his design "A", „vyléčit mě“): HEAL ME against the companion's own party script. Vic runs
+# DCVic.int (scripts.lst line 50), whose follow walks him back to the dude once he is more than 9 tiles off and clears
+# his walk (reg_anim_func CLEAR). He stands 12 tiles off, the dude is hurt. HEAL ME: on his way his heartbeat runs with
+# GVAR_PARTY_NO_FOLLOW set (combat_rt_party_follow_held, squad-follow-held heal=1), so his script neither cuts nor
+# redoes the walk, and he doses the dude. Until 2026-11-13 GO's post was the other user of that switch (squad-pad-go,
+# on the branch shelf/squad-orders-with-go); this is the test the switch kept.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-heal-script.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-heal-script
+map DESERT1.MAP
+seed 1
+duration 10
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 200
+dude armor 2
+
+spawn 16777278 20112 rot 5 wield 8 item 29 3 item 40 2 party script 50
+
+squad 500 healme 16777278
+note 9000 end
+
+# the checks (run.js)
+expect \[FLOW/autotest\] script pid=16777278 line=50 rc=0
+expect \[FLOW/autotest\] party-add id=18062 pid=16777278 rc=0
+expect \[FLOW/squad-heal\] order id=18062 pid=16777278 item=40
+expect \[FLOW/squad-follow-held\] id=18062 pid=16777278 heal=1
+expect \[FLOW/squad-heal\] dose id=18062 pid=16777278 item=40 kind=1 ok=1
+expect \[FLOW/squad-heal\] end id=18062 pid=16777278 why=dosed
+expect-not \[FLOW/squad-heal\] end id=18062 pid=16777278 why=(no-route|timeout|cannot-walk)

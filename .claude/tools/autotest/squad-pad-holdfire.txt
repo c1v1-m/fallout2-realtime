@@ -1,0 +1,43 @@
+# SQUAD COMMAND BY THE PAD: HOLD FIRE, then OPEN FIRE (2026-11-12, his design "A", „přidej nestřílej“). A pistol raider
+# 13 tiles in front of the dude comes into the fight. LT + A opens the mode (the cursor on the LT-locked raider) and X,
+# a quarter of a second later -- while the world is still slowing -- gives HOLD FIRE to All (Vic): given at once, the
+# mode closes. Vic sees the raider and would take it (squad-fire refuse) but attacks nobody. At 7 s LT + A and X again:
+# every one of who holds fire, so X is OPEN FIRE now -- and Vic shoots. (The world runs on in the slowdown: an X given
+# 0.4 s after the open came after Vic's first shot -- the order is quick, the world is not stopped yet.)
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-holdfire.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-pad-holdfire
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude stat PE 10
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 1 wield 8 item 29 3 party
+spawn 16777454 22700 rot 5 wield 8 item 29 2 hostile hp 60
+
+# LT + A, X: HOLD FIRE -- in the slowdown, before Vic has taken the raider on (the world still runs then, slower and
+# slower: an order in it is given at once)
+axis 100 LT 32767
+tap 200 A
+axis 400 LT -32768
+tap 450 X
+# LT + A, X: OPEN FIRE
+axis 6800 LT 32767
+tap 7000 A
+axis 7300 LT -32768
+tap 7500 X
+note 15500 end
+
+# the checks (run.js)
+expect \[INPUT/squad-x\] order=hold-fire who=all ok=1
+expect \[FLOW/squad-fire\] hold id=18062 pid=16777278 why=order
+expect \[FLOW/squad-mode\] close why=x slowed=0\.\d\d frozen=0
+expect \[FLOW/squad-fire\] refuse id=18062 pid=16777278 tgt=\d+ tgtPid=16777454
+expect \[INPUT/squad-x\] order=open-fire who=all ok=1
+expect \[FLOW/squad-fire\] open id=18062 pid=16777278 why=order
+expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777454 did=\d+ hm=\d+ t=([7-9]|\d\d)\.
+# held: no attack of Vic's before the OPEN FIRE (t is rt_clock, about the timeline's seconds)
+expect-not \[COMBAT/attack\] NPC aid=18062 .*t=[0-6]\.
+expect-count 2 \[INPUT/squad-mode\] close why=x

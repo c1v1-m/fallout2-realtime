@@ -1,0 +1,30 @@
+# SCREEN: SQUAD ORDERS (2026-11-11, his design "B"): LT + D-pad Up = ATTACK, the LT-locked enemy is the squad's focus.
+# Vic (10mm pistol, his own Distance Stay close) faces a knife raider 9 tiles off (behind the dude, nearer Vic than
+# anything else) and picks it on his own. The dude faces a pistol raider 12 tiles off in front (15 from Vic); LT locks
+# that one (in front beats behind, PE 10 = reach 20) and Up makes it the focus. Vic must turn on the focus at once
+# (squad-focus take) -- although it is not the nearest to him, he does not even see it, and it stands past his Stay
+# close leash (ATTACK outranks FOLLOW's leash) -- and shoot it; the red chevron sits over it (squad-mark).
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-attack.txt 1 --exe build/Release/fallout2-ce.exe
+# Shots: the line "On it." over Vic and the chevron over the focus, then the chevron following it.
+name screen-squad-attack
+map DESERT1.MAP
+seed 1
+duration 8
+dude tile 20100 rot 2
+dude stat PE 10
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party
+spawn 16777455 18500 rot 2 wield 4 hostile hp 30
+spawn 16777454 22500 rot 5 wield 8 item 29 2 hostile hp 30
+
+axis 600 LT 32767
+tap 800 UP
+axis 1200 LT -32768
+shot 1400
+shot 3200
+shot 5500
+note 7000 end
+
+expect \[FLOW/squad-mark\] on id=\d+ pid=16777454

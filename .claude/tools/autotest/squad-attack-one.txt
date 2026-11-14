@@ -1,0 +1,39 @@
+# SQUAD COMMAND (2026-11-12, his design "A"): ATTACK to ONE companion -- a focus of its own, and a chevron over every
+# focus.
+# Each is told to attack the raider he would NOT have picked himself: Vic (10mm pistol, beside the knife raider's way)
+# the knife raider up-left of the dude, Sulik (knife, on Charge) the pistol raider far right of him. Each turns on his
+# own focus (own-on, then take), there is no squad focus, both foci carry the red chevron (squad-mark on twice), and
+# each hits his own. At 6 s FOLLOW to Vic alone ends his own focus (own-off why=follow), Sulik's stays.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-attack-one.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-attack-one
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude stat PE 10
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 1 wield 8 item 29 3 party
+spawn 16777313 20302 rot 5 wield 4 party
+spawn 16777454 22500 rot 5 wield 8 item 29 2 hostile hp 60
+spawn 16777455 18500 rot 2 wield 4 hostile hp 60
+
+squad 300 attack 16777278 16777455
+squad 400 attack 16777313 16777454
+squad 6000 follow 16777278
+note 11000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=attack target=16777455 companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=18062
+expect \[ACTION/squad-order\] order=attack target=16777454 companions=1 skipped=0 why=ok speaker=18097 t=[\d.]+ who=18097
+expect \[FLOW/squad-focus\] own-on who=18062 id=\d+ pid=16777455
+expect \[FLOW/squad-focus\] own-on who=18097 id=\d+ pid=16777454
+expect \[FLOW/squad-mark\] on id=\d+ pid=16777454
+expect \[FLOW/squad-mark\] on id=\d+ pid=16777455
+expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777455
+expect \[COMBAT/attack\] NPC aid=18097 ->pid=16777454
+expect \[FLOW/squad-focus\] own-off who=18062 id=\d+ pid=16777455 why=(follow|dead)
+# no squad-wide focus was ever set: these were orders to one each; Sulik's own stays
+expect-not \[FLOW/squad-focus\] on id=
+expect-not \[FLOW/squad-focus\] own-off who=18097 id=\d+ pid=16777454 why=(follow|replaced|map)

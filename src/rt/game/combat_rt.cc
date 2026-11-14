@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <vector> // the party list a squad order walks (get_all_party_members_objects, Fallout 2)
+
 #include <SDL.h>
 
 #include "game/actions.h"
@@ -695,9 +697,328 @@ typedef struct RtActor {
     int hint_intent;          // a tactical step just taken (rt_intent_hint), shown while the body acts it out
     const char* hint_why;
     float hint_until;
+    // --- SQUAD ORDERS (Fallout 2 Realtime, 2026-11-11): a companion's COMBAT CONTROL Distance, obeyed in the fight,
+    // and the squad's focus. See the SQUAD ORDERS block above rt_intent_update.
+    int party_dist;            // its Distance this frame (RT_DIST_*); RT_DIST_NONE = no rule (not a party member, F1)
+    int party_dist_logged;     // the Distance last traced ([FLOW/party-distance]); -2 = never
+    float party_wait_since;    // >= 0: it has had a target its Distance will not let it go after, since then
+    Object* party_wait_tgt;    // ...that target (pointer compare only; a new one starts the wait over)
+    Object* party_drop_tgt;    // a target it let go of that its Distance still allowed (too poor a shot): not taken
+    float party_drop_until;    // ...again before this (rt_party_pick), or it would take it up and drop it for ever
+    float party_look_at;       // a held companion's next turn toward what comes (rt_party_hold_look)
+    float party_snipe_at;      // a sniper's next step back (rt_party_snipe_step)
+    int party_leash_logged;    // the distance to the dude its last pull-back line named (rt_party_leash)
+    Object* party_charge_logged; // the target its last party-charge line named
+    float party_charge_stuck_until; // CHARGE's way in is shut: it fights at its weapon's reach until then
+    float focus_check_at;      // the next look at whether it can get at the squad's focus (rt_focus_wanted)
+    bool focus_ok;             // ...and what that look said
+    Object* focus_checked;     // ...about which focus (SQUAD COMMAND: its own or the squad's; compared only)
 } RtActor;
 
 static RtActor rt_actors[RT_MAX_ACTORS];
+
+// --- SQUAD ORDERS: THE DISTANCE NAMES (Fallout 2 Realtime, 2026-11-11) -------------------------------------
+//
+// Fallout 2's COMBAT CONTROL "Distance" (combat_ai_defs.h DistanceMode), named here so this file still builds as
+// Fallout 1's, which has no such setting: there every companion reads RT_DIST_NONE, i.e. no rule at all.
+#define RT_DIST_NONE -1
+#define RT_DIST_STAY_CLOSE 0
+#define RT_DIST_CHARGE 1
+#define RT_DIST_SNIPE 2
+#define RT_DIST_ON_YOUR_OWN 3
+#define RT_DIST_STAY 4
+
+// Vanilla's own numbers. _combat_ai's aiPartyMemberDistances {5, 7, 7, 7, 50000}: how far a party member with
+// nothing to fight may fall behind the dude before it walks back to him -- Stay close 5, Charge / Snipe / On your
+// own 7, Stay never. Stay close's 5 is also _cai_perform_distance_prefs' "back to 5 tiles" and the leash in
+// _ai_move_steps_closer; Snipe backs away from a target nearer than 10 (_cai_perform_distance_prefs).
+#define RT_PARTY_STAY_CLOSE_TILES 5
+#define RT_PARTY_REGROUP_TILES 7
+#define RT_PARTY_SNIPE_TILES 10
+
+// ...and the realtime ones. A Stay-close companion still shooting is pulled back only past the leash plus this
+// slack: a chase leg is four tiles and the dude walks on while it ends, and without the slack the pull-back and the
+// fight took turns every leg (the leash ping-pong). One whose Distance will not let it go after its target gives
+// that target up after RT_PARTY_WAIT_SECONDS. A held one turns toward what comes at most this often; a sniper steps
+// back at most this often (vanilla does it once a turn), a leg of RT_PARTY_SNIPE_LEG tiles at most.
+#define RT_PARTY_LEASH_SLACK 2
+#define RT_PARTY_WAIT_SECONDS 1.5f
+#define RT_PARTY_REPICK_SECONDS 5.0f // a target let go of for too poor a shot is not taken up again before this
+#define RT_PARTY_LOOK_SECONDS 0.7f
+#define RT_PARTY_SNIPE_PAUSE 1.5f
+#define RT_PARTY_SNIPE_LEG 4
+// A charging companion whose way in is shut fights at its weapon's reach this long before it tries to go in again.
+#define RT_PARTY_CHARGE_RETRY_SECONDS 3.0f
+// How often a companion asks again whether it can get at the squad's focus (a pathfinder search).
+#define RT_FOCUS_CHECK_SECONDS 1.0f
+
+// The squad's focus (the ATTACK order): the critter every companion goes for first while it lives. Pointer and
+// identity; the pointer is checked against the registry (rt_in_registry) before it is ever dereferenced, and the
+// erase hook drops it. Reset with the encounter (rt_abandon_encounter): a map change or a load ends it.
+static Object* rt_squad_focus = NULL;
+static int rt_squad_focus_id = -1;
+static int rt_squad_focus_pid = -1;
+
+// The red chevrons over the foci's heads (rt_squad_mark_tick): one over the squad's focus and one over every
+// companion's own (SQUAD COMMAND), each drawn by the tile overlay at its tile's screen spot plus an offset, so a scroll
+// carries it along; `last` is where it was painted. The pointer is only compared: the id and pid are for the trace.
+#define RT_SQUAD_MARKS_MAX 8
+typedef struct RtSquadMark {
+    Object* obj; // whom it sits over; NULL = a free slot (or one whose critter was freed, still to be erased)
+    int id;
+    int pid;
+    bool on; // drawn by the overlay
+    bool painted;
+    int tile;
+    int elev;
+    int ox;
+    int oy;
+    Rect last;
+} RtSquadMark;
+static RtSquadMark rt_marks[RT_SQUAD_MARKS_MAX];
+static int rt_mark_count = 0; // slots in use, painted or still to be erased
+
+// --- SQUAD COMMAND (Fallout 2 Realtime, 2026-11-12, his design "A") ----------------------------------------------
+//
+// His ask of 2026-11-11, „přidej nestřílej a vyléčit mě, změň zbraň, můžu mu i říkat kam má jít?“: LT + A opens the
+// squad command mode (gamepad_ui.cc), and every order it gives lands here -- for every companion at once or for one
+// (`who`). What an order leaves behind lives in two tables keyed by the companion's OBJECT ID: a party member's id is
+// stable ((pid & 0xFFFFFF) + 18000, partyMemberAdd) and is what partyMemberSave itself trusts -- the medic opt-out's
+// rule, never a pointer, which a map change or a load rebuilds.
+//   RtSquadPref   HOW it fights: hold fire and the weapon pick. Saved (the chunk's RTSQ section), kept across maps,
+//                 cleared by a load or a new game (rt_reset_session_state) before the save's own are read.
+//   RtSquadOrder  WHAT it does on this map: its own focus (ATTACK given to it alone), a HEAL ME on its way. Never
+//                 saved; a map change or a load ends all of it (rt_abandon_encounter). (GO's post lived here too until
+//                 2026-11-13, when he took GO out: „nehodí se to do této action oriented verze“.)
+// Both apply only while the critter is a party member: "wait here" in its dialogue (party_remove) or a companion that
+// walks out keeps its entry and obeys none of it. NO HEALING / HEAL AGAIN (Y in the mode, 2026-11-13) keep nothing in
+// either: they are the dialogue's medic opt-out (rt_medic_optout), saved in the chunk's own list.
+#define RT_SQUAD_MAX 32 // the medic opt-out's size: the party itself is a handful
+
+typedef struct RtSquadPref {
+    int id;
+    bool holdFire; // HOLD FIRE: starts no attack (rt_squad_holds_fire)
+    int weaponPid; // the weapon it was given (the WEAPON wheel); -1 = Auto, the AI's own choice
+    bool weaponLapsed; // ...not usable now (dry, not carried, no art for it): the AI chooses, and said so once
+    bool weaponHopeless; // ...hopeless in this fight (min_to_hit even point blank): the AI chooses till the fight ends
+} RtSquadPref;
+
+typedef struct RtSquadOrder {
+    int id;
+    int pid; // for the trace
+    Object* obj; // the companion -- compared only
+    // ATTACK given to this one alone: its own focus, before the squad's.
+    Object* focus;
+    int focusId;
+    int focusPid;
+    bool ignoreSquad; // FOLLOW given to this one alone: the squad's focus does not outrank its leash till its next ATTACK
+    // HEAL ME: on its way to him with its best healing item (rt_squad_heal_step).
+    bool healing;
+    float healSince;
+    float healStuckSince; // < 0 = its last leg was asked for
+    int healLogged; // rt_party_step_to_dude's trace memory
+    bool healWaitLogged;
+    bool followHeldLogged; // its party script's follow held off on the way (combat_rt_party_follow_held), traced once
+    // HOLD FIRE: the last enemy it held its fire at (traced once a target), and when it next looks.
+    Object* fireRefused;
+    float fireCheckAt;
+} RtSquadOrder;
+
+static RtSquadPref rt_squad_prefs[RT_SQUAD_MAX];
+static int rt_squad_pref_count = 0;
+static RtSquadOrder rt_squad_orders[RT_SQUAD_MAX];
+static int rt_squad_order_count = 0;
+
+// The squad command mode is up (gamepad_ui): the world slows down under it and then holds still as under a radial
+// wheel (combat_rt_squad_mode_set_open, rt_squad_slow_rate, rt_world_frozen), and its own drawing rides on top of the
+// world overlay.
+static bool rt_squad_mode_open = false;
+static CombatRtSquadOverlayFn rt_squad_overlay_fn = NULL;
+static CombatRtSquadForgetFn rt_squad_forget_fn = NULL;
+
+// THE WORLD SLOWS DOWN, THEN STOPS (2026-11-12, his pick for the squad command mode: „ten efekt bude nejdříve zpomalení
+// a pak zastavení. prostě prvně se bude zpomalovat 1-3 sekund třeba 1 nebo 2 a pak se zastaví“). The mode does not hold
+// the world still the moment it opens: from that moment the whole world eases from full speed to a standstill over
+// RT_SQUAD_SLOW_SECONDS of real time, and only then holds still, exactly as under a radial wheel (the early return in
+// combat_rt_update, and gamepad_ui suspending the engine's background processes). The mode itself answers the pad from
+// its first frame -- an order given during the slowdown is given at once -- and when it closes the world runs at full
+// speed again at once. LT + D-pad orders (design B) open no mode and slow nothing.
+//
+// ONE RATE FOR THE WHOLE WORLD (rt_squad_slow_rate, exported as combat_rt_world_rate), eased (smoothstep: it lets go
+// gently and settles gently, so the hand-over to the hold is invisible) and floored like rt_aim_slowmo until the hold:
+//   - the combat model: combat_rt_update's dt, right after the limb picker's slow motion (combat_rt_time_scale) --
+//     rt_clock, AP, cooldowns, the AI, the camera's easing, the commit timers;
+//   - every animation: the animation scheduler's own clock runs at this rate (animation.cc anim_clock_now) -- frames,
+//     the smooth-movement glides between steps, the cadence holds -- so a walk, a swing or a projectile already under
+//     way when the mode opened slows too. ⚠️ NOT through compute_tpf: an animation takes its ticksPerFrame when it
+//     starts (only the walk and run steps re-time), so a rate folded in there would leave a swing in the air at full
+//     speed and keep anything started during the slowdown slowed after the mode closed;
+//   - the game clock and its timed events (scripts.cc), which run on in a realtime fight;
+//   - the dude: a walk the stick had going coasts to the stop with everyone else (combat_rt_poll_gamepad) -- the stick
+//     is the mode's cursor now, not his legs.
+#define RT_SQUAD_SLOW_SECONDS 1.5f // the slowdown, in real time: his "1-3 s, say 1 or 2"
+#define RT_SQUAD_SLOW_FLOOR 0.05f // the slowest it runs before the hold -- rt_aim_slowmo's floor: never a zero rate
+#define RT_SQUAD_SLOW_TRACE_MS 100 // a [FLOW/squad-mode] slow line this often while it slows
+static unsigned int rt_squad_slow_since = 0; // get_time() at the mode's opening
+static bool rt_squad_slow_done = false; // the slowdown has run out: the world holds still
+static float rt_squad_slow_rt_open = 0.0f; // rt_clock at the opening, and at the hold (the traces measure from them)
+static float rt_squad_slow_rt_held = 0.0f;
+static unsigned int rt_squad_slow_held_at = 0; // get_time() at the hold
+static unsigned int rt_squad_slow_traced_at = 0; // get_time() of the last slow line
+static float rt_squad_slow_rt_traced = 0.0f; // rt_clock at it
+// The proof for the traces: a critter on the move at the opening (the nearest to the dude), and where it was drawn --
+// relative to the dude's hex, so the camera's easing does not count -- at the last line and at the hold.
+static Object* rt_squad_slow_probe = NULL;
+static int rt_squad_slow_probe_x = 0;
+static int rt_squad_slow_probe_y = 0;
+static int rt_squad_slow_probe_held_x = 0;
+static int rt_squad_slow_probe_held_y = 0;
+// ...and the dude, who coasts on a walk the stick had going (drawn spot, from the hex he stood on at the opening).
+static int rt_squad_slow_dude_ref = -1;
+static int rt_squad_slow_dude_x = 0;
+static int rt_squad_slow_dude_y = 0;
+static float rt_squad_slow_rate();
+
+// The world is held still (the early return in combat_rt_update): a radial wheel is up, or the squad command mode's
+// slowdown has run out. While the mode is open its own weapon wheel (WEAPON) follows the mode's slowdown, not a wheel's
+// instant stop -- no other wheel opens over the mode.
+static bool rt_world_frozen()
+{
+    if (rt_squad_mode_open) {
+        return rt_squad_slow_rate() <= 0.0f;
+    }
+    return radial_wheel_is_open();
+}
+
+// The pad belongs to a radial wheel or to the squad command mode -- the mode's from its first frame, its slowdown
+// included: the sticks are the mode's cursor, the buttons its orders (combat_rt_poll_gamepad).
+static bool rt_pad_taken()
+{
+    return radial_wheel_is_open() || rt_squad_mode_open;
+}
+
+static RtSquadPref* rt_squad_pref_find(int id)
+{
+    for (int i = 0; i < rt_squad_pref_count; i++) {
+        if (rt_squad_prefs[i].id == id) {
+            return &rt_squad_prefs[i];
+        }
+    }
+    return NULL;
+}
+
+// Found, or made with the defaults (fire at will, Auto). NULL only when the table is full.
+static RtSquadPref* rt_squad_pref_get(int id)
+{
+    RtSquadPref* p = rt_squad_pref_find(id);
+    if (p == NULL && rt_squad_pref_count < RT_SQUAD_MAX) {
+        p = &rt_squad_prefs[rt_squad_pref_count++];
+        memset(p, 0, sizeof(*p));
+        p->id = id;
+        p->weaponPid = -1;
+    }
+    return p;
+}
+
+// An entry back on every default says nothing a save needs: dropped, so the table only ever holds decisions.
+static void rt_squad_pref_tidy(int id)
+{
+    for (int i = 0; i < rt_squad_pref_count; i++) {
+        RtSquadPref* p = &rt_squad_prefs[i];
+        if (p->id == id && !p->holdFire && p->weaponPid < 0) {
+            rt_squad_prefs[i] = rt_squad_prefs[--rt_squad_pref_count];
+            return;
+        }
+    }
+}
+
+// By the pointer AND the id: the table is this map's, where a companion's object never changes (a map change or a
+// load empties it), and the id rules out a freed companion's address reused by another critter.
+static RtSquadOrder* rt_squad_order_find(Object* c)
+{
+    if (c == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < rt_squad_order_count; i++) {
+        if (rt_squad_orders[i].obj == c && rt_squad_orders[i].id == c->id) {
+            return &rt_squad_orders[i];
+        }
+    }
+    return NULL;
+}
+
+// Found, or made empty. NULL only when the table is full.
+static RtSquadOrder* rt_squad_order_get(Object* c)
+{
+    RtSquadOrder* o = rt_squad_order_find(c);
+    if (o == NULL && c != NULL && rt_squad_order_count < RT_SQUAD_MAX) {
+        o = &rt_squad_orders[rt_squad_order_count++];
+        memset(o, 0, sizeof(*o));
+        o->id = c->id;
+        o->pid = c->pid;
+        o->obj = c;
+        o->focusId = -1;
+        o->focusPid = -1;
+        o->healStuckSince = -1.0f;
+        o->healLogged = -1;
+    }
+    return o;
+}
+
+// HOLD FIRE: told to hold its fire, and a party member now.
+static bool rt_squad_holds_fire(Object* c)
+{
+    if (c == NULL || rt_squad_pref_count == 0) {
+        return false;
+    }
+    RtSquadPref* p = rt_squad_pref_find(c->id);
+    return p != NULL && p->holdFire && isPartyMember(c);
+}
+
+static const char* rt_dist_name(int dist)
+{
+    switch (dist) {
+    case RT_DIST_STAY_CLOSE:
+        return "stay-close";
+    case RT_DIST_CHARGE:
+        return "charge";
+    case RT_DIST_SNIPE:
+        return "snipe";
+    case RT_DIST_ON_YOUR_OWN:
+        return "on-your-own";
+    case RT_DIST_STAY:
+        return "stay";
+    case RT_DIST_NONE:
+        return "none";
+    default:
+        return "-";
+    }
+}
+
+// Whether `tgt` is this companion's live focus -- its own (SQUAD COMMAND), else the squad's (the ATTACK order) --
+// which FOLLOW's leash gives way to (SQUAD ORDERS block).
+static bool rt_focus_is_for(const RtActor* a, Object* tgt);
+
+// A tile a companion may walk to under its Distance: Stay walks nowhere, Stay close nowhere farther from the dude
+// than its leash and slack, every other Distance anywhere. The net under the movers a held or following companion
+// could still reach (rt_walk_to, the friendly-fire step): the state machine keeps them out of those already.
+static bool rt_party_tile_ok(const RtActor* a, int tile)
+{
+    if (a == NULL) {
+        return true;
+    }
+    if (a->party_dist == RT_DIST_STAY) {
+        return false;
+    }
+    if (a->party_dist == RT_DIST_STAY_CLOSE && obj_dude != NULL && a->obj != NULL
+        && a->obj->elevation == obj_dude->elevation && !rt_focus_is_for(a, a->target)) {
+        return tile_dist(tile, obj_dude->tile) <= RT_PARTY_STAY_CLOSE_TILES + RT_PARTY_LEASH_SLACK;
+    }
+    return true;
+}
+
+// The SQUAD ORDERS block (above rt_intent_update). `reach` < 0: worked out there.
+static bool rt_party_target_allowed(RtActor* a, Object* npc, Object* tgt, int reach = -1);
 
 // --- BALANCE TELEMETRY ---
 //
@@ -2846,6 +3167,11 @@ static bool rt_sync_weapon_fid(Object* npc)
     return true;
 }
 
+// SQUAD COMMAND: the weapon a companion was given (the WEAPON wheel) when it can use it right now, else NULL -- the
+// AI's own choice; and the wield that puts an item in its hand. Both live in the squad command block.
+static Object* rt_squad_pin_item(Object* npc);
+static bool rt_squad_wield(RtActor* a, Object* npc, Object* item, const char* why);
+
 static void rt_ensure_weapon_drawn(RtActor* a)
 {
     Object* npc = a->obj;
@@ -2873,6 +3199,20 @@ static void rt_ensure_weapon_drawn(RtActor* a)
     // hand test, because everything below (the wield and the pose stamp alike) needs an idle
     // critter, and latching while it walks would settle for whatever it happened to hold.
     if (anim_busy(npc) != 0) {
+        return;
+    }
+
+    // SQUAD COMMAND: THE WEAPON HE GAVE IT, NOT THE AI's PICK (2026-11-12, his design "A": „změň zbraň“). A companion
+    // keeps to it while it carries it and can fire it -- no switching by skill below. Out of ammo with none to load,
+    // or gone from its pack, rt_squad_pin_item says NULL and the AI chooses as ever (the weapon step says so once).
+    Object* pin = rt_squad_pin_item(npc);
+    if (pin != NULL) {
+        if (inven_right_hand(npc) != pin) {
+            rt_squad_wield(a, npc, pin, "draw");
+            return; // let the take-out play; the pose is checked next frame
+        }
+        a->weapon_checked = rt_sync_weapon_fid(npc);
+        a->checked_hand = inven_right_hand(npc);
         return;
     }
 
@@ -6846,6 +7186,12 @@ static int rt_fight_restore_count = 0;
 // again once a load is complete (combat_rt_rearm_team_fight), the way the first visit set them.
 #define RT_SAVE_TEAMFIGHT_TAG 0x52545446 // 'RTTF'
 #define RT_SAVE_PARTY_TAG 0x52545042 // 'RTPB' -- every companion, whole (party_member.cc, 2026-11-04)
+// 'RTSQ' -- SQUAD COMMAND (2026-11-12): each companion's hold fire and weapon pick, by object id. Not 'RTQS' (the
+// quick slots) backwards by accident: a tag of its own. Written before RTPB, which must stay the last section.
+#define RT_SAVE_SQUAD_TAG 0x52545351
+#define RT_SQUAD_HEADER_BYTES 8 // count, record size
+#define RT_SQUAD_RECORD_BYTES 12 // id, flags, weapon pid
+#define RT_SQUAD_FLAG_HOLD_FIRE 0x01
 #define RT_TEAMFIGHT_BYTES 16 // map, elevation, attacker team, defender team
 typedef struct RtTeamFight {
     int map; // -1 = none
@@ -7283,6 +7629,54 @@ static int rt_team_fight_section_read(DB_FILE* stream, int len)
     return RT_TEAMFIGHT_BYTES;
 }
 
+#if FALLOUT_RT_GAME == 2
+// RTSQ at load (SQUAD COMMAND): each companion's hold fire and weapon pick, as saved. Kept by id whether or not that
+// companion is in the party now (they apply only while it is); a record this build does not know the end of is
+// skipped by its size, as rt_fled_section_read does.
+static int rt_squad_section_read(DB_FILE* stream, int len)
+{
+    if (len < RT_SQUAD_HEADER_BYTES) {
+        return 0;
+    }
+    int count;
+    int recordBytes;
+    if (!rt_save_read_int(stream, &count) || !rt_save_read_int(stream, &recordBytes)) {
+        return -1;
+    }
+    int used = RT_SQUAD_HEADER_BYTES;
+    if (count < 0 || count > RT_SQUAD_MAX || recordBytes < RT_SQUAD_RECORD_BYTES
+        || recordBytes > RT_SAVE_RECORD_MAX_BYTES || RT_SQUAD_HEADER_BYTES + count * recordBytes > len) {
+        trace_event(TRACE_WARN, "rt-chunk", "bad-squad count=%d record=%d len=%d", count, recordBytes, len);
+        return used;
+    }
+    int holders = 0;
+    int pins = 0;
+    for (int i = 0; i < count; i++) {
+        int id;
+        int flags;
+        int weaponPid;
+        if (!rt_save_read_int(stream, &id) || !rt_save_read_int(stream, &flags) || !rt_save_read_int(stream, &weaponPid)
+            || !rt_save_skip(stream, recordBytes - RT_SQUAD_RECORD_BYTES)) {
+            return -1;
+        }
+        used += recordBytes;
+        RtSquadPref* p = rt_squad_pref_get(id);
+        if (p == NULL) {
+            continue;
+        }
+        p->holdFire = (flags & RT_SQUAD_FLAG_HOLD_FIRE) != 0;
+        p->weaponPid = weaponPid >= 0 ? weaponPid : -1;
+        p->weaponLapsed = false;
+        p->weaponHopeless = false;
+        holders += p->holdFire ? 1 : 0;
+        pins += p->weaponPid >= 0 ? 1 : 0;
+        rt_squad_pref_tidy(id);
+    }
+    trace_event(TRACE_STATE, "squad-load", "saved=%d holdFire=%d weapons=%d", count, holders, pins);
+    return used;
+}
+#endif
+
 void combat_rt_rearm_team_fight()
 {
 #if FALLOUT_RT_GAME == 2
@@ -7424,6 +7818,27 @@ int combat_rt_medic_optout_save(DB_FILE* stream)
     }
 
 #if FALLOUT_RT_GAME == 2
+    // (C2) RTSQ -- SQUAD COMMAND: hold fire and the weapon pick of each companion that has either, by object id (a
+    // party member's id is stable across maps and loads). Always written, empty when nobody has one. Before RTPB.
+    {
+        if (db_fwriteInt(stream, RT_SAVE_SQUAD_TAG) == -1
+            || db_fwriteInt(stream, RT_SAVE_SECTION_VERSION) == -1
+            || db_fwriteInt(stream, RT_SQUAD_HEADER_BYTES + rt_squad_pref_count * RT_SQUAD_RECORD_BYTES) == -1
+            || db_fwriteInt(stream, rt_squad_pref_count) == -1
+            || db_fwriteInt(stream, RT_SQUAD_RECORD_BYTES) == -1) {
+            return -1;
+        }
+        for (int i = 0; i < rt_squad_pref_count; i++) {
+            const RtSquadPref* p = &rt_squad_prefs[i];
+            if (db_fwriteInt(stream, p->id) == -1
+                || db_fwriteInt(stream, p->holdFire ? RT_SQUAD_FLAG_HOLD_FIRE : 0) == -1
+                || db_fwriteInt(stream, p->weaponPid) == -1) {
+                return -1;
+            }
+        }
+        trace_event(TRACE_STATE, "squad-save", "n=%d", rt_squad_pref_count);
+    }
+
     // (D) RTPB -- every companion, whole (partyMembersBackupWrite): what brings back one the map file lost
     // („Vic se ztratil“, 2026-11-04). LAST before the end: an older build stops at a section over 64 KB. The
     // length is patched in once the companions are written (SAVE.DAT is a plain file, fileSeek works on it).
@@ -7473,6 +7888,7 @@ int combat_rt_medic_optout_load(DB_FILE* stream)
     rt_team_fight.map = -1;
     rt_team_fight_atk_obj = NULL;
     rt_team_fight_def_obj = NULL;
+    rt_squad_pref_count = 0; // SQUAD COMMAND: a save without RTSQ has everyone firing at will, on Auto
 
     int count;
     if (!rt_save_read_int(stream, &count)) {
@@ -7558,6 +7974,8 @@ int combat_rt_medic_optout_load(DB_FILE* stream)
 #if FALLOUT_RT_GAME == 2
             else if (secTag == RT_SAVE_PARTY_TAG) {
                 used = partyMembersBackupRead(stream, secLen);
+            } else if (secTag == RT_SAVE_SQUAD_TAG) {
+                used = rt_squad_section_read(stream, secLen);
             }
 #endif
         }
@@ -7693,36 +8111,15 @@ static void rt_medic_consume(Object* medic, Object* item)
     }
 }
 
-// One healing action. Returns true when it consumed this actor's beat (so the caller skips the
-// attack FSM this frame), false when there was nothing to do.
-//
-// Costs the same RT_MEDIC_AP_COST vanilla charges, and pays it out of the same pool attacks spend --
-// so patching someone up genuinely trades against shooting, which is the whole reason it is
-// interesting rather than free healing.
-static bool rt_try_medic(RtActor* a, Object* npc)
+// One dose from `npc` to `patient` -- the drug, or a kit's skill roll -- with its AP, the medic cooldown, the
+// animation and the trace. Shared by the medic beat (rt_try_medic) and HEAL ME (rt_squad_heal_step), which asks for it
+// past the beat's threshold, cooldown and "stop patching me up" because he asked. False = the drug was refused
+// (nothing spent, the item kept).
+static bool rt_medic_dose(RtActor* a, Object* npc, Object* patient, Object* item, RtHealKind kind, const char* why)
 {
-    if (!rt_medic_enabled || a->ap < RT_MEDIC_AP_COST || rt_clock < a->heal_next_at) {
-        return false;
-    }
-    if (critter_body_type(npc) != BODY_TYPE_BIPED) {
-        return false; // ai_check_drugs' own gate: no rat is opening a first aid kit
-    }
-
-    // Item first: most critters carry nothing, and bailing here skips the patient search entirely.
-    // rt_medic_patient scans every registered actor, and this runs per actor per frame.
-    RtHealKind kind;
-    Object* item = rt_find_healing_item(npc, &kind);
-    if (item == NULL) {
-        return false;
-    }
-
-    Object* patient = rt_medic_patient(npc);
-    if (patient == NULL) {
-        return false;
-    }
-
     int healed = 0;
     bool consumed = false;
+    int itemPid = item->pid; // the trace below runs after the item may have been destroyed
 
     if (kind == RT_HEAL_DRUG) {
         // item_d_take_drug applies the drug's whole stat package to the PATIENT (it takes the
@@ -7741,9 +8138,22 @@ static bool rt_try_medic(RtActor* a, Object* npc)
         healed = -1; // the drug's own tables decide; nothing meaningful to report here
     } else {
         int skill = item->pid == PROTO_ID_DOCTORS_BAG ? SKILL_DOCTOR : SKILL_FIRST_AID;
+        int critBonus = 20;
+#if FALLOUT_RT_GAME == 2
+        // Fallout 2's own two kits (proto_instance.cc): the Paramedic's Bag is a Doctor's roll, the Field Medic kit a
+        // First Aid one, both at +40 to the critical. Only HEAL ME's picker hands one over (rt_squad_heal_item); the
+        // medic beat's rt_find_healing_item still knows the Fallout 1 two alone.
+        if (item->pid == PROTO_ID_PARAMEDICS_BAG) {
+            skill = SKILL_DOCTOR;
+            critBonus = 40;
+        } else if (item->pid == PROTO_ID_FIELD_MEDIC_FIRST_AID_KIT) {
+            skill = SKILL_FIRST_AID;
+            critBonus = 40;
+        }
+#endif
         int howMuch = 0;
         int roll = skill_result(npc, skill,
-            stat_level(npc, STAT_CRITICAL_CHANCE) + 20, &howMuch);
+            stat_level(npc, STAT_CRITICAL_CHANCE) + critBonus, &howMuch);
 
         if (roll == ROLL_SUCCESS || roll == ROLL_CRITICAL_SUCCESS) {
             healed = roll_random(1, 5);
@@ -7778,13 +8188,44 @@ static bool rt_try_medic(RtActor* a, Object* npc)
     }
 
     trace_event(TRACE_FLOW, "medic",
-        "id=%d pid=%d patient=%d self=%d kind=%d item=%d healed=%d consumed=%d hp=%d/%d ap=%d t=%.2f",
-        npc->id, npc->pid, patient->id, patient == npc ? 1 : 0, (int)kind, item->pid,
+        "id=%d pid=%d patient=%d self=%d kind=%d item=%d healed=%d consumed=%d hp=%d/%d ap=%d t=%.2f why=%s",
+        npc->id, npc->pid, patient->id, patient == npc ? 1 : 0, (int)kind, itemPid,
         healed, consumed ? 1 : 0,
         stat_level(patient, STAT_CURRENT_HIT_POINTS), stat_level(patient, STAT_MAXIMUM_HIT_POINTS),
-        a->ap, rt_clock);
+        a->ap, rt_clock, why);
 
     return true;
+}
+
+// One healing action. Returns true when it consumed this actor's beat (so the caller skips the
+// attack FSM this frame), false when there was nothing to do.
+//
+// Costs the same RT_MEDIC_AP_COST vanilla charges, and pays it out of the same pool attacks spend --
+// so patching someone up genuinely trades against shooting, which is the whole reason it is
+// interesting rather than free healing.
+static bool rt_try_medic(RtActor* a, Object* npc)
+{
+    if (!rt_medic_enabled || a->ap < RT_MEDIC_AP_COST || rt_clock < a->heal_next_at) {
+        return false;
+    }
+    if (critter_body_type(npc) != BODY_TYPE_BIPED) {
+        return false; // ai_check_drugs' own gate: no rat is opening a first aid kit
+    }
+
+    // Item first: most critters carry nothing, and bailing here skips the patient search entirely.
+    // rt_medic_patient scans every registered actor, and this runs per actor per frame.
+    RtHealKind kind;
+    Object* item = rt_find_healing_item(npc, &kind);
+    if (item == NULL) {
+        return false;
+    }
+
+    Object* patient = rt_medic_patient(npc);
+    if (patient == NULL) {
+        return false;
+    }
+
+    return rt_medic_dose(a, npc, patient, item, kind, "beat");
 }
 
 static bool rt_shot_blocked(Object* npc, Object* target, int hitMode)
@@ -9168,6 +9609,10 @@ static bool rt_free_move = false; // cfg free_move / MODS row "Free movement"
 // free mover integrates a velocity and cannot work without it.
 static float rt_frame_dt = 0.0f;
 static bool rt_fm_active = false; // we are driving the body this frame
+// The heading and gait the stick last drove him at -- what he coasts on under the squad command mode's slowdown,
+// when the stick has become the mode's cursor (combat_rt_poll_gamepad).
+static float rt_fm_last_angle = 0.0f;
+static bool rt_fm_last_run = false;
 static float rt_fm_x = 0.0f; // sub-pixel position, of which obj->x/y is the rounded shadow
 static float rt_fm_y = 0.0f;
 static float rt_fm_frame = 0.0f; // walk-cycle accumulator, in frames
@@ -11196,6 +11641,20 @@ static void rt_refresh_registry()
             a->ff_check_until = prev->ff_check_until;
             a->ff_hold_until = prev->ff_hold_until;
             a->ff_careful = prev->ff_careful;
+            a->party_dist = prev->party_dist;
+            a->party_dist_logged = prev->party_dist_logged;
+            a->party_wait_since = prev->party_wait_since;
+            a->party_wait_tgt = prev->party_wait_tgt;
+            a->party_drop_tgt = prev->party_drop_tgt;
+            a->party_drop_until = prev->party_drop_until;
+            a->party_look_at = prev->party_look_at;
+            a->party_snipe_at = prev->party_snipe_at;
+            a->party_leash_logged = prev->party_leash_logged;
+            a->party_charge_logged = prev->party_charge_logged;
+            a->party_charge_stuck_until = prev->party_charge_stuck_until;
+            a->focus_check_at = prev->focus_check_at;
+            a->focus_ok = prev->focus_ok;
+            a->focus_checked = prev->focus_checked;
             prevHostile = prev->hostile;
             a->fought_dude = prev->fought_dude;
         } else {
@@ -11318,6 +11777,20 @@ static void rt_refresh_registry()
             a->ff_check_until = 0.0f;
             a->ff_hold_until = 0.0f;
             a->ff_careful = false;
+            a->party_dist = RT_DIST_NONE;
+            a->party_dist_logged = -2;
+            a->party_wait_since = -1.0f;
+            a->party_wait_tgt = NULL;
+            a->party_drop_tgt = NULL;
+            a->party_drop_until = 0.0f;
+            a->party_look_at = 0.0f;
+            a->party_snipe_at = 0.0f;
+            a->party_leash_logged = -1;
+            a->party_charge_logged = NULL;
+            a->party_charge_stuck_until = 0.0f;
+            a->focus_check_at = 0.0f;
+            a->focus_ok = false;
+            a->focus_checked = NULL;
             a->run_winded = false;
             a->breather = false;
             a->breather_since = -1.0f;
@@ -12111,8 +12584,17 @@ static int rt_min_to_hit_verdict(RtActor* a, Object* npc, Object* target, int hi
 
 // Vanilla's answer to a hopeless shot: ai_run_away, i.e. FLEEING -- rt_flee_step takes it from the
 // next frame (it runs from the dude to max_dist and leaves the fight, as vanilla's does).
+// SQUAD COMMAND: a companion holding the weapon he gave it that is hopeless with it (rt_squad_pin_hopeless).
+static bool rt_squad_pin_hopeless(RtActor* a, Object* npc);
+
 static void rt_run_away_hopeless(RtActor* a, Object* npc)
 {
+    // ...not when it is HIS pick that is hopeless (SQUAD COMMAND, the WEAPON wheel): vanilla's AI never draws a weapon
+    // below min_to_hit (_ai_can_use_weapon), so its flight was never meant for one the player put in its hands. The
+    // AI chooses for the rest of this fight instead (rt_squad_pin_hopeless), and the companion fights on.
+    if (rt_squad_pin_hopeless(a, npc)) {
+        return;
+    }
     npc->data.critter.combat.maneuver |= CRITTER_MANUEVER_FLEEING;
     a->plan_valid = false;
     trace_event(TRACE_FLOW, "hopeless-flee", "id=%d pid=%d tgt=%d t=%.2f",
@@ -12551,6 +13033,10 @@ static void rt_retarget_nearer(RtActor* a, Object* npc)
     if (nearer == NULL || nearer == current) {
         return;
     }
+    // A companion only turns on one its Distance lets it fight (SQUAD ORDERS, rt_party_target_allowed).
+    if (a->friendly && !rt_party_target_allowed(a, npc, nearer)) {
+        return;
+    }
     int dist = obj_dist(npc, nearer);
     if (dist > RT_RETARGET_NEAR || dist + RT_RETARGET_GAIN > currentDist) {
         return;
@@ -12806,6 +13292,11 @@ static bool rt_ff_care(RtActor* a, Object* npc, int* attackModePtr, int* attackL
             int t = tiles[i];
             int dist = tile_dist(t, target->tile);
             if (dist < 2 || dist > range || obj_blocking_at(npc, t, npc->elevation) != NULL) {
+                continue;
+            }
+            // A companion on HOLD does not step at all, one on FOLLOW not out of its leash (rt_party_tile_ok): it
+            // holds its fire instead, or fires as a dim one would.
+            if (!rt_party_tile_ok(a, t)) {
                 continue;
             }
             if (combat_is_shot_blocked(npc, t, target->tile, target, NULL) || rt_ally_in_line(npc, t, target) != NULL) {
@@ -13368,6 +13859,14 @@ static int rt_cover_tile(Object* npc, Object* target, int radius)
 
 static bool rt_walk_to(Object* npc, int dest, const char* why, bool run)
 {
+    // SQUAD ORDERS: never where a companion's Distance does not let it go (rt_party_tile_ok) -- the net under every
+    // tactic that walks through here, should one still be asked for a held or following companion.
+    RtActor* party = rt_actor_of(npc);
+    if (party != NULL && !rt_party_tile_ok(party, dest)) {
+        trace_event(TRACE_FLOW, "party-walk-refused", "id=%d pid=%d to=%d why=%s dist=%s t=%.2f", npc->id, npc->pid,
+            dest, why, rt_dist_name(party->party_dist), rt_clock);
+        return false;
+    }
     anim_end_lone_stand(npc);
     npc->data.critter.combat.ap = stat_level(npc, STAT_MAXIMUM_ACTION_POINTS); // the engine's per-tile AP
     if (!rt_register_begin(ANIMATION_REQUEST_RESERVED, why)) {
@@ -14017,10 +14516,29 @@ static int rt_longest_gun_reach(Object* npc)
     return best;
 }
 
+// The longest reach of one weapon, off its proto (rt_longest_gun_reach's measure): for a weapon not in hand yet.
+static int rt_item_reach(Object* item)
+{
+    Proto* proto;
+    if (item == NULL || item_get_type(item) != ITEM_TYPE_WEAPON || proto_ptr(item->pid, &proto) == -1 || proto == NULL) {
+        return 0;
+    }
+    return proto->item.data.weapon.maxRange1 > proto->item.data.weapon.maxRange2
+        ? proto->item.data.weapon.maxRange1
+        : proto->item.data.weapon.maxRange2;
+}
+
 // True = it is going round this frame (a leg registered); false = chase as before.
 static bool rt_flank_step(RtActor* a, Object* npc, int range)
 {
-    if (rt_longest_gun_reach(npc) > range) {
+    // SQUAD COMMAND: a companion keeping to the weapon he gave it is as close a fighter as that weapon makes it, not
+    // as the longest gun in its pack would (it is not going to draw that one).
+    Object* pin = rt_squad_pin_item(npc);
+    if (pin != NULL) {
+        if (rt_item_reach(pin) > range) {
+            range = rt_item_reach(pin);
+        }
+    } else if (rt_longest_gun_reach(npc) > range) {
         range = rt_longest_gun_reach(npc);
     }
     if (!rt_tactical_ai || range > RT_FLANK_MAX_RANGE || a->target == NULL || !rt_can_walk(npc)
@@ -14357,6 +14875,1121 @@ static bool rt_back_off(RtActor* a, Object* npc, int attackMode)
     return false;
 }
 
+// --- SQUAD ORDERS: THE FIGHT KEEPS TO COMBAT CONTROL'S DISTANCE (Fallout 2 Realtime, 2026-11-11) ---------------
+//
+// His design "B" (2026-11-11, „Obojí, nejdřív B“, a Mass Effect style order set): LT held and a D-pad tap orders every
+// companion at once (gamepad_ui.cc -> combat_rt_squad_order) -- Up ATTACK the locked target first, Down FOLLOW, Left
+// HOLD, Right CHARGE. The last three are vanilla's own COMBAT CONTROL Distance (Stay close / Stay / Charge), written
+// the way the dialogue's panel writes it, so it is saved and shows there. Realtime used to ignore Distance altogether
+// (README "Known"); now the fight keeps to it, by vanilla's rules and numbers (combat_ai.cc
+// _cai_perform_distance_prefs, _ai_move_steps_closer, _ai_move_away, _combat_ai's regroup):
+//
+//   Stay close  fights from within RT_PARTY_STAY_CLOSE_TILES of the dude: goes after nobody farther out, shoots what
+//               it can from there, and is walked back once past the leash and its slack (rt_party_leash).
+//   Stay        never takes a step for the fight -- only its flight (vanilla's _ai_run_away ignores the Distance too)
+//               and the grenade jump still move it: fights what it can hit from its tile, turns toward what comes
+//               (rt_party_hold_look), never follows.
+//   Charge      closes in to the tile beside its target before it attacks, guns too (vanilla _ai_move_closer with
+//               every AP), and skips the tactics that hold back.
+//   Snipe       steps back from a target nearer than 10 tiles as vanilla's rule says (rt_party_snipe_step).
+//   On your own today's realtime fight; with nothing to fight it regroups at 7 tiles, as vanilla.
+//   (none)      a packet with no Distance, and every companion in Fallout 1: today's fight, today's 4 tiles.
+//
+// None of it keeps a fight going for nobody: a companion whose Distance will not let it go after its target lets the
+// target go after RT_PARTY_WAIT_SECONDS (CHASE -> IDLE), and IDLE takes only targets its Distance allows -- one rule on
+// both sides, so no IDLE <-> CHASE churn (the combat-flicker trap: every fight's end runs the map scripts).
+//
+// NOT ported, on purpose: vanilla's Stay-close pull-back skips a companion whose whoHitMe is the dude -- realtime keeps
+// whoHitMe for good, so one stray shot would switch the leash off for the rest of the game; and vanilla's "I cannot get
+// any closer, so I run" (_ai_try_attack below min_to_hit, when the Distance refuses the step) -- a held companion waits
+// for its shot to get better instead of fleeing the fight.
+
+// Its Distance this frame, read off its AI packet (Fallout 2 only), traced when it changes -- the line a test reads
+// to see an order reach it.
+static void rt_party_refresh_dist(RtActor* a, Object* npc)
+{
+    int dist = RT_DIST_NONE;
+#if FALLOUT_RT_GAME == 2
+    if (a->friendly && isPartyMember(npc)) {
+        int d = aiGetDistance(npc);
+        if (d >= 0 && d < DISTANCE_COUNT) {
+            dist = d;
+        }
+    }
+#endif
+    if (dist != a->party_dist_logged) {
+        if (dist != RT_DIST_NONE || a->party_dist_logged >= 0) {
+            trace_event(TRACE_FLOW, "party-distance", "id=%d pid=%d dist=%s was=%s state=%d t=%.2f", npc->id, npc->pid,
+                rt_dist_name(dist), rt_dist_name(a->party_dist_logged), a->state, rt_clock);
+        }
+        a->party_dist_logged = dist;
+    }
+    a->party_dist = dist;
+}
+
+// How far a party member with nothing to fight may fall behind the dude, by its Distance (_combat_ai), or -1 = never
+// (Stay). With no Distance: today's RT_FOLLOW_TILES.
+static int rt_party_follow_tiles(int dist)
+{
+    switch (dist) {
+    case RT_DIST_STAY_CLOSE:
+        return RT_PARTY_STAY_CLOSE_TILES;
+    case RT_DIST_CHARGE:
+    case RT_DIST_SNIPE:
+    case RT_DIST_ON_YOUR_OWN:
+        return RT_PARTY_REGROUP_TILES;
+    case RT_DIST_STAY:
+        return -1;
+    default:
+        return RT_FOLLOW_TILES;
+    }
+}
+
+// How far it can hit from where it stands, a weapon it has not drawn yet counted (rt_longest_gun_reach: the hit mode
+// reads "punch" until CHASE draws it). Walks its inventory: worked out once per scan, not per candidate.
+static int rt_party_reach(Object* npc)
+{
+    int reach = item_w_range(npc, rt_hit_mode(npc));
+    // SQUAD COMMAND: one keeping to the weapon he gave it reaches as far as that one does -- it will not draw another.
+    Object* pin = rt_squad_pin_item(npc);
+    int gun = pin != NULL ? rt_item_reach(pin) : rt_longest_gun_reach(npc);
+    return gun > reach ? gun : reach;
+}
+
+// Can it hit `tgt` from the tile it stands on? Within its reach (`reach` < 0: worked out here), and anything past the
+// next tile needs a clean line.
+static bool rt_party_can_hit_from_here(Object* npc, Object* tgt, int reach)
+{
+    if (tgt == NULL || tgt->elevation != npc->elevation) {
+        return false;
+    }
+    int dist = obj_dist(npc, tgt);
+    if (dist > (reach >= 0 ? reach : rt_party_reach(npc))) {
+        return false;
+    }
+    return dist <= 1 || !combat_is_shot_blocked(npc, npc->tile, tgt->tile, tgt, NULL);
+}
+
+// May this companion fight `tgt` under its Distance? Stay: only what it can hit from its tile. Stay close: a target
+// within the leash of the dude, wherever, or one it can hit from where it stands while it is itself within the leash
+// and its slack. Every other Distance: anyone, as before. `reach` as rt_party_can_hit_from_here.
+static bool rt_party_target_allowed(RtActor* a, Object* npc, Object* tgt, int reach)
+{
+    if (tgt == NULL) {
+        return false;
+    }
+    if (a->party_dist != RT_DIST_STAY && a->party_dist != RT_DIST_STAY_CLOSE) {
+        return true;
+    }
+    // ATTACK OUTRANKS FOLLOW (2026-11-11, self-played squad-attack: Vic, on his own Stay close, took the focus 20 tiles
+    // out, could not hit it from the leash, let it go, and took it up again 5 s later -- "On it." and nothing). The
+    // order says go and get that one: a Stay-close companion goes after the focus wherever it is, and the leash holds
+    // again once it is dead. HOLD is the exception: Stay means stay, it shoots the focus only from its tile.
+    if (a->party_dist == RT_DIST_STAY_CLOSE && rt_focus_is_for(a, tgt)) {
+        return true;
+    }
+    if (a->party_dist == RT_DIST_STAY || obj_dude == NULL || tgt->elevation != obj_dude->elevation
+        || npc->elevation != obj_dude->elevation) {
+        return rt_party_can_hit_from_here(npc, tgt, reach);
+    }
+    if (obj_dist(tgt, obj_dude) <= RT_PARTY_STAY_CLOSE_TILES) {
+        return true;
+    }
+    return obj_dist(npc, obj_dude) <= RT_PARTY_STAY_CLOSE_TILES + RT_PARTY_LEASH_SLACK
+        && rt_party_can_hit_from_here(npc, tgt, reach);
+}
+
+// THE FOCUS (the ATTACK order). Alive and on this floor; a knocked-out one stays the focus (it lives), but nobody
+// fights it until it comes to (rt_is_combatant).
+static bool rt_focus_live()
+{
+    return rt_squad_focus != NULL && rt_in_registry(rt_squad_focus) && rt_is_targetable(rt_squad_focus);
+}
+
+// SQUAD COMMAND (2026-11-12): ATTACK given to ONE companion is that companion's own focus, before the squad's. A
+// companion told to FOLLOW alone while a squad focus lives ignores the squad's (ignoreSquad) until its next ATTACK --
+// the squad's focus outranks FOLLOW's leash, and "come back" must bring that one back. A live focus is a critter on
+// this floor (the registry) that is still alive.
+static bool rt_focus_obj_live(Object* f)
+{
+    return f != NULL && rt_in_registry(f) && rt_is_targetable(f);
+}
+
+// This companion's focus now: its own, else the squad's, or NULL. Party members on the player's side only.
+static Object* rt_focus_of(const RtActor* a)
+{
+    if (a == NULL || a->obj == NULL || !a->friendly) {
+        return NULL;
+    }
+    RtSquadOrder* o = rt_squad_order_find(a->obj);
+    if (o != NULL && o->focus != NULL && rt_focus_obj_live(o->focus)) {
+        return o->focus;
+    }
+    if (o != NULL && o->ignoreSquad) {
+        return NULL;
+    }
+    return rt_focus_live() ? rt_squad_focus : NULL;
+}
+
+static bool rt_focus_is_for(const RtActor* a, Object* tgt)
+{
+    return tgt != NULL && tgt == rt_focus_of(a);
+}
+
+static void rt_focus_clear(const char* why)
+{
+    if (rt_squad_focus == NULL) {
+        return;
+    }
+    trace_event(TRACE_FLOW, "squad-focus", "off id=%d pid=%d why=%s t=%.2f", rt_squad_focus_id, rt_squad_focus_pid, why,
+        rt_clock);
+    rt_squad_focus = NULL;
+    rt_squad_focus_id = -1;
+    rt_squad_focus_pid = -1;
+}
+
+// A companion's own focus ends (the pointer is never read here: it may be the one being freed).
+static void rt_focus_own_clear(RtSquadOrder* o, const char* why)
+{
+    if (o == NULL || o->focus == NULL) {
+        return;
+    }
+    trace_event(TRACE_FLOW, "squad-focus", "own-off who=%d id=%d pid=%d why=%s t=%.2f", o->id, o->focusId, o->focusPid,
+        why, rt_clock);
+    o->focus = NULL;
+    o->focusId = -1;
+    o->focusPid = -1;
+}
+
+// Every focus ends: the squad's and each companion's own (END COMBAT, a script's terminate_combat, a FOLLOW to all).
+static void rt_focus_clear_all(const char* why)
+{
+    rt_focus_clear(why);
+    for (int i = 0; i < rt_squad_order_count; i++) {
+        rt_focus_own_clear(&rt_squad_orders[i], why);
+        rt_squad_orders[i].ignoreSquad = false;
+    }
+}
+
+// The squad's focus and every companion's own, checked the same way.
+static const char* rt_focus_end_why(Object* f)
+{
+    if (!rt_in_registry(f)) {
+        return "gone";
+    }
+    if (!rt_is_targetable(f)) {
+        return "dead";
+    }
+    if (rt_on_dudes_team(f) || isPartyMember(f)) {
+        return "friend"; // a script put it on his side (Smiley's team change): no enemy any more
+    }
+    return NULL;
+}
+
+// Once a frame: a focus ends with its target's death, or when it leaves this floor (the registry); a companion's own
+// ends too when the companion is no party member any more.
+static void rt_focus_tick()
+{
+    if (rt_squad_focus != NULL) {
+        const char* why = rt_focus_end_why(rt_squad_focus);
+        if (why != NULL) {
+            rt_focus_clear(why);
+        }
+    }
+    for (int i = 0; i < rt_squad_order_count; i++) {
+        RtSquadOrder* o = &rt_squad_orders[i];
+        if (o->focus == NULL) {
+            continue;
+        }
+        const char* why = rt_focus_end_why(o->focus);
+        if (why == NULL && (o->obj == NULL || !rt_in_registry(o->obj) || !isPartyMember(o->obj))) {
+            why = "companion-gone";
+        }
+        if (why != NULL) {
+            rt_focus_own_clear(o, why);
+        }
+    }
+}
+
+// Should this companion go for its focus now -- its own (SQUAD COMMAND), else the squad's? Every companion on the
+// floor that can get at it -- a shot from where it stands, or a way to it (rt_can_reach_or_shoot, a pathfinder
+// search, so asked once a second) -- and whose Distance lets it fight it. Seeing it is not asked for: the order says
+// where it is. One that holds its fire goes for nobody (rt_squad_holds_fire).
+static bool rt_focus_wanted(RtActor* a, Object* npc)
+{
+    Object* f = rt_focus_of(a);
+    if (f == NULL || f == npc || !a->friendly || !isPartyMember(npc) || !rt_is_combatant(f)
+        || f->elevation != npc->elevation || rt_squad_holds_fire(npc)) {
+        return false;
+    }
+    if (!rt_party_target_allowed(a, npc, f)) {
+        return false;
+    }
+    // Inside the chase's own leash (review 2026-11-11): past rt_chase_range + RT_DEAGGRO_MARGIN the top of
+    // rt_update_actor drops the target, and IDLE would pick it straight back -- frozen, every frame, ignoring the
+    // threats round it. The margin is the hysteresis.
+    if (obj_dist(npc, f) > rt_chase_range(npc)) {
+        return false;
+    }
+    if (f == a->party_drop_tgt && rt_clock < a->party_drop_until) {
+        return false; // a held one let it go a moment ago for too poor a shot (rt_party_chase_holds)
+    }
+    // Asked again at once for another focus (its own replacing the squad's, or the other way round).
+    if (rt_clock >= a->focus_check_at || a->focus_checked != f) {
+        a->focus_check_at = rt_clock + RT_FOCUS_CHECK_SECONDS;
+        a->focus_checked = f;
+        a->focus_ok = rt_can_reach_or_shoot(npc, f);
+    }
+    return a->focus_ok;
+}
+
+// The tactics a companion was in the middle of end when an order changes what it does: an overwatch post, a firing
+// position, a lean round a corner, a way round, a wait behind a teammate or at a corner.
+static void rt_party_drop_tactics(RtActor* a, Object* npc)
+{
+    if (a->ow_tile >= 0) {
+        rt_ow_drop(a, npc, "order", false);
+    }
+    a->firepos_tile = -1;
+    a->peek_phase = RT_PEEK_NONE;
+    a->peek_out = -1;
+    a->peek_wait_since = -1.0f;
+    a->flank_tile = -1;
+    a->choke_since = -1.0f;
+    a->corner_hold_start = -1.0f;
+    a->squad_hold_start = -1.0f;
+    a->prebreath_since = -1.0f;
+    a->detour_until = 0.0f;
+}
+
+// A companion in a fight turns on its focus (CHASE / ATTACK): rt_retarget_nearer's resets, and its tactics end.
+static bool rt_focus_take(RtActor* a, Object* npc, const char* why)
+{
+    Object* f = rt_focus_of(a);
+    if (f == NULL || a->target == f || !rt_focus_wanted(a, npc)) {
+        return false;
+    }
+    trace_event(TRACE_FLOW, "squad-focus", "take id=%d pid=%d tgt=%d tgtPid=%d was=%d dist=%d why=%s t=%.2f", npc->id,
+        npc->pid, f->id, f->pid, a->target != NULL ? a->target->id : 0, obj_dist(npc, f), why, rt_clock);
+    a->target = f;
+    a->plan_valid = false;
+    a->no_path_since = -1.0f;
+    a->unperceived_since = -1.0f;
+    a->route_plugged = false;
+    a->party_wait_since = -1.0f;
+    a->party_wait_tgt = NULL;
+    rt_party_drop_tactics(a, npc);
+    return true;
+}
+
+// The in-combat follow's move, shared by the IDLE follow and Stay close's way back: a straight leg at the dude, or the
+// pathfinder's route when the next step is blocked, asked at most once a second (follow_retry_at). `logged` keeps the
+// trace line to one per distance. True = a leg was asked for; false = the way is shut for the moment.
+static bool rt_party_step_to_dude(RtActor* a, Object* npc, int limit, const char* why, int* logged)
+{
+    int dist = obj_dist(npc, obj_dude);
+
+    // anim.cc bills the mover's ENGINE combat.ap per tile while the combat bit is set and truncates the walk at 0.
+    // That field is not combat_rt's pool (movement never spends the pool), so it is topped up here for the same reason
+    // the chase mover tops it up.
+    npc->data.critter.combat.ap = stat_level(npc, STAT_MAXIMUM_ACTION_POINTS);
+
+    // Same two-way move the chase uses: a straight step is cheap and smooth, but it cannot route around a building,
+    // so hand a blocked step to the pathfinder instead. The result is deliberately NOT fed to rt_note_path_result --
+    // that arms the unreachable latch, which exists to stop an actor re-acquiring a TARGET it cannot path to, and a
+    // follower must keep trying to reach its leader.
+    int stepRot = tile_dir(npc->tile, obj_dude->tile);
+    int stepDest = tile_num_in_direction(npc->tile, stepRot, 1);
+    Object* blocker = stepDest != obj_dude->tile
+        ? obj_blocking_at(npc, stepDest, npc->elevation)
+        : NULL;
+
+    if (*logged != dist) {
+        *logged = dist;
+        trace_event(TRACE_FLOW, "follow-step",
+            "id=%d pid=%d dist=%d blk=%d limit=%d why=%s t=%.2f",
+            npc->id, npc->pid, dist, blocker != NULL ? blocker->pid : -1, limit, why, rt_clock);
+    }
+
+    if (blocker != NULL) {
+        // Ask the pathfinder at most once a second while it keeps saying no -- see RtActor::follow_retry_at. A
+        // success clears nothing because nothing waits.
+        if (rt_clock >= a->follow_retry_at) {
+            if (rt_advance_to_target(npc, obj_dude)) {
+                return true;
+            }
+            a->follow_retry_at = rt_clock + 1.0f;
+        }
+        return false;
+    }
+    rt_step_toward(npc, obj_dude);
+    return true;
+}
+
+// FOLLOW's leash (Stay close), whatever the companion is doing in the fight: past the leash and its slack it walks
+// back toward the dude -- vanilla's _cai_perform_distance_prefs walks a Stay-close party member back to 5 tiles before
+// it fights. Inside the slack one that can shoot keeps shooting (the design: a following one still shoots); one that
+// cannot is walked back by rt_party_chase_holds. True = the walk is this beat; with the way back shut for the moment it
+// fights on from where it is instead of standing there.
+static bool rt_party_leash(RtActor* a, Object* npc)
+{
+    if (a->party_dist != RT_DIST_STAY_CLOSE || a->state == RT_IDLE || !rt_engaged || !rt_is_combatant(obj_dude)
+        || rt_focus_is_for(a, a->target) // after its focus: ATTACK outranks the leash (rt_party_target_allowed)
+        || obj_dude->elevation != npc->elevation || !rt_can_walk(npc)
+        || (npc->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0) {
+        return false;
+    }
+    int dist = obj_dist(npc, obj_dude);
+    int limit = RT_PARTY_STAY_CLOSE_TILES + RT_PARTY_LEASH_SLACK;
+    if (dist <= limit) {
+        return false;
+    }
+    if (a->party_leash_logged != dist) {
+        trace_event(TRACE_FLOW, "party-leash", "id=%d pid=%d dist=%d limit=%d state=%d tgt=%d t=%.2f", npc->id, npc->pid,
+            dist, limit, a->state, a->target != NULL ? a->target->id : 0, rt_clock);
+    }
+    if (!rt_party_step_to_dude(a, npc, RT_PARTY_STAY_CLOSE_TILES, "leash", &a->party_leash_logged)) {
+        return false;
+    }
+    a->party_wait_since = -1.0f; // walking back is not waiting on its target
+    return true;
+}
+
+// HOLD keeps its tile, not its eyes shut (the design of 2026-11-11: a held companion with nothing in range still turns
+// and fights what comes). Vanilla sight is a facing cone (PE x 5 in front, PE x 2 behind in a fight), and one that may
+// not take a step could stand with its back to the enemy coming at it. With nothing it may fight, it turns toward the
+// nearest enemy already after his side within its reach; rt_party_pick takes that one once it is in sight and in reach.
+static void rt_party_hold_look(RtActor* a, Object* npc)
+{
+    if (rt_clock < a->party_look_at || anim_busy(npc) != 0 || critter_is_prone(npc)) {
+        return;
+    }
+    a->party_look_at = rt_clock + RT_PARTY_LOOK_SECONDS;
+    int reach = rt_party_reach(npc);
+    Object* best = NULL;
+    int bestDist = INT_MAX;
+    for (int i = 0; i < rt_actor_count; i++) {
+        Object* e = rt_actors[i].obj;
+        if (!rt_actors[i].hostile || !rt_is_combatant(e) || e->elevation != npc->elevation) {
+            continue;
+        }
+        // rt_nearest_hostile's rule: one fighting somebody, not a peaceful critter flagged hostile for a moment.
+        if (!rt_threatens_player_side(e) && e->data.critter.combat.whoHitMe == NULL) {
+            continue;
+        }
+        int d = obj_dist(npc, e);
+        if (d > reach || d >= bestDist || is_within_perception(npc, e)) {
+            continue;
+        }
+        best = e;
+        bestDist = d;
+    }
+    if (best == NULL) {
+        return;
+    }
+    int toward = tile_dir(npc->tile, best->tile);
+    if (toward == npc->rotation) {
+        return;
+    }
+    trace_event(TRACE_FLOW, "party-look", "id=%d pid=%d rot=%d->%d tgt=%d dist=%d t=%.2f", npc->id, npc->pid,
+        npc->rotation, toward, best->id, bestDist, rt_clock);
+    rt_look_set_rotation(npc, toward);
+}
+
+// The IDLE companion's next target: the squad's focus first (rt_focus_wanted); then, under a Distance that limits where
+// it may go (Stay, Stay close), the nearest enemy it sees AND may fight; otherwise today's pick, the nearest enemy if
+// it sees it (rt_nearest_hostile).
+static Object* rt_party_pick(RtActor* a, Object* npc)
+{
+    if (rt_focus_wanted(a, npc)) {
+        return rt_focus_of(a);
+    }
+    if (a->party_dist != RT_DIST_STAY && a->party_dist != RT_DIST_STAY_CLOSE) {
+        Object* enemy = rt_nearest_hostile(npc);
+        return enemy != NULL && is_within_perception(npc, enemy) ? enemy : NULL;
+    }
+    Object* best = NULL;
+    int bestDist = INT_MAX;
+    int range = rt_chase_range(npc);
+    int reach = rt_party_reach(npc);
+    for (int i = 0; i < rt_actor_count; i++) {
+        Object* e = rt_actors[i].obj;
+        if (!rt_actors[i].hostile || !rt_is_combatant(e) || e->elevation != npc->elevation) {
+            continue;
+        }
+        if (!rt_threatens_player_side(e) && e->data.critter.combat.whoHitMe == NULL) {
+            continue;
+        }
+        if (e == a->party_drop_tgt && rt_clock < a->party_drop_until) {
+            continue; // let go of a moment ago for too poor a shot (rt_party_chase_holds)
+        }
+        int d = obj_dist(npc, e);
+        if (d > range || d >= bestDist || !is_within_perception(npc, e) || !rt_party_target_allowed(a, npc, e, reach)) {
+            continue;
+        }
+        best = e;
+        bestDist = d;
+    }
+    return best;
+}
+
+// CHASE under a Distance that limits where a companion may go. True = it does not go after its target this frame: on
+// HOLD it stands; on FOLLOW, with its target out past the leash, it stands where it is -- or, out past the leash itself,
+// walks back toward the dude (the design: come back toward him, fight from there). After RT_PARTY_WAIT_SECONDS of that
+// the target is let go (CHASE -> IDLE): the stop rule would never end it, the companion still perceives its target,
+// and a fight would stay on for a target nobody goes after.
+static bool rt_party_chase_holds(RtActor* a, Object* npc, bool closeForHit)
+{
+    bool stay = a->party_dist == RT_DIST_STAY;
+    if (!stay && a->party_dist != RT_DIST_STAY_CLOSE) {
+        return false;
+    }
+    const char* why;
+    if (stay) {
+        why = closeForHit ? "stay-poor-shot" : "stay";
+    } else {
+        if (obj_dude == NULL || rt_focus_is_for(a, a->target)
+            || (a->target->elevation == obj_dude->elevation && obj_dist(a->target, obj_dude) <= RT_PARTY_STAY_CLOSE_TILES)) {
+            a->party_wait_since = -1.0f;
+            return false; // its fight is beside him, or it is the squad's focus: go
+        }
+        why = "outside";
+    }
+
+    if (a->party_wait_tgt != a->target || a->party_wait_since < 0.0f) {
+        a->party_wait_tgt = a->target;
+        a->party_wait_since = rt_clock;
+        trace_event(TRACE_FLOW, "party-hold", "id=%d pid=%d tile=%d tgt=%d tgtPid=%d dist=%d dude=%d why=%s t=%.2f",
+            npc->id, npc->pid, npc->tile, a->target->id, a->target->pid, obj_dist(npc, a->target),
+            obj_dude != NULL ? obj_dist(npc, obj_dude) : -1, why, rt_clock);
+    }
+    a->no_path_since = -1.0f; // holding is not failing to route
+
+    if (rt_clock - a->party_wait_since >= RT_PARTY_WAIT_SECONDS) {
+        // One its Distance still allows -- it is in reach, the shot is just too poor (min_to_hit wants it closer) -- is
+        // not taken up again for a while: IDLE would pick it straight back, and a companion that is the only one in the
+        // fight would start and end it every RT_PARTY_WAIT_SECONDS (each end runs the map scripts).
+        bool stillAllowed = rt_party_target_allowed(a, npc, a->target);
+        if (stillAllowed) {
+            a->party_drop_tgt = a->target;
+            a->party_drop_until = rt_clock + RT_PARTY_REPICK_SECONDS;
+        }
+        trace_event(TRACE_FLOW, "party-drop", "id=%d pid=%d tgt=%d tgtPid=%d dist=%d why=%s allowed=%d t=%.2f", npc->id,
+            npc->pid, a->target->id, a->target->pid, obj_dist(npc, a->target), why, stillAllowed ? 1 : 0, rt_clock);
+        a->state = RT_IDLE;
+        a->target = NULL;
+        a->unperceived_since = -1.0f;
+        a->party_wait_since = -1.0f;
+        a->party_wait_tgt = NULL;
+        return true;
+    }
+
+    if (!stay && npc->elevation == obj_dude->elevation && rt_can_walk(npc)
+        && obj_dist(npc, obj_dude) > RT_PARTY_STAY_CLOSE_TILES) {
+        rt_party_step_to_dude(a, npc, RT_PARTY_STAY_CLOSE_TILES, "back", &a->party_leash_logged);
+    }
+    return true;
+}
+
+// CHARGE's line, once per target, as a charging companion goes in (the proof a test reads).
+static void rt_party_note_charge(RtActor* a, Object* npc, int range)
+{
+    if (a->party_charge_logged == a->target) {
+        return;
+    }
+    a->party_charge_logged = a->target;
+    trace_event(TRACE_FLOW, "party-charge", "id=%d pid=%d tgt=%d tgtPid=%d dist=%d range=%d t=%.2f", npc->id, npc->pid,
+        a->target->id, a->target->pid, obj_dist(npc, a->target), range, rt_clock);
+}
+
+// CHARGE THAT CANNOT GET IN (review 2026-11-11): vanilla's _ai_move_closer walks as far as it can and _ai_try_attack
+// then fires from wherever that is. Here the way to the tile beside its target can be shut -- a body in the only gap,
+// a crowd round the target, no route at all -- and a gunner that must stand beside it before it fires never fired.
+// So for RT_PARTY_CHARGE_RETRY_SECONDS it fights at its weapon's reach, as any companion would, then goes in again.
+// The route it failed to find is not counted against the target: it can still be shot.
+static void rt_party_charge_stuck(RtActor* a, Object* npc, const char* why)
+{
+    if (a->party_dist != RT_DIST_CHARGE || rt_clock < a->party_charge_stuck_until) {
+        return;
+    }
+    a->party_charge_stuck_until = rt_clock + RT_PARTY_CHARGE_RETRY_SECONDS;
+    a->no_path_since = -1.0f;
+    trace_event(TRACE_FLOW, "party-charge-stuck", "id=%d pid=%d tgt=%d dist=%d why=%s t=%.2f", npc->id, npc->pid,
+        a->target != NULL ? a->target->id : 0, a->target != NULL ? obj_dist(npc, a->target) : -1, why, rt_clock);
+}
+
+// _combatai_rating, the strength vanilla's Snipe weighs: the most damage it can do -- its melee damage, or the most
+// either hand's weapon does -- plus its armour class; 0 for one dead or knocked out.
+static int rt_party_rating(Object* critter)
+{
+    if (critter == NULL || !rt_is_critter(critter)
+        || (critter->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+        return 0;
+    }
+    int best = stat_level(critter, STAT_MELEE_DAMAGE);
+    Object* hands[2] = { inven_right_hand(critter), inven_left_hand(critter) };
+    for (int h = 0; h < 2; h++) {
+        int lo;
+        int hi;
+        if (hands[h] != NULL && item_get_type(hands[h]) == ITEM_TYPE_WEAPON
+            && item_w_damage_min_max(hands[h], &lo, &hi) != -1 && best < hi) {
+            best = hi;
+        }
+    }
+    return best + stat_level(critter, STAT_ARMOR_CLASS);
+}
+
+// SNIPE (vanilla _cai_perform_distance_prefs, with the sfall fix CE carries): a target nearer than 10 tiles is backed
+// away from -- always when no points are left over after one primary attack, and with points to spare only when those
+// and the distance together still come short of 5 and the target rates higher (rt_party_rating). The way back is
+// _ai_move_away's: straight away from the target, else 60 degrees to either side, the longest leg that has a route.
+// Asked where vanilla asks it, before the attack; a leg of RT_PARTY_SNIPE_LEG tiles at most and one every
+// RT_PARTY_SNIPE_PAUSE (vanilla once a turn) -- the pool refills as it goes, and it looks again from where it stops.
+// True = it stepped back this beat.
+static bool rt_party_snipe_step(RtActor* a, Object* npc)
+{
+    Object* target = a->target;
+    if (a->party_dist != RT_DIST_SNIPE || target == NULL || rt_clock < a->party_snipe_at || !rt_can_walk(npc)
+        || (npc->flags & OBJECT_MULTIHEX) != 0) {
+        return false;
+    }
+    int dist = obj_dist(npc, target);
+    if (dist >= RT_PARTY_SNIPE_TILES) {
+        return false;
+    }
+    // Vanilla weighs it on the turn's points, full at its start (review 2026-11-11): the realtime pool is near empty
+    // after every shot, which made every sniper back off from everything.
+    int spare = stat_level(npc, STAT_MAXIMUM_ACTION_POINTS) - rt_ap_cost(npc, HIT_MODE_RIGHT_WEAPON_PRIMARY);
+    int mine = -1;
+    int theirs = -1;
+    bool away = spare <= 0;
+    if (!away && spare + dist - 1 < 5) {
+        mine = rt_party_rating(npc);
+        theirs = rt_party_rating(target);
+        away = mine < theirs;
+    }
+    if (!away) {
+        return false;
+    }
+    a->party_snipe_at = rt_clock + RT_PARTY_SNIPE_PAUSE;
+
+    static const int fan[3] = { 0, 1, 5 };
+    int rotation = tile_dir(target->tile, npc->tile);
+    int dest = -1;
+    for (int len = RT_PARTY_SNIPE_LEG; len > 0 && dest < 0; len--) {
+        for (int k = 0; k < 3; k++) {
+            int t = tile_num_in_direction(npc->tile, (rotation + fan[k]) % ROTATION_COUNT, len);
+            if (t < 0 || t == npc->tile || obj_blocking_at(npc, t, npc->elevation) != NULL
+                || map_tile_is_background(t, npc->elevation)) {
+                continue;
+            }
+            int steps = make_path(npc, npc->tile, t, NULL, 1);
+            if (steps > 0 && steps <= len + 2) {
+                dest = t;
+                break;
+            }
+        }
+    }
+    bool moved = dest >= 0 && rt_walk_to(npc, dest, "snipe", false);
+    trace_event(TRACE_FLOW, "party-snipe", "id=%d pid=%d tgt=%d dist=%d ap=%d spare=%d rating=%d vs=%d to=%d moved=%d t=%.2f",
+        npc->id, npc->pid, target->id, dist, a->ap, spare, mine, theirs, dest, moved ? 1 : 0, rt_clock);
+    return moved;
+}
+
+// A companion that took an order acts on it at once: the 30 s unreachable latch is lifted (it would keep a held or a
+// following one frozen on its tile), a wait and a look start over, the tactics it was in the middle of end, and in a
+// fight a walk it was on is cut -- otherwise the order lands only where that leg ends. HOLD cuts any walk ("they stay
+// where they are"), the others the walks of the fight (an idle follower's walk to the dude is still wanted). Not a
+// flight: vanilla's flight ignores the Distance, and a cut leg snaps the body to its tile.
+static void rt_party_take_order(RtActor* a, Object* npc, bool hold)
+{
+    a->unreachable_until = 0.0f;
+    a->party_wait_since = -1.0f;
+    a->party_wait_tgt = NULL;
+    a->party_drop_tgt = NULL;
+    a->party_drop_until = 0.0f;
+    a->party_look_at = 0.0f;
+    a->party_snipe_at = 0.0f;
+    a->party_charge_logged = NULL;
+    a->party_charge_stuck_until = 0.0f;
+    a->focus_check_at = 0.0f;
+    rt_party_drop_tactics(a, npc);
+    int anim = FID_ANIM_TYPE(npc->fid);
+    if (rt_engaged && !a->fleeing && (hold || a->state != RT_IDLE) && (anim == ANIM_WALK || anim == ANIM_RUNNING)) {
+        int cut = anim_end_moves(npc);
+        if (cut > 0) {
+            trace_event(TRACE_FLOW, "squad-walk-cut", "id=%d pid=%d sequences=%d hold=%d t=%.2f", npc->id, npc->pid, cut,
+                hold ? 1 : 0, rt_clock);
+        }
+    }
+}
+
+// --- SQUAD COMMAND: WHAT THE ORDERS LEAVE BEHIND (Fallout 2 Realtime, 2026-11-12, his design "A") ----------------
+//
+// The orders are given at the bottom of the file (rt_squad_command, from the squad command mode and design B's LT +
+// D-pad); here is what a companion then does about them, each a step of rt_update_actor in vanilla's turn order,
+// after its script and its flight:
+//   HEAL ME    rt_squad_heal_step    it comes to him and doses him with its best healing item at once -- the medic's
+//                                    dose (rt_medic_dose), past the beat's 50 % threshold, its cooldown and "stop
+//                                    patching me up": he asked. In a fight the heal comes in over time, as any drug's.
+//   WEAPON     rt_squad_weapon_step  the weapon he gave it goes in its hand, and the AI keeps to it (rt_squad_pin_item).
+//   HOLD FIRE  rt_squad_holds_fire   it starts no attack -- a fight it is in is dropped at the top of rt_update_actor,
+//                                    its idle pick takes nobody, the arbiter skips it, END COMBAT does not wait on it --
+//                                    and still follows, flees, heals and keeps its Distance.
+//   NO HEALING rt_medic_patient      its medic beat passes him over (the dialogue's "stop patching me up", the same
+//                                    state, 2026-11-13): it still doses itself and the others, and HEAL ME still works.
+// None of it is a fight: a companion on its way to him with a stimpak stays IDLE (or keeps the state it had), so none
+// of these orders starts a fight, or keeps one on, for nobody. (GO's walk to a post and its hold of it were here too
+// until 2026-11-13: „dej pryč ovládání a přikazování companions kam mají přesně chodit“.)
+
+// HEAL ME gives up -- "Can't reach you." -- when it has not reached him in this long: a dude who keeps walking away, a
+// way blocked a step at a time. A way shut outright gives up sooner, after the chase's RT_NO_PATH_GIVEUP_SECONDS.
+#define RT_SQUAD_HEAL_MAX_SECONDS 30.0f
+// A companion holding its fire looks at the enemy it would have taken this often -- only to trace the refusal.
+#define RT_SQUAD_FIRE_LOOK_SECONDS 1.0f
+
+// One short line over a companion's head, as design B's orders say theirs (combatai_float_line: the font and colours
+// of its AI packet). A writable copy: the text object writes into the string.
+static void rt_squad_say(Object* c, const char* text)
+{
+#if FALLOUT_RT_GAME == 2
+    if (c == NULL || text == NULL || c->elevation != map_elevation) {
+        return;
+    }
+    char line[32];
+    snprintf(line, sizeof(line), "%s", text);
+    combatai_float_line(c, line);
+#else
+    (void)c;
+    (void)text;
+#endif
+}
+
+// An order that sends a companion somewhere (HEAL ME) cuts the walk it is on, in a fight or out of one -- its party
+// script's follow, a chase leg -- or the order would land only where that leg ends. Not a flight's: vanilla's flight
+// takes no orders, and a cut leg snaps the body to its tile.
+static void rt_squad_cut_walk(RtActor* a, Object* npc, const char* why)
+{
+    if (npc == NULL || (a != NULL && a->fleeing)) {
+        return;
+    }
+    int anim = FID_ANIM_TYPE(npc->fid);
+    if (anim != ANIM_WALK && anim != ANIM_RUNNING) {
+        return;
+    }
+    int cut = anim_end_moves(npc);
+    if (cut > 0) {
+        trace_event(TRACE_FLOW, "squad-walk-cut", "id=%d pid=%d sequences=%d why=%s t=%.2f", npc->id, npc->pid, cut, why,
+            rt_clock);
+    }
+}
+
+// --- HEAL ME ---
+
+// HEAL ME's item: his own order for his heal button (gamepad_ui's gpui_heal_order -- Stimpak, Super Stimpak, Fallout
+// 2's Healing Powder), then a kit: Fallout 2's two at +40 to the critical, then the medic beat's Doctor's Bag and First
+// Aid Kit. Bipeds only, ai_check_drugs' own gate -- Dogmeat, the robots and Goris never open a kit. NULL = nothing.
+// (The medic beat keeps its own rt_find_healing_item: what every NPC heals with is not changed by this order.)
+static Object* rt_squad_heal_item(Object* healer, RtHealKind* kind)
+{
+    *kind = RT_HEAL_NONE;
+    if (healer == NULL || !rt_is_critter(healer) || critter_body_type(healer) != BODY_TYPE_BIPED) {
+        return NULL;
+    }
+    static const int drugs[] = {
+        PROTO_ID_STIMPACK,
+        PROTO_ID_SUPER_STIMPACK,
+#if FALLOUT_RT_GAME == 2
+        PROTO_ID_HEALING_POWDER,
+#endif
+    };
+    static const int kits[] = {
+#if FALLOUT_RT_GAME == 2
+        PROTO_ID_PARAMEDICS_BAG,
+        PROTO_ID_FIELD_MEDIC_FIRST_AID_KIT,
+#endif
+        PROTO_ID_DOCTORS_BAG,
+        PROTO_ID_FIRST_AID_KIT,
+    };
+    Inventory* inventory = &(healer->data.inventory);
+    for (size_t k = 0; k < sizeof(drugs) / sizeof(drugs[0]); k++) {
+        for (int i = 0; i < inventory->length; i++) {
+            Object* item = inventory->items[i].item;
+            if (item != NULL && item->pid == drugs[k] && item_get_type(item) == ITEM_TYPE_DRUG) {
+                *kind = RT_HEAL_DRUG;
+                return item;
+            }
+        }
+    }
+    for (size_t k = 0; k < sizeof(kits) / sizeof(kits[0]); k++) {
+        for (int i = 0; i < inventory->length; i++) {
+            Object* item = inventory->items[i].item;
+            if (item != NULL && item->pid == kits[k]) {
+                *kind = RT_HEAL_KIT;
+                return item;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void rt_squad_heal_end(RtSquadOrder* o, const char* why)
+{
+    if (o == NULL || !o->healing) {
+        return;
+    }
+    trace_event(TRACE_FLOW, "squad-heal", "end id=%d pid=%d why=%s took=%.2f t=%.2f", o->id, o->pid, why,
+        rt_clock - o->healSince, rt_clock);
+    o->healing = false;
+    o->healStuckSince = -1.0f;
+    o->healWaitLogged = false;
+    o->followHeldLogged = false;
+}
+
+// HEAL ME, every beat until it is done: within the medic's reach of him (RT_MEDIC_ALLY_TILES) it doses him with its best
+// healing item the moment it has the medic's RT_MEDIC_AP_COST; farther off it walks to him -- the in-fight follow's
+// move (rt_party_step_to_dude: straight legs, the pathfinder round what blocks one), which no Distance or hold keeps it
+// from. A way shut for RT_NO_PATH_GIVEUP_SECONDS, or RT_SQUAD_HEAL_MAX_SECONDS without reaching him, gives up: "Can't
+// reach you." He healed by other means, out cold or on another floor ends it quietly; its last item gone, "No meds."
+// True = this beat was the heal's: on its way it fights nobody.
+static bool rt_squad_heal_step(RtActor* a, Object* npc)
+{
+    RtSquadOrder* o = rt_squad_order_find(npc);
+    if (o == NULL || !o->healing) {
+        return false;
+    }
+    if (!a->friendly || !isPartyMember(npc)) {
+        rt_squad_heal_end(o, "left-party");
+        return false;
+    }
+    if (obj_dude == NULL || !rt_is_combatant(obj_dude) || obj_dude->elevation != npc->elevation) {
+        rt_squad_heal_end(o, "dude");
+        return false;
+    }
+    if (rt_hp_with_heal(obj_dude) >= stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS)) {
+        rt_squad_heal_end(o, "full");
+        return false;
+    }
+    RtHealKind kind;
+    Object* item = rt_squad_heal_item(npc, &kind);
+    if (item == NULL) {
+        rt_squad_heal_end(o, "no-meds");
+        rt_squad_say(npc, "No meds.");
+        return false;
+    }
+
+    int dist = obj_dist(npc, obj_dude);
+    if (dist <= RT_MEDIC_ALLY_TILES) {
+        if (a->ap < RT_MEDIC_AP_COST) {
+            if (!o->healWaitLogged) {
+                o->healWaitLogged = true;
+                trace_event(TRACE_FLOW, "squad-heal", "wait id=%d pid=%d ap=%d need=%d dist=%d t=%.2f", npc->id, npc->pid,
+                    a->ap, RT_MEDIC_AP_COST, dist, rt_clock);
+            }
+            return true;
+        }
+        rt_look_set_rotation(npc, tile_dir(npc->tile, obj_dude->tile));
+        int itemPid = item->pid;
+        int hpBefore = critter_get_hits(obj_dude);
+        bool dosed = rt_medic_dose(a, npc, obj_dude, item, kind, "heal-me");
+        trace_event(TRACE_FLOW, "squad-heal", "dose id=%d pid=%d item=%d kind=%d ok=%d hp=%d->%d pool=%d dist=%d t=%.2f",
+            npc->id, npc->pid, itemPid, (int)kind, dosed ? 1 : 0, hpBefore, critter_get_hits(obj_dude),
+            combat_rt_heal_left(), dist, rt_clock);
+        rt_squad_heal_end(o, dosed ? "dosed" : "refused");
+        if (dosed) {
+            rt_intent_hint(a, RT_INTENT_HEAL, "heal-me", 3.0f);
+        }
+        return true;
+    }
+
+    if (rt_clock - o->healSince >= RT_SQUAD_HEAL_MAX_SECONDS || !rt_can_walk(npc)) {
+        rt_squad_heal_end(o, rt_can_walk(npc) ? "timeout" : "cannot-walk");
+        rt_squad_say(npc, "Can't reach you.");
+        return false;
+    }
+    if (rt_party_step_to_dude(a, npc, RT_MEDIC_ALLY_TILES, "heal", &o->healLogged)) {
+        o->healStuckSince = -1.0f;
+    } else if (o->healStuckSince < 0.0f) {
+        o->healStuckSince = rt_clock;
+    } else if (rt_clock - o->healStuckSince >= RT_NO_PATH_GIVEUP_SECONDS) {
+        rt_squad_heal_end(o, "no-route");
+        rt_squad_say(npc, "Can't reach you.");
+        return false;
+    }
+    return true;
+}
+
+// --- WEAPON: HIS PICK ---
+
+// The WEAPON wheel's rule for what a companion can hold: a weapon its body has the art for -- the take-out art inven_wield
+// itself refuses on (and leaves its registration open: gpui_weapon_equip pre-checks it the same way), the attack art
+// vanilla's _ai_can_use_weapon asks for, and the STAND pose rt_sync_weapon_fid needs -- and nothing two-handed under a
+// crippled arm, nor anything with both arms crippled (_ai_can_use_weapon).
+static bool rt_squad_weapon_holdable(Object* c, Object* item)
+{
+    if (c == NULL || item == NULL || !rt_is_critter(c) || item_get_type(item) != ITEM_TYPE_WEAPON) {
+        return false;
+    }
+    int results = c->data.critter.combat.results;
+    if ((results & DAM_CRIP_ARM_LEFT) != 0 && (results & DAM_CRIP_ARM_RIGHT) != 0) {
+        return false;
+    }
+#if FALLOUT_RT_GAME == 2
+    if ((results & (DAM_CRIP_ARM_LEFT | DAM_CRIP_ARM_RIGHT)) != 0 && weaponIsTwoHanded(item)) {
+        return false;
+    }
+#endif
+    int code = item_w_anim_code(item);
+    if (!art_exists(art_id(OBJ_TYPE_CRITTER, c->fid & 0xFFF, item_w_anim_weap(item, HIT_MODE_RIGHT_WEAPON_PRIMARY), code,
+            c->rotation + 1))) {
+        return false;
+    }
+    return code == 0 || art_exists(art_id(OBJ_TYPE_CRITTER, c->fid & 0xFFF, ANIM_STAND, code, c->rotation + 1));
+}
+
+// Can it fire it: rounds in it, or rounds for it in its pack? A weapon with no magazine (melee, thrown) always can.
+static bool rt_squad_weapon_loaded(Object* c, Object* item)
+{
+    return item_w_max_ammo(item) <= 0 || item_w_curr_ammo(item) > 0 || rt_npc_has_ammo_for(c, item);
+}
+
+#define RT_SQUAD_PIN_OK 0
+#define RT_SQUAD_PIN_DRY 1 // carried, none of it can fire
+#define RT_SQUAD_PIN_GONE 2 // not carried
+#define RT_SQUAD_PIN_ART 3 // carried, it cannot hold it now (a crippled arm)
+
+// An item of the pinned pid it can use right now -- the one in its hand first, then a loaded one, then one it can
+// load -- or NULL, and `why` says why not (RT_SQUAD_PIN_*). Another copy of the same weapon counts: the next spear.
+static Object* rt_squad_pin_find(Object* npc, int pid, int* why)
+{
+    int dummy;
+    if (why == NULL) {
+        why = &dummy;
+    }
+    *why = RT_SQUAD_PIN_GONE;
+    Object* hand = inven_right_hand(npc);
+    Object* best = NULL;
+    int bestRank = 0;
+    Inventory* inventory = &(npc->data.inventory);
+    for (int i = 0; i < inventory->length; i++) {
+        Object* item = inventory->items[i].item;
+        if (item == NULL || item->pid != pid || item_get_type(item) != ITEM_TYPE_WEAPON) {
+            continue;
+        }
+        if (!rt_squad_weapon_holdable(npc, item)) {
+            if (*why == RT_SQUAD_PIN_GONE) {
+                *why = RT_SQUAD_PIN_ART;
+            }
+            continue;
+        }
+        if (!rt_squad_weapon_loaded(npc, item)) {
+            *why = RT_SQUAD_PIN_DRY;
+            continue;
+        }
+        int rank = item == hand ? 3 : (item_w_max_ammo(item) <= 0 || item_w_curr_ammo(item) > 0 ? 2 : 1);
+        if (rank > bestRank) {
+            best = item;
+            bestRank = rank;
+        }
+    }
+    if (best != NULL) {
+        *why = RT_SQUAD_PIN_OK;
+    }
+    return best;
+}
+
+static Object* rt_squad_pin_item(Object* npc)
+{
+    if (npc == NULL || rt_squad_pref_count == 0) {
+        return NULL;
+    }
+    RtSquadPref* p = rt_squad_pref_find(npc->id);
+    if (p == NULL || p->weaponPid < 0 || p->weaponHopeless || !isPartyMember(npc)) {
+        return NULL;
+    }
+    return rt_squad_pin_find(npc, p->weaponPid, NULL);
+}
+
+// The weapon in its right hand -- vanilla's NPC hand -- the way the AI's own draw does it (rt_ensure_weapon_drawn): in
+// a transaction of our own, because inven_wield's take-out is a registered animation that silently does nothing with
+// no transaction open; its own register_begin then fails, so it lands in ours and ends it (our register_end returns
+// -1, harmlessly). Free, like the AI's draw; the take-out is its price. False = not now (busy, down, no art).
+static bool rt_squad_wield(RtActor* a, Object* npc, Object* item, const char* why)
+{
+    if (anim_busy(npc) != 0 || critter_is_prone(npc) || !rt_squad_weapon_holdable(npc, item)) {
+        return false;
+    }
+    if (!rt_register_begin(ANIMATION_REQUEST_RESERVED, "squad-wield")) {
+        return false;
+    }
+    Object* was = inven_right_hand(npc);
+    int wasPid = was != NULL ? was->pid : -1;
+    inven_wield(npc, item, 1);
+    register_end();
+    // Not latched: the pose is settled once the take-out has played (the weapon step, rt_ensure_weapon_drawn) -- and a
+    // latch left on the old hand would read as "hand-changed" next frame.
+    a->weapon_checked = false;
+    a->checked_hand = NULL;
+    a->plan_valid = false;
+    trace_event(TRACE_FLOW, "squad-weapon", "take id=%d pid=%d wpn=%d was=%d why=%s state=%d fight=%d t=%.2f", npc->id,
+        npc->pid, item->pid, wasPid, why, a->state, rt_engaged ? 1 : 0, rt_clock);
+    return true;
+}
+
+// WEAPON, every beat: the weapon he gave it goes in its hand at its next free beat, in a fight or out of one -- out of
+// one it lands when the walk it is on ends, as a walk is never cut for it -- and then it is latched, so the AI keeps to
+// it (rt_ensure_weapon_drawn draws the pin too). With none of it it can fire, or none carried, the AI chooses again and
+// it says so once ("Out of ammo."); a weapon its body cannot hold just now (a crippled arm) or one hopeless in this
+// fight lapses quietly. Rounds again, or the fight over, and it takes it back. True = this beat was the take-out.
+static bool rt_squad_weapon_step(RtActor* a, Object* npc)
+{
+    if (rt_squad_pref_count == 0) {
+        return false;
+    }
+    RtSquadPref* p = rt_squad_pref_find(npc->id);
+    if (p == NULL || p->weaponPid < 0 || !a->friendly || !isPartyMember(npc)) {
+        return false;
+    }
+    int why = RT_SQUAD_PIN_OK;
+    Object* pin = p->weaponHopeless ? NULL : rt_squad_pin_find(npc, p->weaponPid, &why);
+    if (pin == NULL) {
+        if (!p->weaponLapsed) {
+            static const char* const whys[] = { "ok", "dry", "gone", "art" };
+            p->weaponLapsed = true;
+            trace_event(TRACE_FLOW, "squad-weapon", "lapse id=%d pid=%d wpn=%d why=%s hand=%d t=%.2f", npc->id, npc->pid,
+                p->weaponPid, p->weaponHopeless ? "hopeless" : whys[why],
+                inven_right_hand(npc) != NULL ? inven_right_hand(npc)->pid : -1, rt_clock);
+            if (!p->weaponHopeless && (why == RT_SQUAD_PIN_DRY || why == RT_SQUAD_PIN_GONE)) {
+                rt_squad_say(npc, "Out of ammo.");
+            }
+            a->weapon_checked = false; // the AI's own choice at its next draw
+            a->plan_valid = false;
+        }
+        return false;
+    }
+    if (p->weaponLapsed) {
+        p->weaponLapsed = false;
+        trace_event(TRACE_FLOW, "squad-weapon", "resume id=%d pid=%d wpn=%d t=%.2f", npc->id, npc->pid, p->weaponPid,
+            rt_clock);
+    }
+    if (inven_right_hand(npc) == pin) {
+        if (!a->weapon_checked || a->checked_hand != pin) {
+            a->weapon_checked = rt_sync_weapon_fid(npc);
+            a->checked_hand = pin;
+            if (a->weapon_checked) {
+                trace_event(TRACE_FLOW, "squad-weapon", "keep id=%d pid=%d wpn=%d state=%d t=%.2f", npc->id, npc->pid,
+                    pin->pid, a->state, rt_clock);
+            }
+        }
+        return false;
+    }
+    if (combat_rt_in_heavy_reaction(npc)) {
+        return false;
+    }
+    return rt_squad_wield(a, npc, pin, "pin");
+}
+
+static bool rt_squad_pin_hopeless(RtActor* a, Object* npc)
+{
+    if (rt_squad_pref_count == 0 || !a->friendly || !isPartyMember(npc)) {
+        return false;
+    }
+    RtSquadPref* p = rt_squad_pref_find(npc->id);
+    Object* hand = inven_right_hand(npc);
+    if (p == NULL || p->weaponPid < 0 || p->weaponHopeless || hand == NULL || hand->pid != p->weaponPid) {
+        return false;
+    }
+    p->weaponHopeless = true;
+    a->weapon_checked = false;
+    a->plan_valid = false;
+    if (a->state == RT_ATTACK) {
+        a->state = RT_CHASE; // CHASE draws the AI's choice before anything else (rt_ensure_weapon_drawn)
+    }
+    trace_event(TRACE_FLOW, "squad-weapon", "hopeless id=%d pid=%d wpn=%d tgt=%d t=%.2f", npc->id, npc->pid, hand->pid,
+        a->target != NULL ? a->target->id : -1, rt_clock);
+    return true;
+}
+
+// The fight is over: a pick that was hopeless in it is his pick again.
+static void rt_squad_fight_over()
+{
+    for (int i = 0; i < rt_squad_pref_count; i++) {
+        rt_squad_prefs[i].weaponHopeless = false;
+    }
+}
+
+// --- HOLD FIRE ---
+
+// A fight it is in is dropped -- CHASE / ATTACK to IDLE, its target, its plan and its tactics gone, the fight's walk cut
+// (never a flight's) -- before anything else in rt_update_actor can keep it on: the hand-off to the next danger, its
+// focus, the stop rule. An NPC-vs-NPC attack() its own script orders (combat_rt_notify_attack) lands here too.
+static void rt_squad_fire_drop(RtActor* a, Object* npc)
+{
+    trace_event(TRACE_FLOW, "squad-fire", "drop id=%d pid=%d tgt=%d tgtPid=%d state=%d t=%.2f", npc->id, npc->pid,
+        a->target != NULL ? a->target->id : 0, a->target != NULL ? a->target->pid : -1, a->state, rt_clock);
+    a->state = RT_IDLE;
+    a->target = NULL;
+    a->wants_attack = false;
+    a->weapon_checked = false;
+    a->plan_valid = false;
+    a->no_path_since = -1.0f;
+    a->unperceived_since = -1.0f;
+    a->party_wait_since = -1.0f;
+    a->party_wait_tgt = NULL;
+    rt_party_drop_tactics(a, npc);
+    if (!a->fleeing) {
+        int anim = FID_ANIM_TYPE(npc->fid);
+        if (anim == ANIM_WALK || anim == ANIM_RUNNING) {
+            int cut = anim_end_moves(npc);
+            if (cut > 0) {
+                trace_event(TRACE_FLOW, "squad-walk-cut", "id=%d pid=%d sequences=%d why=hold-fire t=%.2f", npc->id,
+                    npc->pid, cut, rt_clock);
+            }
+        }
+    }
+}
+
+// The enemy an idle companion holding its fire would have taken -- the nearest one fighting his side that it sees --
+// traced once a target (the proof that hold fire refused it), looked at once every RT_SQUAD_FIRE_LOOK_SECONDS.
+static void rt_squad_fire_refuse_trace(RtActor* a, Object* npc)
+{
+    RtSquadOrder* o = rt_squad_order_get(npc);
+    if (o == NULL || rt_clock < o->fireCheckAt) {
+        return;
+    }
+    o->fireCheckAt = rt_clock + RT_SQUAD_FIRE_LOOK_SECONDS;
+    Object* would = rt_nearest_hostile(npc);
+    if (would == NULL || !is_within_perception(npc, would) || would == o->fireRefused) {
+        return;
+    }
+    o->fireRefused = would;
+    trace_event(TRACE_FLOW, "squad-fire", "refuse id=%d pid=%d tgt=%d tgtPid=%d dist=%d state=%d t=%.2f", npc->id,
+        npc->pid, would->id, would->pid, obj_dist(npc, would), a->state, rt_clock);
+}
+
+// scripts.cc, around a companion's heartbeat (critter_p_proc): a HEAL ME on its way must not be undone by its party
+// script's follow, which walks it back to the dude (animate_move_obj_to_tile) and clears its walk (reg_anim_func CLEAR)
+// whenever it is more than 3FD/2 tiles off. Every companion's follow asks vanilla's own switch first --
+// GVAR_PARTY_NO_FOLLOW, which scenes set -- so the heartbeat runs with that set (the rest of its critter_p_proc -- its
+// karma checks, leaving the party -- runs as ever). A fighter gets no heartbeat at all (combat_rt_critter_fighting).
+// (GO's post was held off its follow the same way until he took GO out, 2026-11-13.)
+bool combat_rt_party_follow_held(Object* critter)
+{
+    if (!rt_enabled || critter == NULL || rt_squad_order_count == 0) {
+        return false;
+    }
+    RtSquadOrder* o = rt_squad_order_find(critter);
+    if (o == NULL || !o->healing || !isPartyMember(critter)) {
+        return false;
+    }
+    if (!o->followHeldLogged) {
+        o->followHeldLogged = true;
+        trace_event(TRACE_FLOW, "squad-follow-held", "id=%d pid=%d heal=%d fight=%d t=%.2f", critter->id, critter->pid,
+            o->healing ? 1 : 0, rt_engaged ? 1 : 0, rt_clock);
+    }
+    return true;
+}
+
 // --- THE INTENT, READ OFF THE STATE (2026-10-18, step one of the intent layer) --------------------
 //
 // A tactical step just taken (make room, back off, reload in cover, a clean line, a grenade jump, a
@@ -14414,7 +16047,11 @@ static void rt_intent_update(RtActor* a)
     } else if (a->state == RT_CHASE) {
         // Holding means standing: a body that walks is approaching, whatever flag another branch
         // left set (self-played/his trace: "held (wait-for-squad) 9.1 s" while it closed from 28 to 9).
-        if (a->squad_hold_start >= 0.0f && !busy) {
+        if (a->party_wait_since >= 0.0f && !busy) {
+            // A companion its Distance keeps off its target (SQUAD ORDERS, rt_party_chase_holds).
+            intent = RT_INTENT_HOLD;
+            why = a->party_dist == RT_DIST_STAY ? "hold-order" : "follow-order";
+        } else if (a->squad_hold_start >= 0.0f && !busy) {
             intent = RT_INTENT_HOLD;
             why = "wait-for-squad";
         } else if (a->ow_tile >= 0 && a->ow_in_at >= 0.0f && !busy) {
@@ -14802,6 +16439,16 @@ static void rt_update_actor(RtActor* a, float dt)
         return;
     }
 
+    // A companion's COMBAT CONTROL Distance, which the fight below keeps to (SQUAD ORDERS).
+    rt_party_refresh_dist(a, npc);
+
+    // HOLD FIRE (SQUAD COMMAND): a companion told to hold its fire is in no fight -- dropped here, before the hand-off,
+    // the leash or the stop rule below could keep it in one (rt_squad_fire_drop). It still flees and heals (below).
+    bool holdsFire = a->friendly && rt_squad_holds_fire(npc);
+    if (holdsFire && a->state != RT_IDLE) {
+        rt_squad_fire_drop(a, npc);
+    }
+
     // Leash / de-aggro: a chasing critter gives up and returns to IDLE once its target is dead,
     // has slipped past the (very wide) outer bound, or -- the rule that actually does the work --
     // it can no longer PERCEIVE anything to fight. Without this it chases forever, combat never
@@ -14820,7 +16467,20 @@ static void rt_update_actor(RtActor* a, float dt)
         // The next one on vanilla's list first (rt_next_danger_source): a target that died hands
         // the fight on rather than ending it.
         if (targetGone) {
-            Object* next = rt_next_danger_source(npc);
+            // ...the squad's focus before anyone (SQUAD ORDERS) -- and a companion takes only one its Distance lets
+            // it fight (rt_party_target_allowed): a held one hands the fight on to nobody it cannot hit from its tile.
+            Object* next = NULL;
+            if (rt_focus_wanted(a, npc)) {
+                next = rt_focus_of(a);
+                trace_event(TRACE_FLOW, "squad-focus", "take id=%d pid=%d tgt=%d tgtPid=%d was=%d dist=%d why=next t=%.2f",
+                    npc->id, npc->pid, next->id, next->pid, a->target != NULL ? a->target->id : -1, obj_dist(npc, next),
+                    rt_clock);
+            } else {
+                next = rt_next_danger_source(npc);
+                if (next != NULL && a->friendly && !rt_party_target_allowed(a, npc, next)) {
+                    next = NULL;
+                }
+            }
             if (next != NULL) {
                 trace_event(TRACE_FLOW, "retarget", "id=%d pid=%d was=%d now=%d nowPid=%d dist=%d t=%.2f",
                     npc->id, npc->pid, a->target != NULL ? a->target->id : -1, next->id, next->pid,
@@ -14933,7 +16593,12 @@ static void rt_update_actor(RtActor* a, float dt)
             bool spent = a->target_unseen && !holding
                 && (a->last_seen_tile < 0 || npc->tile == a->last_seen_tile);
 
-            if (!holding && (spent || rt_wants_to_stop(npc, a->target, walls))) {
+            // SQUAD ORDERS: a companion sent at the squad's focus does not lose it by losing sight of it -- the order
+            // said where it is (rt_focus_wanted asks for a way to it, not for sight). Its death, its leaving the floor
+            // or no way to it (the unreachable give-up below) end that chase.
+            bool onOrder = a->friendly && rt_focus_is_for(a, a->target);
+
+            if (!holding && !onOrder && (spent || rt_wants_to_stop(npc, a->target, walls))) {
                 if (a->unperceived_since < 0.0f) {
                     a->unperceived_since = rt_clock;
                 }
@@ -15020,7 +16685,8 @@ static void rt_update_actor(RtActor* a, float dt)
     // scraping the reserve. That is the whole point of the switch away from the standing bonus
     // -- see rt_proximity_regen_mult. An idle critter has no target, gets the neutral 1.0.
     int npcAnimType = FID_ANIM_TYPE(npc->fid);
-    bool npcInFight = a->state != RT_IDLE;
+    // (A companion holding its fire flees while IDLE -- SQUAD COMMAND -- and its legs are billed as any flight's.)
+    bool npcInFight = a->state != RT_IDLE || a->fleeing;
     int npcEnemyDist = (npcInFight && rt_is_combatant(a->target)) ? obj_dist(npc, a->target) : -1;
     bool npcMoving = npcAnimType == ANIM_WALK || npcAnimType == ANIM_RUNNING;
 
@@ -15336,9 +17002,13 @@ static void rt_update_actor(RtActor* a, float dt)
         return;
     }
 
+    // HOLD FIRE (SQUAD COMMAND): "still flees, heals" -- but one holding its fire is always IDLE (rt_squad_fire_drop),
+    // and flight and the medic are a fighter's beats. While a fight is on, it gets both as a fighter would.
+    bool fightBeats = a->state != RT_IDLE || (holdsFire && rt_engaged);
+
     // FLEEING (rt_flee_step): FLEEING, hurt_too_much or below min_hp runs, and does nothing else.
     // Out of the fight it is not fleeing -- and not billed like the dude -- any more.
-    if (a->state != RT_IDLE) {
+    if (fightBeats) {
         if (rt_flee_step(a, npc)) {
             return;
         }
@@ -15347,12 +17017,21 @@ static void rt_update_actor(RtActor* a, float dt)
         a->flee_blocked = false;
     }
 
+    // SQUAD COMMAND: HEAL ME before anything else it would do -- he asked, and the walk to him is no fight
+    // (rt_squad_heal_step) -- then the weapon he gave it, taken out at its next free beat (rt_squad_weapon_step).
+    if (rt_squad_heal_step(a, npc)) {
+        return;
+    }
+    if (rt_squad_weapon_step(a, npc)) {
+        return;
+    }
+
     // HEAL BEFORE FIGHTING, which is where vanilla puts it too: ai_check_drugs runs inside combat_ai,
     // before the target/attack decision. Sits OUTSIDE the state switch on purpose -- a critter
     // bleeding out mid-CHASE should stop and patch itself, not have to reach weapon range first.
     // Returning here consumes the beat, exactly like the reload branch inside RT_ATTACK: the
     // animation it just registered will hold anim_busy next frame anyway.
-    if (a->state != RT_IDLE && rt_try_medic(a, npc)) {
+    if (fightBeats && rt_try_medic(a, npc)) {
         rt_intent_hint(a, RT_INTENT_HEAL, "medic", 3.0f);
         return;
     }
@@ -15366,6 +17045,12 @@ static void rt_update_actor(RtActor* a, float dt)
         if (anim_busy(npc) != 0) {
             return;
         }
+    }
+
+    // FOLLOW (Stay close): out past the leash and its slack it walks back toward the dude, whatever it was fighting
+    // (rt_party_leash) -- vanilla walks it back before it attacks.
+    if (rt_party_leash(a, npc)) {
+        return;
     }
 
     switch (a->state) {
@@ -15408,6 +17093,11 @@ static void rt_update_actor(RtActor* a, float dt)
         // re-acquiring the target it just proved it cannot path to (see RT_UNREACHABLE_RETRY_-
         // SECONDS -- one such critter held the whole session in combat). It releases as soon as
         // the actor is standing somewhere else, so anything that can actually move retries at once.
+        //
+        // SQUAD ORDERS: a companion on FOLLOW (Stay close) is latched off the target it could not reach, never off the
+        // dude -- it still follows him below (`latched` keeps only the engage out). Frozen on that tile for 30 s it
+        // would let him walk away, the one thing FOLLOW must not do.
+        bool latched = false;
         if (a->unreachable_until > rt_clock && npc->tile == a->unreachable_tile) {
             // ...UNLESS IT CAN SHOOT FROM WHERE IT STANDS. The latch exists to stop a rooted critter
             // re-running a doomed CHASE every frame; it was never meant to stop one that has you in
@@ -15417,6 +17107,12 @@ static void rt_update_actor(RtActor* a, float dt)
             int nearMode = a->hostile ? rt_hit_mode(npc) : 0;
             Object* near = a->hostile ? rt_nearest_seen_player_side(npc, item_w_range(npc, nearMode)) : NULL;
             bool canShootNow = near != NULL && !rt_shot_blocked(npc, near, nearMode);
+            // ...a companion the same (review 2026-11-11): latched off a target it could not reach, one with a foe it
+            // sees and can hit from its tile (its gun counted while still holstered) neither fought nor followed.
+            if (!canShootNow && a->friendly) {
+                Object* foe = rt_nearest_hostile(npc);
+                canShootNow = foe != NULL && is_within_perception(npc, foe) && rt_party_can_hit_from_here(npc, foe, -1);
+            }
             // A defender that stood down from a standoff (rt_defend_holds) also wakes when you come
             // close or hurt it -- the two things that would have ended its hold.
             if (!canShootNow && rt_tactical_ai && rt_is_defensive(a, npc)
@@ -15424,10 +17120,13 @@ static void rt_update_actor(RtActor* a, float dt)
                     || (a->hostile && rt_nearest_seen_player_side(npc, RT_DEFEND_RADIUS) != NULL))) {
                 canShootNow = true;
             }
-            if (!canShootNow) {
+            if (canShootNow) {
+                a->unreachable_until = 0.0f; // it is back in the fight; the latch has done its job
+            } else if (a->friendly && a->party_dist == RT_DIST_STAY_CLOSE) {
+                latched = true;
+            } else {
                 break;
             }
-            a->unreachable_until = 0.0f; // it is back in the fight; the latch has done its job
         }
 
         // A GUARD WITNESSING AN ATTACK ON ITS OWN -- the door a neutral critter never had, and
@@ -15589,12 +17288,27 @@ static void rt_update_actor(RtActor* a, float dt)
             // does: no re-engaging and no following until the fight ends and the bookends in
             // combat_rt_update clear the flag. Following would walk it straight back into the
             // fight it just fled, round and round.
+            //
+            // SQUAD ORDERS: the squad's focus first, and under HOLD or FOLLOW only an enemy its Distance lets it fight
+            // (rt_party_pick); otherwise the nearest enemy it sees, as always. `latched`: FOLLOW off a target it could
+            // not reach -- no engage, only the follow below.
             bool ranAway = (npc->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0;
-            Object* enemy = ranAway ? NULL : rt_nearest_hostile(npc);
-            if (enemy != NULL && is_within_perception(npc, enemy)) {
+            // HOLD FIRE (SQUAD COMMAND): it takes nobody -- and the follow and the turn toward what comes below still
+            // run. (Without this the pick set CHASE, the drop at the top took it back next frame, and the fight
+            // started and ended every other frame, the map scripts with it.)
+            if (holdsFire && !ranAway && rt_engaged) {
+                rt_squad_fire_refuse_trace(a, npc);
+            }
+            Object* enemy = (ranAway || latched || holdsFire) ? NULL : rt_party_pick(a, npc);
+            if (enemy != NULL) {
+                if (enemy == rt_focus_of(a)) {
+                    trace_event(TRACE_FLOW, "squad-focus", "take id=%d pid=%d tgt=%d tgtPid=%d was=0 dist=%d why=idle t=%.2f",
+                        npc->id, npc->pid, enemy->id, enemy->pid, obj_dist(npc, enemy), rt_clock);
+                }
                 a->target = enemy;
                 a->state = RT_CHASE;
                 a->unperceived_since = -1.0f;
+                a->party_wait_since = -1.0f;
             } else if (!ranAway && !isPartyMember(npc) && rt_is_combatant(a->engine_target)) {
                 // A team-mate that is no party member still hits back at whoever is after IT (review 2026-10-29):
                 // an NPC fighting Smiley, a rival gang on Tyler's men, is no enemy of the dude and never shows in
@@ -15604,7 +17318,11 @@ static void rt_update_actor(RtActor* a, float dt)
                 a->state = RT_CHASE;
                 a->unperceived_since = -1.0f;
             } else if (!ranAway && rt_engaged && rt_is_combatant(obj_dude) && isPartyMember(npc)
-                && obj_dist(npc, obj_dude) > RT_FOLLOW_TILES) {
+                && rt_party_follow_tiles(a->party_dist) < 0) {
+                // HOLD (Stay) never follows -- vanilla's 50000 tiles. It turns toward what comes instead.
+                rt_party_hold_look(a, npc);
+            } else if (!ranAway && rt_engaged && rt_is_combatant(obj_dude) && isPartyMember(npc)
+                && obj_dist(npc, obj_dude) > rt_party_follow_tiles(a->party_dist)) {
                 // ⚠️ A FOLLOWER IN A FIGHT MUST NEVER JUST STAND THERE -- and before this it did:
                 // "dogmeat jen čumí a nepříjde na pomoc, když je daleko". TWO THINGS LOCKED TOGETHER.
                 // The branch above only engages what the follower PERCEIVES, and is_within_perception
@@ -15625,40 +17343,11 @@ static void rt_update_actor(RtActor* a, float dt)
                 //
                 // Out of combat this branch is dead (rt_engaged), so the vanilla follow script keeps
                 // its job and the two can never both be steering the same critter.
-                int dist = obj_dist(npc, obj_dude);
-
-                // anim.cc bills the mover's ENGINE combat.ap per tile while the combat bit is set and
-                // truncates the walk at 0. That field is not combat_rt's pool (movement never spends
-                // the pool), so it is topped up here for the same reason the chase mover tops it up.
-                npc->data.critter.combat.ap = stat_level(npc, STAT_MAXIMUM_ACTION_POINTS);
-
-                // Same two-way move the chase uses: a straight step is cheap and smooth, but it
-                // cannot route around a building, so hand a blocked step to the pathfinder instead.
-                // The result is deliberately NOT fed to rt_note_path_result -- that arms the
-                // unreachable latch, which exists to stop an actor re-acquiring a TARGET it cannot
-                // path to, and a follower must keep trying to reach its leader.
-                int stepRot = tile_dir(npc->tile, obj_dude->tile);
-                int stepDest = tile_num_in_direction(npc->tile, stepRot, 1);
-                Object* blocker = stepDest != obj_dude->tile
-                    ? obj_blocking_at(npc, stepDest, npc->elevation)
-                    : NULL;
-
-                if (a->diag_dist != dist) {
-                    a->diag_dist = dist;
-                    trace_event(TRACE_FLOW, "follow-step",
-                        "id=%d pid=%d dist=%d blk=%d t=%.2f",
-                        npc->id, npc->pid, dist, blocker != NULL ? blocker->pid : -1, rt_clock);
-                }
-
-                if (blocker != NULL) {
-                    // Ask the pathfinder at most once a second while it keeps saying no -- see
-                    // RtActor::follow_retry_at. A success clears nothing because nothing waits.
-                    if (rt_clock >= a->follow_retry_at && !rt_advance_to_target(npc, obj_dude)) {
-                        a->follow_retry_at = rt_clock + 1.0f;
-                    }
-                } else {
-                    rt_step_toward(npc, obj_dude);
-                }
+                //
+                // SQUAD ORDERS: how far behind it may fall is vanilla's, by its Distance (rt_party_follow_tiles):
+                // Stay close 5, Charge / Snipe / On your own 7; RT_FOLLOW_TILES without one. The move itself is
+                // rt_party_step_to_dude, which FOLLOW's way back shares.
+                rt_party_step_to_dude(a, npc, rt_party_follow_tiles(a->party_dist), "party", &a->diag_dist);
             }
         } else if (rt_is_combatant(a->engine_target)) {
             // Scripted NPC-vs-NPC fight (e.g. Gizmo's assassin sent at Killian): engage the
@@ -15684,10 +17373,16 @@ static void rt_update_actor(RtActor* a, float dt)
         // finishes, so the NPC visibly draws, then advances.
         rt_ensure_weapon_drawn(a);
 
-        // A much nearer foe than the one it is after (rt_retarget_nearer), looked for once a second.
+        // SQUAD ORDERS: the squad's focus before whoever it was after (rt_focus_take).
+        rt_focus_take(a, npc, "chase");
+
+        // A much nearer foe than the one it is after (rt_retarget_nearer), looked for once a second -- never off the
+        // focus: the order outranks a nearer foe.
         if (rt_tactical_ai && rt_clock >= a->retarget_check_at) {
             a->retarget_check_at = rt_clock + 1.0f;
-            rt_retarget_nearer(a, npc);
+            if (!rt_focus_is_for(a, a->target)) {
+                rt_retarget_nearer(a, npc);
+            }
         }
 
         // An empty gun is reloaded on the way, out of its target's sight (rt_reload_on_the_way).
@@ -15719,7 +17414,18 @@ static void rt_update_actor(RtActor* a, float dt)
             if (!rt_can_walk(npc)) {
                 engage = range;
             }
+            // SQUAD ORDERS -- CHARGE: vanilla's _cai_perform_distance_prefs walks a charging companion up to its target
+            // with every point (_ai_move_closer, guns too) before it attacks, so it fights from the tile beside it. One
+            // that cannot walk fires from where it is, as above.
+            // (Not while its way in is shut: rt_party_charge_stuck.)
+            bool charging = a->party_dist == RT_DIST_CHARGE && rt_can_walk(npc) && rt_clock >= a->party_charge_stuck_until;
+            if (charging) {
+                engage = 1;
+            }
             bool inRange = obj_dist(npc, a->target) <= engage;
+            // ...and HOLD, FOLLOW and CHARGE leave out the tactics that hold back or go round: a held companion takes
+            // no step, a following one goes nowhere past its leash, a charging one goes straight in.
+            bool squadRule = charging || a->party_dist == RT_DIST_STAY || a->party_dist == RT_DIST_STAY_CLOSE;
 
             // TEMP DIAG -- "the guard never shot at me" / hostiles sitting in CHASE forever.
             // The state trace shows an actor stuck in CHASE but not WHY it fails to qualify for
@@ -15772,7 +17478,11 @@ static void rt_update_actor(RtActor* a, float dt)
                 a->prebreath_since = -1.0f;
                 a->firepos_tile = -1;
                 a->choke_since = -1.0f;
-            } else if (rt_tactical_ai && rt_exposed_step(a, npc, mode, range)) {
+                a->party_wait_since = -1.0f; // a companion that can strike is not waiting on its Distance
+            } else if (rt_party_chase_holds(a, npc, closeForHit)) {
+                // HOLD stands; FOLLOW does not go after a target out past its leash (and walks back if it is out
+                // there itself); either lets the target go after a while (rt_party_chase_holds).
+            } else if (!squadRule && rt_tactical_ai && rt_exposed_step(a, npc, mode, range)) {
                 // In its target's sights without a shot of its own: a step to a line, or out of sight
                 // (rt_exposed_step). Moving is not failing to route.
                 rt_intent_hint(a, RT_INTENT_REPOSITION, "exposed", 1.5f);
@@ -15792,36 +17502,37 @@ static void rt_update_actor(RtActor* a, float dt)
                 // An in-flight walk segment is left alone rather than force-cleared: it finishes
                 // its current tile and then nothing new is issued, so the stop reads as slowing to
                 // a halt instead of snapping mid-stride.
-            } else if (rt_tactical_ai && rt_prebreathe_holds(a, npc, mode)) {
+            } else if (!squadRule && rt_tactical_ai && rt_prebreathe_holds(a, npc, mode)) {
                 // Topping up out of sight before going round (rt_prebreathe_holds).
                 a->no_path_since = -1.0f;
                 a->hold_beat_at = rt_clock;
-            } else if (inRange && !closeForHit && rt_tactical_ai && rt_peek_holds(a, npc, mode, range)) {
+            } else if (!squadRule && inRange && !closeForHit && rt_tactical_ai && rt_peek_holds(a, npc, mode, range)) {
                 // Lean out of cover for one shot, or wait in it for the next (rt_peek_holds).
                 a->no_path_since = -1.0f;
                 a->hold_beat_at = rt_clock;
-            } else if (inRange && !closeForHit && rt_tactical_ai && a->target_seen && rt_firing_position(a, npc, mode, range)) {
+            } else if (!squadRule && inRange && !closeForHit && rt_tactical_ai && a->target_seen
+                && rt_firing_position(a, npc, mode, range)) {
                 // To a tile it can shoot from at range, instead of up to him round the corner. Only for a target
                 // it saw at the last check: the spot is picked against his CURRENT tile (review 2026-10-29).
                 a->no_path_since = -1.0f;
                 a->hold_beat_at = rt_clock;
                 rt_intent_hint(a, RT_INTENT_REPOSITION, "firing-position", 1.5f);
-            } else if (inRange && !closeForHit && rt_tactical_ai && rt_choke_waits(a, npc, mode)) {
+            } else if (!squadRule && inRange && !closeForHit && rt_tactical_ai && rt_choke_waits(a, npc, mode)) {
                 // A teammate is already at him, right in front: wait behind it (rt_choke_waits).
                 a->no_path_since = -1.0f;
                 a->hold_beat_at = rt_clock;
-            } else if (inRange && !closeForHit && rt_tactical_ai && rt_overwatch_holds(a, npc, range)) {
+            } else if (!squadRule && inRange && !closeForHit && rt_tactical_ai && rt_overwatch_holds(a, npc, range)) {
                 // On its way to its post, or at it covering the door (rt_overwatch_holds). Holding is
                 // not failing to route.
                 a->no_path_since = -1.0f;
                 a->hold_beat_at = rt_clock;
-            } else if (inRange && !closeForHit && rt_tactical_ai && rt_corner_holds(a, npc)) {
+            } else if (!squadRule && inRange && !closeForHit && rt_tactical_ai && rt_corner_holds(a, npc)) {
                 // Gathering at the corner before going round it (rt_corner_holds). Holding is not
                 // failing to route.
                 a->no_path_since = -1.0f;
                 a->hold_beat_at = rt_clock;
                 rt_intent_hint(a, RT_INTENT_HOLD, "gather-corner", 0.5f);
-            } else if (!inRange && range <= 2 && rt_tactical_ai
+            } else if (!squadRule && !inRange && range <= 2 && rt_tactical_ai
                 && combat_is_shot_blocked(a->target, a->target->tile, npc->tile, npc, NULL)
                 && rt_overwatch_holds(a, npc, range)) {
                 // A melee fighter coming unseen waits beside the door instead (rt_overwatch_holds).
@@ -15874,7 +17585,7 @@ static void rt_update_actor(RtActor* a, float dt)
                 } else {
                     a->no_path_since = -1.0f;
                 }
-            } else if (rt_tactical_ai && (rt_defend_holds(a, npc) || rt_squad_holds(a, npc))) {
+            } else if (!squadRule && rt_tactical_ai && (rt_defend_holds(a, npc) || rt_squad_holds(a, npc))) {
                 // Holding: a defender out of reach keeps its ground, a chaser ahead waits for its squad
                 // (group tactics above). Holding is not failing to route.
                 a->no_path_since = -1.0f;
@@ -15882,7 +17593,7 @@ static void rt_update_actor(RtActor* a, float dt)
             } else if (rt_clock < a->room_yield_until) {
                 // It just stepped back to let a fresher ally in (rt_room_make). Walking now would
                 // take it straight back onto the spot it gave up, before the ally gets there.
-            } else if (rt_flank_step(a, npc, range)) {
+            } else if (!squadRule && rt_flank_step(a, npc, range)) {
                 rt_intent_hint(a, RT_INTENT_REPOSITION, "flank", 2.0f);
                 a->no_path_since = -1.0f;
             } else {
@@ -15890,6 +17601,11 @@ static void rt_update_actor(RtActor* a, float dt)
                 if (rt_lost_sight_leg(a, npc)) {
                     a->no_path_since = -1.0f;
                     break;
+                }
+
+                // CHARGE: one line as it goes in (the trace a test reads; the leg below is the plain chase's).
+                if (charging) {
+                    rt_party_note_charge(a, npc, range);
                 }
 
                 // While the in-combat bit is set, anim.cc deducts the mover's engine
@@ -15972,11 +17688,17 @@ static void rt_update_actor(RtActor* a, float dt)
                     // round (rt_room_wait). Holding is not failing to route.
                     if (blocker != NULL && FID_TYPE(blocker->fid) == OBJ_TYPE_CRITTER && rt_room_wait(a, npc, blocker, engage)) {
                         a->no_path_since = -1.0f;
+                        if (charging) {
+                            rt_party_charge_stuck(a, npc, "crowd"); // a charging one shoots from here meanwhile
+                        }
                         break;
                     }
                     // A body plugs the only way (see below): hold until the retry.
                     if (a->route_plugged && rt_clock < a->follow_retry_at) {
                         a->no_path_since = -1.0f;
+                        if (charging) {
+                            rt_party_charge_stuck(a, npc, "plugged");
+                        }
                         break;
                     }
                     rt_note_chase_move(a, npc, 3, blocker != NULL ? blocker->pid : -1, stepDest);
@@ -15998,9 +17720,15 @@ static void rt_update_actor(RtActor* a, float dt)
                         a->route_plugged = true;
                         a->follow_retry_at = rt_clock + RT_ROUTE_PLUGGED_RETRY_SECONDS;
                         a->no_path_since = -1.0f;
+                        if (charging) {
+                            rt_party_charge_stuck(a, npc, "plugged");
+                        }
                     } else {
                         a->route_plugged = false;
                         rt_note_path_result(a, routed);
+                        if (charging && !routed) {
+                            rt_party_charge_stuck(a, npc, "no-route");
+                        }
                     }
                     // Round a wall or scenery (not a body): follow the route through.
                     if (routed && (blocker == NULL || FID_TYPE(blocker->fid) != OBJ_TYPE_CRITTER)) {
@@ -16023,8 +17751,19 @@ static void rt_update_actor(RtActor* a, float dt)
             break;
         }
 
+        // SQUAD ORDERS: the squad's focus before the one it is shooting; CHASE sorts out the reach and the line to it.
+        if (rt_focus_take(a, npc, "attack")) {
+            a->state = RT_CHASE;
+            break;
+        }
+        // HOLD takes no step and FOLLOW none out of its leash: the repositioners below stay out (they reload where
+        // they stand, too). CHARGE fights from the tile beside its target, as it closed in to (vanilla closes in
+        // every turn), so a target that steps off sends it back to CHASE.
+        bool squadStill = a->party_dist == RT_DIST_STAY || a->party_dist == RT_DIST_STAY_CLOSE;
+        bool squadCharge = a->party_dist == RT_DIST_CHARGE && rt_can_walk(npc) && rt_clock >= a->party_charge_stuck_until;
+
         // Leaned out for one shot: once it is gone, back behind the corner (rt_peek_back).
-        if (rt_peek_back(a, npc)) {
+        if (!squadStill && !squadCharge && rt_peek_back(a, npc)) {
             a->hold_beat_at = rt_clock; // back into cover: a hold (see the stop check)
             break;
         }
@@ -16038,7 +17777,7 @@ static void rt_update_actor(RtActor* a, float dt)
         }
 
         int hitMode = rt_hit_mode(npc);
-        if (obj_dist(npc, a->target) > item_w_range(npc, hitMode)) {
+        if (obj_dist(npc, a->target) > (squadCharge ? 1 : item_w_range(npc, hitMode))) {
             a->state = RT_CHASE;
             break;
         }
@@ -16062,7 +17801,9 @@ static void rt_update_actor(RtActor* a, float dt)
             Object* weapon = item_hit_with(npc, hitMode);
             // Cover first (rt_reload_cover), once per reload -- then the reload below, wherever it
             // stands. Only when there is ammo to load: a dry critter with nothing left swaps weapons.
-            if (rt_tactical_ai && !a->reload_cover_tried && weapon != NULL && rt_npc_has_ammo_for(npc, weapon)) {
+            // (Not under HOLD, FOLLOW or CHARGE: it reloads where it stands.)
+            if (rt_tactical_ai && !squadStill && !squadCharge && !a->reload_cover_tried && weapon != NULL
+                && rt_npc_has_ammo_for(npc, weapon)) {
                 a->reload_cover_tried = true;
                 if (rt_reload_cover(a, npc, hitMode)) {
                     rt_intent_hint(a, RT_INTENT_REPOSITION, "reload-cover", 3.0f);
@@ -16122,8 +17863,9 @@ static void rt_update_actor(RtActor* a, float dt)
         // the comment above always claimed it was.
         //
         // A CROWD MAKES ROOM first: a waiting teammate asked this fighter to move (rt_room_wait),
-        // and it does so only on a beat in which it could not strike anyway (rt_room_make).
-        if (rt_room_make(a, npc, hitMode)) {
+        // and it does so only on a beat in which it could not strike anyway (rt_room_make). Not a
+        // companion on HOLD or FOLLOW, whose Distance decides where it stands.
+        if (!squadStill && rt_room_make(a, npc, hitMode)) {
             rt_intent_hint(a, RT_INTENT_REPOSITION, "make-room", 2.0f);
             break;
         }
@@ -16168,13 +17910,21 @@ static void rt_update_actor(RtActor* a, float dt)
             }
         }
 
-        // A shooter the foe has walked up to steps back now and then (rt_back_off).
-        if (rt_tactical_ai && rt_back_off(a, npc, attackMode)) {
+        // SNIPE keeps its distance by vanilla's rule (rt_party_snipe_step), in place of the shooters' back-off.
+        if (rt_party_snipe_step(a, npc)) {
+            rt_intent_hint(a, RT_INTENT_REPOSITION, "snipe", 2.0f);
+            break;
+        }
+
+        // A shooter the foe has walked up to steps back now and then (rt_back_off). Not a companion on HOLD, FOLLOW,
+        // CHARGE or SNIPE: its Distance says where it stands.
+        if (rt_tactical_ai && !squadStill && !squadCharge && a->party_dist != RT_DIST_SNIPE
+            && rt_back_off(a, npc, attackMode)) {
             rt_intent_hint(a, RT_INTENT_REPOSITION, "back-off", 2.0f);
             break;
         }
 
-        if (rt_spread_step(a, npc, attackMode)) {
+        if (!squadStill && !squadCharge && rt_spread_step(a, npc, attackMode)) {
             rt_intent_hint(a, RT_INTENT_REPOSITION, "spread", 2.0f);
             break;
         }
@@ -16313,6 +18063,10 @@ static void rt_resolve_attacks(float dt)
 
         Object* npc = a->obj;
         if (!rt_is_combatant(npc) || anim_busy(npc) != 0 || !rt_is_combatant(a->attack_target)) {
+            continue;
+        }
+        // HOLD FIRE (SQUAD COMMAND): never, whatever recorded the intent -- the belt under rt_squad_fire_drop.
+        if (a->friendly && rt_squad_holds_fire(npc)) {
             continue;
         }
 
@@ -16474,6 +18228,21 @@ static void rt_abandon_encounter()
     rt_shooter_count = 0; // who shot at him on the map being left (rt_note_shot_at_dude)
     rt_offscreen_shooters_reset();
     rt_blast_rings_reset(); // tiles of the map being left; its view is redrawn whole anyway
+    // SQUAD ORDERS: the focus belongs to this map (a map change or a load ends it), the chevrons to its view.
+    // SQUAD COMMAND: and so do every companion's own focus and a HEAL ME on its way (the orders table); hold fire and
+    // the weapon picks are the session's (rt_reset_session_state), NO HEALING the dialogue's opt-out (kept too).
+    rt_focus_clear("map");
+    for (int i = 0; i < rt_squad_order_count; i++) {
+        rt_focus_own_clear(&rt_squad_orders[i], "map");
+        rt_squad_heal_end(&rt_squad_orders[i], "map");
+    }
+    rt_squad_order_count = 0;
+    rt_mark_count = 0;
+    memset(rt_marks, 0, sizeof(rt_marks));
+    if (rt_squad_forget_fn != NULL) {
+        rt_squad_forget_fn(NULL); // the squad command mode's own pointers go with the map
+    }
+    rt_squad_slow_probe = NULL; // the slowdown's traced critter too
     rt_horde_reset(); // the Master's banked signals and phases (rt_horde_tick)
     rt_script_end_rt_gate = false; // keyed off an rt_clock that may restart
     rt_lock_target = NULL;
@@ -16554,6 +18323,16 @@ static void rt_reset_session_state()
     // after PrepLoad ran this), init and exit -- never a map change.
     rt_fled_count = 0;
     rt_lost_memory_count = 0;
+    // SQUAD COMMAND: hold fire and the weapon picks are the session's as well -- a load refills them from its RTSQ
+    // section after this (load-stale-globals.md: cleared first, then filled from the save being loaded) -- and a
+    // squad command mode a load or a new game interrupted holds the world still no longer.
+    rt_squad_pref_count = 0;
+    if (rt_squad_mode_open) {
+        trace_event(TRACE_FLOW, "squad-mode", "close why=reset t=%.2f", rt_clock);
+        rt_squad_mode_open = false;
+    }
+    rt_squad_slow_done = false; // ...and its slowdown: the world runs at full speed (rt_squad_slow_rate)
+    rt_squad_slow_probe = NULL;
 
     // A roll in flight is animating the PREVIOUS session's hit points; nothing ticks it once
     // combat_rt is torn down, so it would sit on a stale number over the new game's bar.
@@ -17652,7 +19431,24 @@ void combat_rt_poll_gamepad()
     // picker (LT held) is up, the sticks drive the selection (right = pick) and the player should
     // not walk or lock-switch; halt any in-flight step and skip gameplay input (including the
     // right-stick lock cycling further below).
-    if (radial_wheel_is_open() || gamepad_ui_aim_body_active()) {
+    if (rt_pad_taken() || gamepad_ui_aim_body_active()) {
+        // ...except under the SQUAD COMMAND mode's slowdown (this is only reached before its hold): a free walk the
+        // stick had going when it opened coasts to the stop with the rest of the world -- the frame's dt is the slowed
+        // one, so he winds down at the world's rate and halts where it holds still. The stick is the mode's cursor
+        // now, not his legs, so the heading is the one he had (rt_fm_last_angle). A step walk's own segment slows on
+        // the animation clock and ends by itself. Out of AP he stops, as ever. (Its own weapon wheel included: the
+        // only wheel that opens over the mode, and it follows the mode's slowdown.)
+        if (rt_squad_mode_open) {
+            if (rt_free_move && rt_fm_active) {
+                if (rt_move_blocked && !rt_ap_empty_walks) {
+                    rt_fm_release();
+                } else {
+                    rt_fm_drive(rt_fm_last_angle, rt_fm_last_run && !rt_move_blocked, rt_frame_dt);
+                }
+            }
+            rt_stick_last_sector = -1;
+            return;
+        }
         rt_fm_release();
         rt_stick_stop();
         rt_stick_last_sector = -1;
@@ -17873,6 +19669,8 @@ void combat_rt_poll_gamepad()
             if (rt_move_blocked && !rt_ap_empty_walks) {
                 rt_fm_release();
             } else {
+                rt_fm_last_angle = angle;
+                rt_fm_last_run = run;
                 rt_fm_drive(angle, run && !rt_move_blocked, rt_frame_dt);
             }
         } else if (rt_move_blocked && !rt_ap_empty_walks) {
@@ -19447,11 +21245,84 @@ static void rt_blast_rings_render(Rect* rect, int elevation)
     }
 }
 
-// The tile overlay (tile.cc refresh_game): the blast rings on the ground, then the tracers over them.
+// --- SQUAD ORDERS: THE FOCUS'S CHEVRON (2026-11-11) ---------------------------------------------------------------
+//
+// While the squad's focus lasts, a small red chevron sits over its head: the prompt arrows' shape and size (5 x 3 with
+// a 1 px dark rim, interact_prompt.cc ip_draw_arrow) pointing down at it, in the blast dots' red. Drawn by the tile
+// overlay like the rings, at the tile it was measured on plus an offset, so a scroll carries it along; moved, and the
+// world repainted where it was, only when it moves (rt_squad_mark_tick).
+#define RT_MARK_GAP 4 // px between the chevron's tip and the top of the sprite
+
+static bool rt_mark_cell(int dx, int row)
+{
+    return row >= 0 && row <= 2 && dx >= -row && dx <= row; // ip_arrow_in: one pixel at the tip, five at the base
+}
+
+// The chevron's box round its tip (rim included), and a pixel of air.
+static void rt_mark_rect(int x, int y, Rect* r)
+{
+    r->ulx = x - 4;
+    r->uly = y - 4;
+    r->lrx = x + 4;
+    r->lry = y + 2;
+}
+
+// The overlay's third part (rt_world_overlay): the chevrons, each clipped to what is being repainted.
+static void rt_squad_mark_render(Rect* rect, int elevation)
+{
+    int fill = colorTable[RT_RGB(31, 0, 0)]; // the blast dots' red (the F11 ring's colorTable[31744])
+    int rim = colorTable[RT_RGB(2, 2, 1)]; // the prompt arrows' rim
+    if (rim == 0) {
+        rim = colorTable[RT_RGB(2, 2, 2)];
+    }
+    for (int m = 0; m < rt_mark_count; m++) {
+        const RtSquadMark* mk = &rt_marks[m];
+        if (!mk->on || mk->elev != elevation || mk->tile < 0) {
+            continue;
+        }
+        int tx;
+        int ty;
+        if (tile_coord(mk->tile, &tx, &ty, elevation) == -1) {
+            continue;
+        }
+        int x = tx + 16 + mk->ox; // the tip
+        int y = ty + 8 + mk->oy;
+        if (x + 4 < rect->ulx || x - 4 > rect->lrx || y + 2 < rect->uly || y - 4 > rect->lry) {
+            continue;
+        }
+        // Rows count UP from the tip: a chevron pointing down at the head.
+        for (int row = -1; row <= 3; row++) {
+            for (int dx = -4; dx <= 4; dx++) {
+                bool in = rt_mark_cell(dx, row);
+                bool edge = false;
+                for (int oy = -1; oy <= 1 && !in && !edge; oy++) {
+                    for (int ox = -1; ox <= 1; ox++) {
+                        if (rt_mark_cell(dx + ox, row + oy)) {
+                            edge = true;
+                            break;
+                        }
+                    }
+                }
+                if (in || edge) {
+                    tile_overlay_line(rect, x + dx, y - row, x + dx, y - row, in ? fill : rim);
+                }
+            }
+        }
+    }
+}
+
+// The tile overlay (tile.cc refresh_game): the blast rings on the ground, then the tracers over them, then the
+// squad's chevrons over everything -- and over them the squad command mode's own marks (the outlines round who, the
+// dotted lines, the brackets round the cursor's target; gamepad_ui through combat_rt_set_squad_mode_hooks), the
+// topmost thing on the world.
 static void rt_world_overlay(Rect* rect, int elevation)
 {
     rt_blast_rings_render(rect, elevation);
     rt_tracers_render(rect, elevation);
+    rt_squad_mark_render(rect, elevation);
+    if (rt_squad_overlay_fn != NULL) {
+        rt_squad_overlay_fn(rect, elevation);
+    }
 }
 
 // Where the held quick throw would go off, and how far: the target's tile while it is within the throw's
@@ -19670,6 +21541,1049 @@ static void rt_blast_rings_tick()
         ring->last = now;
         ring->painted = true;
     }
+}
+
+// One chevron, put at (tile, ox, oy) or taken away (`want` false). Where it is drawn now is its stored tile under THIS
+// frame's view -- the follow camera may have moved it already, carrying the drawn pixels along -- so a move or an
+// erase repaints that, where it was last painted, and where it goes. Never reads the critter it sits over.
+static void rt_squad_mark_place(RtSquadMark* mk, bool want, int tile, int ox, int oy)
+{
+    Rect drawn;
+    bool drawnValid = false;
+    if (mk->painted && mk->elev == map_elevation && mk->tile >= 0) {
+        int tx;
+        int ty;
+        if (tile_coord(mk->tile, &tx, &ty, mk->elev) != -1) {
+            rt_mark_rect(tx + 16 + mk->ox, ty + 8 + mk->oy, &drawn);
+            drawnValid = true;
+        }
+    }
+    bool painted = mk->painted && mk->elev == map_elevation;
+
+    if (!want) {
+        bool was = mk->on;
+        mk->on = false; // first, so the repaint below no longer draws it
+        if (painted) {
+            tile_refresh_rect(&mk->last, mk->elev);
+            if (drawnValid) {
+                tile_refresh_rect(&drawn, mk->elev);
+            }
+        }
+        mk->painted = false;
+        if (was) {
+            trace_event(TRACE_FLOW, "squad-mark", "off id=%d pid=%d t=%.2f", mk->id, mk->pid, rt_clock);
+        }
+        return;
+    }
+
+    if (painted && mk->on && tile == mk->tile && ox == mk->ox && oy == mk->oy && drawnValid
+        && drawn.ulx == mk->last.ulx && drawn.uly == mk->last.uly && drawn.lrx == mk->last.lrx
+        && drawn.lry == mk->last.lry) {
+        return; // unchanged: every repaint of the world under it draws it again
+    }
+
+    bool was = mk->on;
+    Rect last = mk->last;
+    mk->on = true;
+    mk->tile = tile;
+    mk->elev = map_elevation;
+    mk->ox = ox;
+    mk->oy = oy;
+    if (painted) {
+        tile_refresh_rect(&last, map_elevation);
+        if (drawnValid) {
+            tile_refresh_rect(&drawn, map_elevation);
+        }
+    }
+    int tx;
+    int ty;
+    tile_coord(tile, &tx, &ty, map_elevation);
+    Rect now;
+    rt_mark_rect(tx + 16 + ox, ty + 8 + oy, &now);
+    tile_refresh_rect(&now, map_elevation);
+    mk->last = now;
+    mk->painted = true;
+    if (!was) {
+        trace_event(TRACE_FLOW, "squad-mark", "on id=%d pid=%d tile=%d t=%.2f", mk->id, mk->pid, tile, rt_clock);
+    }
+}
+
+// A critter about to be freed: its chevron forgets it (the tick erases it from its stored tile, never reading it).
+static void rt_squad_mark_forget(Object* obj)
+{
+    for (int m = 0; m < rt_mark_count; m++) {
+        if (rt_marks[m].obj == obj) {
+            rt_marks[m].obj = NULL;
+        }
+    }
+}
+
+// Once a frame (beside the rings): a chevron up over every live focus -- the squad's and each companion's own (SQUAD
+// COMMAND), one per critter -- over its head as it moves, and gone with it. Hidden, like the rings, while the dude
+// cannot act or a script owns the scene.
+static void rt_squad_mark_tick()
+{
+    Object* want[RT_SQUAD_MARKS_MAX];
+    int wantCount = 0;
+    if (obj_dude != NULL && rt_is_combatant(obj_dude) && !combat_rt_script_ui_locked()) {
+        if (rt_focus_live()) {
+            want[wantCount++] = rt_squad_focus;
+        }
+        for (int i = 0; i < rt_squad_order_count && wantCount < RT_SQUAD_MARKS_MAX; i++) {
+            Object* f = rt_squad_orders[i].focus;
+            if (f == NULL || !rt_focus_obj_live(f)) {
+                continue;
+            }
+            bool dup = false;
+            for (int w = 0; w < wantCount; w++) {
+                dup = dup || want[w] == f;
+            }
+            if (!dup) {
+                want[wantCount++] = f;
+            }
+        }
+    }
+
+    // Away with every chevron nobody wants any more -- a freed critter's among them (rt_squad_mark_forget).
+    for (int m = 0; m < rt_mark_count;) {
+        RtSquadMark* mk = &rt_marks[m];
+        bool wanted = false;
+        for (int w = 0; w < wantCount && mk->obj != NULL; w++) {
+            wanted = wanted || want[w] == mk->obj;
+        }
+        if (!wanted) {
+            rt_squad_mark_place(mk, false, -1, 0, 0);
+            rt_marks[m] = rt_marks[--rt_mark_count];
+            continue;
+        }
+        m++;
+    }
+
+    // ...and every wanted one over its critter's head (a live focus: in the registry, so safe to read).
+    for (int w = 0; w < wantCount; w++) {
+        Object* f = want[w];
+        RtSquadMark* mk = NULL;
+        for (int m = 0; m < rt_mark_count; m++) {
+            if (rt_marks[m].obj == f) {
+                mk = &rt_marks[m];
+                break;
+            }
+        }
+        if (mk == NULL) {
+            if (rt_mark_count >= RT_SQUAD_MARKS_MAX) {
+                continue;
+            }
+            mk = &rt_marks[rt_mark_count++];
+            memset(mk, 0, sizeof(*mk));
+            mk->obj = f;
+            mk->id = f->id;
+            mk->pid = f->pid;
+            mk->tile = -1;
+            mk->elev = -1;
+        }
+        bool ok = f->elevation == map_elevation;
+        int tile = f->tile;
+        int ox = 0;
+        int oy = 0;
+        int tx;
+        int ty;
+        Rect bounds;
+        if (!ok || tile < 0 || tile_coord(tile, &tx, &ty, map_elevation) == -1) {
+            ok = false;
+        } else {
+            obj_bound(f, &bounds);
+            if (bounds.lrx <= bounds.ulx || bounds.lry <= bounds.uly) {
+                ok = false;
+            } else {
+                ox = (bounds.ulx + bounds.lrx) / 2 - (tx + 16);
+                oy = bounds.uly - RT_MARK_GAP - (ty + 8);
+            }
+        }
+        rt_squad_mark_place(mk, ok, tile, ox, oy);
+    }
+}
+
+// --- SQUAD ORDERS: THE ORDER (Fallout 2 Realtime, 2026-11-11, his design "B", „Obojí, nejdřív B“) ---------------
+//
+// LT + a D-pad tap (gamepad_ui.cc) orders every companion at once -- the party members on the map that are alive and
+// awake:
+//   Up    ATTACK: the LT-locked target becomes the squad's focus; every companion that can get at it goes for it first
+//         while it lives (rt_focus_wanted). No lock, or a neutral one, is refused: the order would start a fight.
+//   Down  FOLLOW: COMBAT CONTROL Distance "Stay close".
+//   Left  HOLD:   Distance "Stay".
+//   Right CHARGE: Distance "Charge".
+// The last three are written the way the dialogue's COMBAT CONTROL panel writes them (rt_party_set_distance), so the
+// value is saved and shows there; a companion party.txt does not allow that value (Vic will not charge, Goris only
+// charges) keeps its own, as the panel greys it out. The focus is not saved: it ends with its target's death, its
+// leaving the floor, a map change or a load, or the next ATTACK. FOLLOW / HOLD / CHARGE leave it be.
+// The nearest companion that took the order says so over its head. True = somebody took it (the caller buzzes on
+// false).
+#if FALLOUT_RT_GAME == 2
+// The panel's way to a Distance (game_dialog.cc): a companion on a preset disposition goes to its Custom packet first
+// (aiSetDisposition 0 -- the packet aiSave keeps, and the one the panel's CUSTOM writes), then the value is written
+// (aiSetDistance). NULL = done, else why not.
+static const char* rt_party_set_distance(Object* c, int distance)
+{
+    if (!partyMemberSupportsDistance(c, distance)) {
+        return "unsupported";
+    }
+    int disposition = aiGetDisposition(c);
+    // A generic packet (no disposition) has no Custom of its own -- the panel's buttons misjump there (Chicken, Karl,
+    // Jonny, Lloyd, the Pariah dog), and writing it would change every critter that shares the packet.
+    if (disposition < 0 || !partyMemberSupportsDisposition(c, 0)) {
+        return "no-custom";
+    }
+    if (disposition > 0) {
+        int packet = c->data.critter.combat.aiPacket;
+        aiSetDisposition(c, 0);
+        if (aiGetDisposition(c) != 0) {
+            c->data.critter.combat.aiPacket = packet; // the jump missed its Custom packet: leave it as it was
+            return "no-custom";
+        }
+    }
+    if (aiSetDistance(c, distance) != 0) {
+        return "refused";
+    }
+    return NULL;
+}
+#endif
+
+// --- SQUAD COMMAND: THE ORDER (Fallout 2 Realtime, 2026-11-12, his design "A") ------------------------------------
+//
+// One function gives every order, to every companion at once (`who` NULL: the party members on the dude's floor,
+// alive and awake -- design B's LT + D-pad, and the squad command mode's "All") or to one (`who`, the mode's LB / RB):
+//   ATTACK     `target` (an enemy: fighting him, or one by nature -- the red outline) is attacked first while it lives:
+//              for All the squad's focus (design B, which also clears every companion's own), for one that one's own
+//              focus. It lifts hold fire.
+//   FOLLOW     Distance "Stay close" (design B), and the regroup: the companions' own foci end; for All the squad's
+//              focus too, for one it ignores the squad's until its next ATTACK. A companion whose packet cannot take
+//              Stay close (party.txt) still regroups if it had a focus of its own.
+//   HOLD       Distance "Stay" (design B).
+//   CHARGE     Distance "Charge" (design B); lifts hold fire.
+//   HOLD FIRE / OPEN FIRE   (rt_squad_holds_fire) -- saved, kept till OPEN FIRE, an ATTACK or a CHARGE.
+//   HEAL ME    the one chosen, or for All the nearest that carries something to heal with, comes to him and doses him
+//              (rt_squad_heal_step). He unhurt: "You're fine."; nobody with supplies: "No meds."
+//   NO HEALING / HEAL AGAIN   (2026-11-13, his pick: Y in the mode, „Y No healing“ / „Y Heal me again“) the medic
+//              opt-out for each of them -- the party dialogue line's "(Stop patching me up. Save your supplies.)" /
+//              "(You can patch me up again.)", the very same state (combat_rt_medic_set_treats_player), saved with it.
+//              "Saving supplies." / "I'll patch you up." Nothing else changes, as with HOLD FIRE: no Distance, no hold
+//              fire, and a HEAL ME on its way goes on -- he asked for that one, and it never asks the opt-out. With no
+//              medic beat at all neither could change anything: refused, why=medic-off, without a word (the mode
+//              shows no Y then).
+// GO -- a tile they walked to and held, the post, with All spread round it -- was here until 2026-11-13, when he took
+// it out: „dej pryč ovládání a přikazování companions kam mají přesně chodit … nehodí se to do této action oriented
+// verze“. It lives on, with its tests, on branch shelf/squad-orders-with-go (ad1fe7a).
+// The nearest companion that took it says so over its head; a refusal is said by the nearest one asked. True = taken
+// (the caller clicks), false = refused (it buzzes; the mode stays open). Traced as [ACTION/squad-order], design B's
+// line with `who=` at its end (B's tests read it up to `speaker=`).
+#if FALLOUT_RT_GAME == 2
+static const char* const rt_squad_order_names[] = {
+    "attack", "follow", "hold", "charge", "hold-fire", "open-fire", "heal-me", "no-healing", "heal-again",
+};
+static const char* const rt_squad_order_lines[] = {
+    "On it.", "Coming.", "Holding.", "Charging!", "Holding fire.", "Weapons free.", "Hold still.", "Saving supplies.",
+    "I'll patch you up.",
+};
+// Too few names or lines would compile and leave the last orders a NULL (the trace's %s, the floated line): the
+// COMBAT_RT_ORDER_* list and these move together.
+static_assert((int)(sizeof(rt_squad_order_names) / sizeof(rt_squad_order_names[0])) == COMBAT_RT_ORDER_COUNT,
+    "rt_squad_order_names must name every COMBAT_RT_ORDER_*");
+static_assert((int)(sizeof(rt_squad_order_lines) / sizeof(rt_squad_order_lines[0])) == COMBAT_RT_ORDER_COUNT,
+    "rt_squad_order_lines must say every COMBAT_RT_ORDER_*");
+
+// A companion the squad command reaches: a party member, alive, not knocked out, on the dude's floor.
+static bool rt_squad_member_ok(Object* c)
+{
+    return c != NULL && obj_dude != NULL && c != obj_dude && rt_is_critter(c) && isPartyMember(c)
+        && (c->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) == 0
+        && stat_level(c, STAT_CURRENT_HIT_POINTS) > 0 && c->elevation == obj_dude->elevation
+        && (c->flags & OBJECT_HIDDEN) == 0;
+}
+
+// `who`'s companions into out[] -- NULL = every one on the floor -- nearest the dude first. Returns how many.
+static int rt_squad_who_list(Object* who, Object** out, int max)
+{
+    int n = 0;
+    if (who != NULL) {
+        if (max > 0 && rt_squad_member_ok(who)) {
+            out[n++] = who;
+        }
+        return n;
+    }
+    std::vector<Object*> members = get_all_party_members_objects(false);
+    for (Object* c : members) {
+        if (n < max && rt_squad_member_ok(c)) {
+            out[n++] = c;
+        }
+    }
+    for (int i = 1; i < n; i++) { // nearest first; a handful, so an insertion sort
+        Object* c = out[i];
+        int d = obj_dist(c, obj_dude);
+        int j = i - 1;
+        while (j >= 0 && obj_dist(out[j], obj_dude) > d) {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = c;
+    }
+    return n;
+}
+
+// The trace's name for `who`.
+static void rt_squad_who_text(Object* who, char* out, size_t size)
+{
+    if (who == NULL) {
+        snprintf(out, size, "all");
+    } else {
+        snprintf(out, size, "%d", who->id);
+    }
+}
+
+// HOLD FIRE on or off for one companion, traced when it changes.
+static void rt_squad_set_hold_fire(Object* c, bool hold, const char* why)
+{
+    RtSquadPref* p = hold ? rt_squad_pref_get(c->id) : rt_squad_pref_find(c->id);
+    if (p == NULL || p->holdFire == hold) {
+        return;
+    }
+    p->holdFire = hold;
+    trace_event(TRACE_FLOW, "squad-fire", "%s id=%d pid=%d why=%s t=%.2f", hold ? "hold" : "open", c->id, c->pid, why,
+        rt_clock);
+    if (!hold) {
+        rt_squad_pref_tidy(c->id);
+    }
+}
+#endif
+
+static bool rt_squad_command(Object* who, int order, Object* target, const char* noTarget)
+{
+#if FALLOUT_RT_GAME == 2
+    if (order < 0 || order >= COMBAT_RT_ORDER_COUNT || !rt_enabled || obj_dude == NULL) {
+        return false;
+    }
+    // The Distance each order writes (design B's three), RT_DIST_NONE = none. ⚠️ Every order listed: a missing entry
+    // would be 0, RT_DIST_STAY_CLOSE -- a "Stay close" written into every companion's AI packet, which the save keeps.
+    static const int distances[] = {
+        RT_DIST_NONE, // attack
+        RT_DIST_STAY_CLOSE, // follow
+        RT_DIST_STAY, // hold
+        RT_DIST_CHARGE, // charge
+        RT_DIST_NONE, // hold-fire
+        RT_DIST_NONE, // open-fire
+        RT_DIST_NONE, // heal-me
+        RT_DIST_NONE, // no-healing
+        RT_DIST_NONE, // heal-again
+    };
+    static_assert((int)(sizeof(distances) / sizeof(distances[0])) == COMBAT_RT_ORDER_COUNT,
+        "distances must list every COMBAT_RT_ORDER_*");
+    const char* name = rt_squad_order_names[order];
+
+    Object* list[RT_SQUAD_MAX];
+    int count = rt_squad_who_list(who, list, RT_SQUAD_MAX);
+    const char* refused = NULL;
+    const char* refusalLine = NULL;
+
+    // What the order is about. ATTACK: an enemy (fighting him, or one by nature: the red outline) -- not a neutral,
+    // which an order must not start a fight with, nor one on his side.
+    if (order == COMBAT_RT_ORDER_ATTACK) {
+        if (target == NULL || !rt_in_registry(target) || !rt_is_targetable(target)) {
+            target = NULL;
+            refused = noTarget != NULL ? noTarget : "no-target";
+        } else if (rt_on_dudes_team(target) || isPartyMember(target)) {
+            refused = "friend";
+        } else if (rt_lock_class(target) < 2) {
+            refused = "neutral";
+        }
+    } else {
+        target = NULL;
+    }
+    if (refused == NULL && order == COMBAT_RT_ORDER_HEAL_ME
+        && rt_hp_with_heal(obj_dude) >= stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS)) {
+        refused = "fine";
+        refusalLine = "You're fine.";
+    }
+    // NO HEALING / HEAL AGAIN switch the medic beat's opt-out: with no beat at all (cfg medic_enabled=0) neither could
+    // change a thing -- the dialogue's own rule, which offers no line then (combat_rt_medic_beat_enabled). No words.
+    if (refused == NULL && (order == COMBAT_RT_ORDER_NO_HEALING || order == COMBAT_RT_ORDER_HEAL_AGAIN)
+        && !combat_rt_medic_beat_enabled()) {
+        refused = "medic-off";
+    }
+    if (refused == NULL && count == 0) {
+        refused = "no-companions";
+    }
+
+    // HEAL ME: the healer -- the one chosen, or the nearest that carries something to heal with.
+    Object* healer = NULL;
+    if (refused == NULL && order == COMBAT_RT_ORDER_HEAL_ME) {
+        for (int i = 0; i < count && healer == NULL; i++) {
+            RtHealKind kind;
+            if (rt_squad_heal_item(list[i], &kind) != NULL) {
+                healer = list[i];
+            }
+        }
+        if (healer == NULL) {
+            refused = "no-meds";
+            refusalLine = "No meds.";
+        }
+    }
+
+    int taken = 0;
+    int skipped = 0;
+    Object* speaker = NULL;
+    int speakerDist = INT_MAX;
+    bool speakerMeds = false; // Y's speaker carries something to heal him with
+    if (refused == NULL) {
+        for (int i = 0; i < count; i++) {
+            Object* c = list[i];
+            RtActor* a = rt_actor_of(c);
+            RtSquadOrder* o = rt_squad_order_find(c);
+            bool ownFocus = o != NULL && o->focus != NULL;
+            const char* skip = NULL;
+
+            if (distances[order] != RT_DIST_NONE) {
+                skip = rt_party_set_distance(c, distances[order]);
+                // FOLLOW is the regroup as well as Stay close: one whose packet cannot take Stay close (Goris, Marcus)
+                // still comes off its own focus -- it keeps its Distance.
+                if (skip != NULL && order == COMBAT_RT_ORDER_FOLLOW && ownFocus) {
+                    trace_event(TRACE_ACTION, "squad-order-keep", "order=%s id=%d pid=%d why=%s part=distance t=%.2f",
+                        name, c->id, c->pid, skip, rt_clock);
+                    skip = NULL;
+                }
+            }
+            // NO HEALING: one the opt-out list has no room for any more (RT_MEDIC_OPTOUT_MAX ids, one per companion --
+            // no real party gets there) did not take it: combat_rt_medic_set_treats_player would drop its id without
+            // a word (the list is never written past its end -- the load gives up the rest of the realtime chunk on a
+            // count over it).
+            if (skip == NULL && order == COMBAT_RT_ORDER_NO_HEALING && combat_rt_medic_treats_player(c)
+                && rt_medic_optout_count >= RT_MEDIC_OPTOUT_MAX) {
+                skip = "full";
+            }
+            if (order == COMBAT_RT_ORDER_HEAL_ME && c != healer) {
+                continue; // one heals; the others are not asked, nor counted skipped
+            }
+            if (skip != NULL) {
+                skipped++;
+                trace_event(TRACE_ACTION, "squad-order-skip", "order=%s id=%d pid=%d why=%s t=%.2f", name, c->id, c->pid,
+                    skip, rt_clock);
+                continue;
+            }
+
+            switch (order) {
+            case COMBAT_RT_ORDER_ATTACK:
+                rt_squad_set_hold_fire(c, false, "attack");
+                if (who != NULL) {
+                    o = rt_squad_order_get(c);
+                    if (o != NULL) {
+                        if (o->focus != NULL && o->focus != target) {
+                            rt_focus_own_clear(o, "replaced");
+                        }
+                        o->focus = target;
+                        o->focusId = target->id;
+                        o->focusPid = target->pid;
+                        o->ignoreSquad = false;
+                        trace_event(TRACE_FLOW, "squad-focus", "own-on who=%d id=%d pid=%d tile=%d hostile=%d t=%.2f", c->id,
+                            target->id, target->pid, target->tile, rt_is_hostile(target) ? 1 : 0, rt_clock);
+                    }
+                } else if (o != NULL) {
+                    rt_focus_own_clear(o, "squad"); // the squad's focus is everyone's now
+                    o->ignoreSquad = false;
+                }
+                if (a != NULL) {
+                    rt_party_take_order(a, c, false);
+                }
+                break;
+            case COMBAT_RT_ORDER_FOLLOW:
+                rt_focus_own_clear(o, "follow");
+                if (o != NULL) {
+                    // One told to follow alone ignores the squad's focus till its next ATTACK: the focus outranks
+                    // FOLLOW's leash, and "come back" must bring it back. For All the squad's focus ends below.
+                    o->ignoreSquad = who != NULL && rt_focus_live();
+                } else if (who != NULL && rt_focus_live()) {
+                    o = rt_squad_order_get(c);
+                    if (o != NULL) {
+                        o->ignoreSquad = true;
+                    }
+                }
+                if (a != NULL) {
+                    rt_party_take_order(a, c, false);
+                }
+                break;
+            case COMBAT_RT_ORDER_HOLD:
+                // "They stay where they are": in a fight any walk it is on is cut (rt_party_take_order).
+                if (a != NULL) {
+                    rt_party_take_order(a, c, true);
+                }
+                break;
+            case COMBAT_RT_ORDER_CHARGE:
+                rt_squad_set_hold_fire(c, false, "charge");
+                if (a != NULL) {
+                    rt_party_take_order(a, c, false);
+                }
+                break;
+            case COMBAT_RT_ORDER_HOLD_FIRE:
+                rt_squad_set_hold_fire(c, true, "order");
+                break;
+            case COMBAT_RT_ORDER_OPEN_FIRE:
+                rt_squad_set_hold_fire(c, false, "order");
+                break;
+            case COMBAT_RT_ORDER_NO_HEALING:
+            case COMBAT_RT_ORDER_HEAL_AGAIN: {
+                // Y (2026-11-13): the dialogue line's opt-out, the same state, written only when it changes
+                // (combat_rt_medic_set_treats_player traces every call). The medic beat reads it live, so the next
+                // beat already keeps to it; a dose already under way plays out, and so does a HEAL ME on its way.
+                bool treats = order == COMBAT_RT_ORDER_HEAL_AGAIN;
+                if (combat_rt_medic_treats_player(c) != treats) {
+                    combat_rt_medic_set_treats_player(c, treats);
+                }
+                break;
+            }
+            case COMBAT_RT_ORDER_HEAL_ME: {
+                o = rt_squad_order_get(c);
+                if (o == NULL) {
+                    continue;
+                }
+                RtHealKind kind;
+                Object* item = rt_squad_heal_item(c, &kind);
+                o->healing = true;
+                o->healSince = rt_clock;
+                o->healStuckSince = -1.0f;
+                o->healLogged = -1;
+                o->healWaitLogged = false;
+                o->followHeldLogged = false;
+                if (a != NULL) {
+                    a->unreachable_until = 0.0f;
+                }
+                rt_squad_cut_walk(a, c, "heal");
+                trace_event(TRACE_FLOW, "squad-heal", "order id=%d pid=%d item=%d kind=%d dist=%d hp=%d/%d pool=%d t=%.2f",
+                    c->id, c->pid, item != NULL ? item->pid : -1, (int)kind, obj_dist(c, obj_dude),
+                    critter_get_hits(obj_dude), stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS), combat_rt_heal_left(),
+                    rt_clock);
+                break;
+            }
+            }
+
+            taken++;
+            int d = obj_dist(c, obj_dude);
+            // Y's line (2026-11-13) comes from the nearest one with something to heal him with, when one took it --
+            // "Saving supplies." over a companion who carries none (Sulik with his knife) reads wrong. Every other
+            // order, and Y when nobody carries any: the nearest.
+            bool meds = false;
+            if (order == COMBAT_RT_ORDER_NO_HEALING || order == COMBAT_RT_ORDER_HEAL_AGAIN) {
+                RtHealKind kind;
+                meds = rt_squad_heal_item(c, &kind) != NULL;
+            }
+            if (speaker == NULL || (meds && !speakerMeds) || (meds == speakerMeds && d < speakerDist)) {
+                speaker = c;
+                speakerDist = d;
+                speakerMeds = meds;
+            }
+        }
+        if (taken == 0) {
+            // Every one skipped: party.txt refused them the Distance, or NO HEALING found the opt-out list full.
+            refused = skipped > 0 ? (order == COMBAT_RT_ORDER_NO_HEALING ? "full" : "unsupported") : "no-companions";
+        }
+    }
+
+    // For All: FOLLOW is the regroup (2026-11-11), it ends the squad's focus, which outranks FOLLOW's leash -- "come
+    // back to me" must bring them back; ATTACK sets it. HOLD and CHARGE leave it be: held, they shoot it from where
+    // they stand; charging, they go in.
+    if (refused == NULL && who == NULL && order == COMBAT_RT_ORDER_FOLLOW) {
+        rt_focus_clear("follow");
+    }
+    if (refused == NULL && who == NULL && order == COMBAT_RT_ORDER_ATTACK) {
+        if (rt_squad_focus != NULL && rt_squad_focus != target) {
+            rt_focus_clear("replaced");
+        }
+        rt_squad_focus = target;
+        rt_squad_focus_id = target->id;
+        rt_squad_focus_pid = target->pid;
+        trace_event(TRACE_FLOW, "squad-focus", "on id=%d pid=%d tile=%d hostile=%d t=%.2f", target->id, target->pid,
+            target->tile, rt_is_hostile(target) ? 1 : 0, rt_clock);
+    }
+
+    // The nearest one that took it says so; a refusal with words to it is said by the nearest one asked.
+    if (refused == NULL && speaker != NULL) {
+        rt_squad_say(speaker, rt_squad_order_lines[order]);
+    } else if (refused != NULL && refusalLine != NULL && count > 0) {
+        rt_squad_say(list[0], refusalLine);
+    }
+
+    char targetText[16];
+    if (target != NULL) {
+        snprintf(targetText, sizeof(targetText), "%d", target->pid);
+    } else {
+        snprintf(targetText, sizeof(targetText), "-");
+    }
+    char whoText[16];
+    rt_squad_who_text(who, whoText, sizeof(whoText));
+    trace_event(TRACE_ACTION, "squad-order", "order=%s target=%s companions=%d skipped=%d why=%s speaker=%d t=%.2f who=%s",
+        name, targetText, refused == NULL ? taken : 0, skipped, refused != NULL ? refused : "ok",
+        refused == NULL && speaker != NULL ? speaker->id : -1, rt_clock, whoText);
+    return refused == NULL;
+#else
+    (void)who; // Fallout 1 has no COMBAT CONTROL to order with
+    (void)order;
+    (void)target;
+    (void)noTarget;
+    return false;
+#endif
+}
+
+// Design B's LT + D-pad: every companion, ATTACK on the LT lock.
+bool combat_rt_squad_order(int order)
+{
+    return rt_squad_command(NULL, order, order == COMBAT_RT_ORDER_ATTACK ? rt_lock_target : NULL, "no-lock");
+}
+
+bool combat_rt_squad_command(Object* who, int order, Object* target)
+{
+    return rt_squad_command(who, order, target, NULL);
+}
+
+// --- SQUAD COMMAND: WHAT THE MODE ASKS (gamepad_ui.cc; see combat_rt.h) -------------------------------------------
+
+int combat_rt_squad_members(Object** out, int max)
+{
+#if FALLOUT_RT_GAME == 2
+    if (!rt_enabled || obj_dude == NULL || out == NULL) {
+        return 0;
+    }
+    return rt_squad_who_list(NULL, out, max);
+#else
+    (void)out;
+    (void)max;
+    return 0;
+#endif
+}
+
+bool combat_rt_squad_holds_fire(Object* who)
+{
+#if FALLOUT_RT_GAME == 2
+    if (!rt_enabled || obj_dude == NULL) {
+        return false;
+    }
+    Object* list[RT_SQUAD_MAX];
+    int count = rt_squad_who_list(who, list, RT_SQUAD_MAX);
+    for (int i = 0; i < count; i++) {
+        if (!rt_squad_holds_fire(list[i])) {
+            return false;
+        }
+    }
+    return count > 0;
+#else
+    (void)who;
+    return false;
+#endif
+}
+
+// Y's question, as combat_rt_squad_holds_fire is X's -- over the order's own list (rt_squad_who_list, no biped filter:
+// the dialogue offers Dogmeat the line too), or the legend would never turn to "Heal me again" after a press.
+bool combat_rt_squad_medic_off(Object* who)
+{
+#if FALLOUT_RT_GAME == 2
+    if (!rt_enabled || obj_dude == NULL) {
+        return false;
+    }
+    Object* list[RT_SQUAD_MAX];
+    int count = rt_squad_who_list(who, list, RT_SQUAD_MAX);
+    for (int i = 0; i < count; i++) {
+        if (combat_rt_medic_treats_player(list[i])) {
+            return false;
+        }
+    }
+    return count > 0;
+#else
+    (void)who;
+    return false;
+#endif
+}
+
+int combat_rt_squad_kind(Object* obj)
+{
+    if (!rt_enabled || obj == NULL || obj_dude == NULL) {
+        return COMBAT_RT_SQUAD_KIND_NONE;
+    }
+    if (obj == obj_dude) {
+        return COMBAT_RT_SQUAD_KIND_DUDE;
+    }
+    if (!rt_is_critter(obj) || critter_is_dead(obj)) {
+        return COMBAT_RT_SQUAD_KIND_NONE;
+    }
+    if (isPartyMember(obj)) {
+        return COMBAT_RT_SQUAD_KIND_COMPANION;
+    }
+    // design B's ATTACK rule: on this floor, alive, not on his side, and an enemy -- fighting him, or one by nature
+    if (rt_in_registry(obj) && rt_is_targetable(obj) && !rt_on_dudes_team(obj) && rt_lock_class(obj) == 2) {
+        return COMBAT_RT_SQUAD_KIND_ENEMY;
+    }
+    return COMBAT_RT_SQUAD_KIND_NONE;
+}
+
+Object* combat_rt_squad_healer(Object* who, const char** why)
+{
+    const char* dummy;
+    if (why == NULL) {
+        why = &dummy;
+    }
+    *why = "no-companions";
+#if FALLOUT_RT_GAME == 2
+    if (!rt_enabled || obj_dude == NULL) {
+        return NULL;
+    }
+    if (rt_hp_with_heal(obj_dude) >= stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS)) {
+        *why = "fine";
+        return NULL;
+    }
+    Object* list[RT_SQUAD_MAX];
+    int count = rt_squad_who_list(who, list, RT_SQUAD_MAX);
+    for (int i = 0; i < count; i++) {
+        RtHealKind kind;
+        if (rt_squad_heal_item(list[i], &kind) != NULL) {
+            *why = NULL;
+            return list[i];
+        }
+    }
+    if (count > 0) {
+        *why = "no-meds";
+    }
+#else
+    (void)who;
+#endif
+    return NULL;
+}
+
+int combat_rt_squad_weapons(Object* c, Object** out, int max)
+{
+    if (!rt_enabled || c == NULL || out == NULL || !rt_is_critter(c) || !isPartyMember(c)) {
+        return 0;
+    }
+    Object* hand = inven_right_hand(c);
+    int n = 0;
+    Inventory* inventory = &(c->data.inventory);
+    for (int i = 0; i < inventory->length; i++) {
+        Object* item = inventory->items[i].item;
+        if (item == NULL || !rt_squad_weapon_holdable(c, item)) {
+            continue;
+        }
+        int same = -1;
+        for (int k = 0; k < n; k++) {
+            if (out[k]->pid == item->pid) {
+                same = k;
+                break;
+            }
+        }
+        if (same >= 0) {
+            // One per weapon: the one in hand, else the fullest.
+            if (out[same] != hand && (item == hand || item_w_curr_ammo(item) > item_w_curr_ammo(out[same]))) {
+                out[same] = item;
+            }
+        } else if (n < max) {
+            out[n++] = item;
+        }
+    }
+    return n;
+}
+
+int combat_rt_squad_weapon_pick(Object* c)
+{
+    if (c == NULL || rt_squad_pref_count == 0) {
+        return -1;
+    }
+    RtSquadPref* p = rt_squad_pref_find(c->id);
+    return p != NULL ? p->weaponPid : -1;
+}
+
+bool combat_rt_squad_weapon_ready(Object* c, Object* item)
+{
+    return c != NULL && item != NULL && rt_squad_weapon_holdable(c, item) && rt_squad_weapon_loaded(c, item);
+}
+
+bool combat_rt_squad_set_weapon(Object* c, Object* item)
+{
+#if FALLOUT_RT_GAME == 2
+    if (!rt_enabled || c == NULL || !rt_is_critter(c) || !isPartyMember(c) || critter_is_dead(c)) {
+        return false;
+    }
+    RtActor* a = rt_actor_of(c);
+    char whoText[16];
+    rt_squad_who_text(c, whoText, sizeof(whoText));
+
+    if (item == NULL) {
+        // Auto: the AI chooses again (by skill, rt_ensure_weapon_drawn) at its next draw.
+        RtSquadPref* p = rt_squad_pref_find(c->id);
+        int was = p != NULL ? p->weaponPid : -1;
+        if (p != NULL) {
+            p->weaponPid = -1;
+            p->weaponLapsed = false;
+            p->weaponHopeless = false;
+            rt_squad_pref_tidy(c->id);
+        }
+        if (a != NULL) {
+            a->weapon_checked = false;
+            a->plan_valid = false;
+        }
+        trace_event(TRACE_FLOW, "squad-weapon", "auto id=%d pid=%d was=%d t=%.2f", c->id, c->pid, was, rt_clock);
+        trace_event(TRACE_ACTION, "squad-order", "order=weapon target=auto companions=1 skipped=0 why=ok speaker=%d t=%.2f who=%s",
+            c->id, rt_clock, whoText);
+        rt_squad_say(c, "Got it.");
+        return true;
+    }
+
+    // Its own, a weapon, one its body can hold (the wheel offers no other) -- and one it can fire.
+    bool carried = false;
+    Inventory* inventory = &(c->data.inventory);
+    for (int i = 0; i < inventory->length && !carried; i++) {
+        carried = inventory->items[i].item == item;
+    }
+    const char* refused = NULL;
+    if (!carried) {
+        refused = "not-his";
+    } else if (!rt_squad_weapon_holdable(c, item)) {
+        refused = "cannot-hold";
+    } else if (!rt_squad_weapon_loaded(c, item)) {
+        refused = "dry";
+    }
+    RtSquadPref* p = refused == NULL ? rt_squad_pref_get(c->id) : NULL;
+    if (refused == NULL && p == NULL) {
+        refused = "full";
+    }
+    if (refused != NULL) {
+        trace_event(TRACE_ACTION, "squad-order", "order=weapon target=%d companions=0 skipped=0 why=%s speaker=-1 t=%.2f who=%s",
+            item->pid, refused, rt_clock, whoText);
+        if (strcmp(refused, "dry") == 0) {
+            rt_squad_say(c, "Out of ammo.");
+        }
+        return false;
+    }
+    int was = p->weaponPid;
+    p->weaponPid = item->pid;
+    p->weaponLapsed = false;
+    p->weaponHopeless = false;
+    if (a != NULL) {
+        // Taken out at its next free beat (rt_squad_weapon_step) -- after the mode, with the world moving again.
+        a->weapon_checked = false;
+        a->checked_hand = NULL;
+        a->plan_valid = false;
+    }
+    trace_event(TRACE_FLOW, "squad-weapon", "pin id=%d pid=%d wpn=%d was=%d hand=%d t=%.2f", c->id, c->pid, item->pid, was,
+        inven_right_hand(c) != NULL ? inven_right_hand(c)->pid : -1, rt_clock);
+    trace_event(TRACE_ACTION, "squad-order", "order=weapon target=%d companions=1 skipped=0 why=ok speaker=%d t=%.2f who=%s",
+        item->pid, c->id, rt_clock, whoText);
+    rt_squad_say(c, "Got it.");
+    return true;
+#else
+    (void)c;
+    (void)item;
+    return false;
+#endif
+}
+
+void combat_rt_squad_forget_weapon(Object* c, const char* why)
+{
+    if (c == NULL || rt_squad_pref_count == 0) {
+        return;
+    }
+    RtSquadPref* p = rt_squad_pref_find(c->id);
+    if (p == NULL || p->weaponPid < 0) {
+        return;
+    }
+    trace_event(TRACE_FLOW, "squad-weapon", "auto id=%d pid=%d was=%d why=%s t=%.2f", c->id, c->pid, p->weaponPid,
+        why != NULL ? why : "-", rt_clock);
+    p->weaponPid = -1;
+    p->weaponLapsed = false;
+    p->weaponHopeless = false;
+    rt_squad_pref_tidy(c->id);
+}
+
+Object* combat_rt_squad_focus_of(Object* c)
+{
+    if (c == NULL) {
+        return rt_focus_live() ? rt_squad_focus : NULL;
+    }
+    return rt_focus_of(rt_actor_of(c));
+}
+
+// --- the squad command mode's slowdown (see RT_SQUAD_SLOW_SECONDS) ---
+
+// Where `p` is drawn now (its sprite's middle, the glide of smooth movement included), measured from the hex `ref` --
+// the one it stood on at the opening, a fixed spot on the map, so the camera easing under it does not count as a move.
+static int rt_squad_slow_probe_ref = -1;
+
+static bool rt_squad_drawn_at(Object* p, int ref, int* x, int* y)
+{
+    if (p == NULL || obj_dude == NULL || p->tile == -1 || p->elevation != obj_dude->elevation || ref < 0) {
+        return false;
+    }
+    int rx;
+    int ry;
+    if (tile_coord(ref, &rx, &ry, p->elevation) != 0) {
+        return false;
+    }
+    Rect b;
+    obj_bound(p, &b);
+    *x = (b.ulx + b.lrx) / 2 - rx;
+    *y = (b.uly + b.lry) / 2 - ry;
+    return true;
+}
+
+static bool rt_squad_probe_at(int* x, int* y)
+{
+    return rt_squad_drawn_at(rt_squad_slow_probe, rt_squad_slow_probe_ref, x, y);
+}
+
+// `p` moved this many pixels since (x, y), which becomes where it is now; -1 without it.
+static int rt_squad_drawn_moved(Object* p, int ref, int* x, int* y)
+{
+    int nx;
+    int ny;
+    if (!rt_squad_drawn_at(p, ref, &nx, &ny)) {
+        return -1;
+    }
+    int moved = abs(nx - *x) + abs(ny - *y);
+    *x = nx;
+    *y = ny;
+    return moved;
+}
+
+static int rt_squad_probe_moved(int* x, int* y)
+{
+    return rt_squad_drawn_moved(rt_squad_slow_probe, rt_squad_slow_probe_ref, x, y);
+}
+
+// The rate the world runs at, against real time: 1 with no mode up, the slowdown's eased fall while it runs (never
+// under RT_SQUAD_SLOW_FLOOR), 0 once it has run out -- then the world holds still, and the hold is latched and traced
+// here, the first time anyone asks after the slowdown's end (the animation clock, the combat model or the pad's
+// hold, whichever comes first in that frame).
+static float rt_squad_slow_rate()
+{
+    if (!rt_squad_mode_open) {
+        return 1.0f;
+    }
+    if (rt_squad_slow_done) {
+        return 0.0f;
+    }
+    float s = (float)(get_time() - rt_squad_slow_since) / (RT_SQUAD_SLOW_SECONDS * 1000.0f);
+    if (s >= 1.0f) {
+        rt_squad_slow_done = true;
+        rt_squad_slow_held_at = get_time();
+        rt_squad_slow_rt_held = rt_clock;
+        int moved = rt_squad_probe_moved(&rt_squad_slow_probe_x, &rt_squad_slow_probe_y);
+        rt_squad_slow_probe_held_x = rt_squad_slow_probe_x;
+        rt_squad_slow_probe_held_y = rt_squad_slow_probe_y;
+        trace_event(TRACE_FLOW, "squad-mode", "freeze after=%.2f rtSlowed=%.3f probe=%d moved=%d t=%.2f",
+            (float)(rt_squad_slow_held_at - rt_squad_slow_since) / 1000.0f, rt_clock - rt_squad_slow_rt_open,
+            rt_squad_slow_probe != NULL ? rt_squad_slow_probe->id : -1, moved, rt_clock);
+        return 0.0f;
+    }
+    if (s < 0.0f) {
+        s = 0.0f;
+    }
+    float rate = 1.0f - s * s * (3.0f - 2.0f * s); // smoothstep, from 1 down to 0
+    return rate < RT_SQUAD_SLOW_FLOOR ? RT_SQUAD_SLOW_FLOOR : rate;
+}
+
+// A line every RT_SQUAD_SLOW_TRACE_MS while it slows (from combat_rt_update, with the frame's scaled dt applied): the
+// rate, how far rt_clock and the probe got since the last line -- both less and less, then nothing at the hold.
+static void rt_squad_slow_trace(float rate)
+{
+    unsigned int now = get_time();
+    if (now - rt_squad_slow_traced_at < RT_SQUAD_SLOW_TRACE_MS) {
+        return;
+    }
+    int moved = rt_squad_probe_moved(&rt_squad_slow_probe_x, &rt_squad_slow_probe_y);
+    int dudeMoved = rt_squad_drawn_moved(obj_dude, rt_squad_slow_dude_ref, &rt_squad_slow_dude_x, &rt_squad_slow_dude_y);
+    trace_event(TRACE_FLOW, "squad-mode", "slow f=%.2f after=%.2f rt=+%.3f probe=%d moved=%d dude=%d t=%.2f", rate,
+        (float)(now - rt_squad_slow_since) / 1000.0f, rt_clock - rt_squad_slow_rt_traced,
+        rt_squad_slow_probe != NULL ? rt_squad_slow_probe->id : -1, moved, dudeMoved, rt_clock);
+    rt_squad_slow_traced_at = now;
+    rt_squad_slow_rt_traced = rt_clock;
+}
+
+// The probe for the traces: the critter on the move (walking, running) nearest the dude on his floor, else none.
+static Object* rt_squad_slow_pick_probe()
+{
+    Object* best = NULL;
+    int bestDist = INT_MAX;
+    for (int i = 0; i < rt_actor_count; i++) {
+        Object* c = rt_actors[i].obj;
+        if (c == NULL || c == obj_dude || c->tile == -1 || obj_dude == NULL || c->elevation != obj_dude->elevation
+            || critter_is_dead(c)) {
+            continue;
+        }
+        int anim = FID_ANIM_TYPE(c->fid);
+        if (anim != ANIM_WALK && anim != ANIM_RUNNING) {
+            continue;
+        }
+        int dist = obj_dist(obj_dude, c);
+        if (dist < bestDist) {
+            best = c;
+            bestDist = dist;
+        }
+    }
+    return best;
+}
+
+void combat_rt_squad_mode_set_open(bool open, const char* why)
+{
+    if (open == rt_squad_mode_open) {
+        return;
+    }
+    if (!open) {
+        // How it ended: in the slowdown (an order given at once), or after the hold -- and that the hold held: neither
+        // rt_clock nor the probe moved from the freeze to now.
+        bool held = rt_squad_slow_done;
+        int probeHeld = -1;
+        if (held && rt_squad_probe_at(&rt_squad_slow_probe_x, &rt_squad_slow_probe_y)) {
+            probeHeld = abs(rt_squad_slow_probe_x - rt_squad_slow_probe_held_x)
+                + abs(rt_squad_slow_probe_y - rt_squad_slow_probe_held_y);
+        }
+        rt_squad_mode_open = false;
+        trace_event(TRACE_FLOW, "squad-mode", "close why=%s slowed=%.2f frozen=%d heldMs=%u rtHeld=%.3f probeHeld=%d t=%.2f",
+            why != NULL ? why : "-",
+            (float)((held ? rt_squad_slow_held_at : get_time()) - rt_squad_slow_since) / 1000.0f, held ? 1 : 0,
+            held ? get_time() - rt_squad_slow_held_at : 0u, held ? rt_clock - rt_squad_slow_rt_held : 0.0f, probeHeld,
+            rt_clock);
+    } else {
+        rt_squad_mode_open = true;
+        rt_squad_slow_since = get_time();
+        rt_squad_slow_done = false;
+        rt_squad_slow_rt_open = rt_clock;
+        rt_squad_slow_rt_traced = rt_clock;
+        rt_squad_slow_traced_at = rt_squad_slow_since;
+        rt_squad_slow_probe = rt_squad_slow_pick_probe();
+        rt_squad_slow_probe_ref = rt_squad_slow_probe != NULL ? rt_squad_slow_probe->tile : -1;
+        rt_squad_slow_probe_x = 0;
+        rt_squad_slow_probe_y = 0;
+        rt_squad_probe_at(&rt_squad_slow_probe_x, &rt_squad_slow_probe_y);
+        rt_squad_slow_dude_ref = obj_dude != NULL ? obj_dude->tile : -1;
+        rt_squad_slow_dude_x = 0;
+        rt_squad_slow_dude_y = 0;
+        rt_squad_drawn_at(obj_dude, rt_squad_slow_dude_ref, &rt_squad_slow_dude_x, &rt_squad_slow_dude_y);
+        trace_event(TRACE_FLOW, "squad-mode", "open why=%s slow=%.2f probe=%d probePid=%d t=%.2f",
+            why != NULL ? why : "-", RT_SQUAD_SLOW_SECONDS, rt_squad_slow_probe != NULL ? rt_squad_slow_probe->id : -1,
+            rt_squad_slow_probe != NULL ? rt_squad_slow_probe->pid : -1, rt_clock);
+    }
+}
+
+bool combat_rt_squad_mode_is_open()
+{
+    return rt_squad_mode_open;
+}
+
+bool combat_rt_squad_mode_frozen()
+{
+    return rt_squad_mode_open && rt_squad_slow_rate() <= 0.0f;
+}
+
+float combat_rt_world_rate()
+{
+    return rt_enabled ? rt_squad_slow_rate() : 1.0f;
+}
+
+void combat_rt_set_squad_mode_hooks(CombatRtSquadOverlayFn overlay, CombatRtSquadForgetFn forget)
+{
+    rt_squad_overlay_fn = overlay;
+    rt_squad_forget_fn = forget;
 }
 
 // actions.cc, at a flight's launch (action_rt_launch_flight): the tile it flies to (RtInFlight.landTile).
@@ -20635,7 +23549,7 @@ static void rt_master_scream_tick(Object* master, bool masterHostile)
     }
     if (rt_scream_speaking) {
         // As his line ends, but never later than rt_scream_at, and not while a wheel holds the world.
-        if ((gsound_speech_playing() && rt_clock < rt_scream_at) || radial_wheel_is_open()) {
+        if ((gsound_speech_playing() && rt_clock < rt_scream_at) || rt_world_frozen()) {
             return;
         }
     } else if (rt_clock < rt_scream_at) {
@@ -20954,7 +23868,10 @@ void combat_rt_update(float dt)
     // every in-flight commit are all keyed off rt_clock, so none of them tick while you choose.
     // (gamepad_ui additionally suspends the engine's own background processes, which is what stops
     // the animations; this half stops the combat model.)
-    if (radial_wheel_is_open()) {
+    // SQUAD COMMAND: the squad command mode holds it exactly as a wheel does (combat_rt_squad_mode_set_open) -- an
+    // order is a decision too, given with the world held still -- but only once its slowdown has run out (his pick:
+    // first a slowdown, then the stop; rt_squad_slow_rate, below).
+    if (rt_world_frozen()) {
         return;
     }
 
@@ -20977,7 +23894,20 @@ void combat_rt_update(float dt)
     rt_sample_speed_mult();
     dt *= combat_rt_time_scale();
 
+    // ...and the squad command mode's slowdown (RT_SQUAD_SLOW_SECONDS) rides it on its way to the hold above: the same
+    // one number, eased from 1 toward 0, so the whole combat model winds down together. It is kept out of
+    // combat_rt_time_scale on purpose -- that one also times every animation as it starts (compute_tpf); the
+    // animations get this rate through their own clock instead (combat_rt_world_rate).
+    float squadSlow = rt_squad_slow_rate();
+    if (squadSlow < 1.0f) {
+        dt *= squadSlow;
+    }
+
     rt_clock += dt;
+
+    if (squadSlow < 1.0f) {
+        rt_squad_slow_trace(squadSlow);
+    }
 
     if (isInCombat()) {
         rt_last_fight_clock = rt_clock; // the weapon amnesty runs from the last moment of a fight
@@ -21569,6 +24499,9 @@ void combat_rt_update(float dt)
     rt_tracers_tick();
     // ...and the rings where the blasts will go off, after the commits above took the ones that went off.
     rt_blast_rings_tick();
+    // ...and the squad's focus (SQUAD ORDERS): over when its target died or left the floor, its chevron with it.
+    rt_focus_tick();
+    rt_squad_mark_tick();
 
     for (int i = 0; i < rt_actor_count; i++) {
         rt_update_actor(&rt_actors[i], dt);
@@ -21683,6 +24616,7 @@ void combat_rt_update(float dt)
         }
         if (!engaged) {
             rt_forget_fight_hurts();
+            rt_squad_fight_over(); // SQUAD COMMAND: a weapon pick hopeless in this fight is his pick again
         }
 
         if (engaged) {
@@ -22433,6 +25367,9 @@ bool combat_rt_fight_in_view()
 bool combat_rt_end_combat()
 {
     if (!rt_engaged) {
+        // No fight on, but the squad still stands down (review 2026-11-11): a focus nobody could get at yet keeps its
+        // chevron and sends them at it the moment they can. (Every companion's own focus too -- SQUAD COMMAND.)
+        rt_focus_clear_all("end-combat");
         return true;
     }
 
@@ -22447,7 +25384,11 @@ bool combat_rt_end_combat()
         // and the very next frame the IDLE branches ask their own question: a hostile engages the nearest of us it
         // SEES, a companion the nearest hostile it perceives (vanilla's wall-blind test, as before). With walls in
         // the hunters' sight those differ from rt_wants_to_stop below, and the fight closed and reopened at once.
+        // HOLD FIRE (SQUAD COMMAND): one holding its fire takes nobody up again, so it does not keep the fight on.
         if (a->friendly) {
+            if (rt_squad_holds_fire(npc)) {
+                continue;
+            }
             bool ranAway = (npc->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0;
             Object* enemy = ranAway ? NULL : rt_nearest_hostile(npc);
             if (enemy != NULL && is_within_perception(npc, enemy)) {
@@ -22511,6 +25452,10 @@ bool combat_rt_end_combat()
         }
     }
     rt_forget_fight_hurts();
+    // The squad stands down with him (SQUAD ORDERS): a focus left standing would send the companions straight back
+    // at it and start the fight he just ended -- the squad's and every companion's own (SQUAD COMMAND).
+    rt_focus_clear_all("end-combat");
+    rt_squad_fight_over();
 
     rt_engaged = false;
     combat_state &= ~COMBAT_STATE_0x01;
@@ -22576,6 +25521,10 @@ void combat_rt_terminate_from_script()
     rt_player_intent_ttl = 0.0f;
     rt_script_end_rt_gate = true;
     rt_script_end_rt_until = rt_clock + RT_SCRIPT_END_RT_HOLD;
+    // ...and the squad's (SQUAD ORDERS): a focus left on Cameron would send the companions back at the one the
+    // script just made peaceful -- nor any companion's own (SQUAD COMMAND).
+    rt_focus_clear_all("script-end");
+    rt_squad_fight_over();
 
     trace_event(TRACE_FLOW, "end-combat", "script actors=%d t=%.2f", rt_actor_count, rt_clock);
 }
@@ -22734,7 +25683,9 @@ void combat_rt_notify_attack(Object* attacker, Object* defender)
     for (int i = 0; i < rt_actor_count; i++) {
         if (rt_actors[i].obj == attacker) {
             rt_actors[i].engine_target = defender;
-            if (rt_actors[i].state == RT_IDLE) {
+            // ...not for a companion told to hold its fire (SQUAD COMMAND): its own script's attack() at another
+            // critter is an attack too. (One at the dude, above, is no friend's any more and is not held.)
+            if (rt_actors[i].state == RT_IDLE && !(rt_actors[i].friendly && rt_squad_holds_fire(attacker))) {
                 rt_actors[i].target = defender;
                 rt_actors[i].state = RT_CHASE;
             }
@@ -22847,6 +25798,34 @@ void combat_rt_notify_critter_removed(Object* removed)
     rt_shot_tail_drop(removed);
 
     // Drop combat_rt's own cached pointers.
+    if (rt_squad_focus == removed) {
+        rt_focus_clear("gone"); // the chevron is erased by its tick, from its own tile and offset
+    }
+    // SQUAD COMMAND: a companion's own focus on it, the companion's own orders if it is the one going, its chevron and
+    // the mode's own pointers (combat_rt_set_squad_mode_hooks).
+    for (int i = 0; i < rt_squad_order_count;) {
+        RtSquadOrder* o = &rt_squad_orders[i];
+        if (o->focus == removed) {
+            rt_focus_own_clear(o, "gone");
+        }
+        if (o->fireRefused == removed) {
+            o->fireRefused = NULL;
+        }
+        if (o->obj == removed) {
+            rt_squad_heal_end(o, "gone");
+            rt_focus_own_clear(o, "companion-gone");
+            rt_squad_orders[i] = rt_squad_orders[--rt_squad_order_count];
+            continue;
+        }
+        i++;
+    }
+    rt_squad_mark_forget(removed);
+    if (rt_squad_slow_probe == removed) {
+        rt_squad_slow_probe = NULL;
+    }
+    if (rt_squad_forget_fn != NULL) {
+        rt_squad_forget_fn(removed);
+    }
     if (rt_lock_target == removed) {
         rt_lock_target = NULL;
     }
@@ -23366,7 +26345,10 @@ bool combat_rt_critter_fighting(Object* critter)
     }
     for (int i = 0; i < rt_actor_count; i++) {
         if (rt_actors[i].obj == critter) {
-            return rt_actors[i].state != RT_IDLE || rt_actors[i].hostile;
+            // ...and a companion on HOLD (SQUAD ORDERS) with nothing to fight just now: its party script's heartbeat --
+            // which on an encounter map runs through a fight, scripts.cc -- would walk it to the dude it was told to
+            // stay away from (vanilla ran no critter_p_proc during combat at all).
+            return rt_actors[i].state != RT_IDLE || rt_actors[i].hostile || rt_actors[i].party_dist == RT_DIST_STAY;
         }
     }
     return false;

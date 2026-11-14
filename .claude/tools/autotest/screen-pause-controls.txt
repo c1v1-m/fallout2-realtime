@@ -28,9 +28,9 @@ tap 9400 B
 note 11500 the world should be back
 
 # the checks (run.js)
-# 27 rows in ctrl_lines (BACK hold's run to an exit included), 3 of them blank spacers; 220x372 on a PC
-# (font 101), the menu is 164x217
-expect \[FLOW/controls-open\] rows=24 size=\d+x\d+
+# 29 rows in ctrl_lines (BACK hold's run to an exit, LT + D-pad's squad orders and LT + A's squad command
+# included), 3 of them blank spacers; about 220x396 on a PC (font 101), the menu is 164x217
+expect \[FLOW/controls-open\] rows=26 size=\d+x\d+
 expect-count 2 \[FLOW/controls-open\]
 expect \[FLOW/controls-closed\] by=b
 expect \[FLOW/controls-closed\] by=y

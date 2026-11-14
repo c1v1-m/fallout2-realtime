@@ -1,0 +1,35 @@
+# SQUAD COMMAND (2026-11-12, his design "A", „změň zbraň“): the WEAPON pick.
+# Myron holds an EMPTY 10mm pistol with no rounds for it: picking it is refused (why=dry, "Out of ammo."). Vic holds a
+# LOADED 10mm pistol -- the AI's own choice, he is better with it -- and carries a knife: picking the knife is taken, he
+# takes it in hand at once (free, like the AI's draw), and the AI keeps to it through the fight with a knife raider that
+# comes at the dude: no draw by skill back to the pistol. At 10 s Auto hands the choice back to the AI.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-weapon.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-weapon
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude stat PE 8
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 1 wield 8 item 29 3 item 4 1 party
+spawn 16777376 20302 rot 2 wield 8 empty party
+spawn 16777455 22100 rot 5 wield 4 hostile hp 30
+
+squad 400 weapon 16777376 8
+squad 600 weapon 16777278 4
+squad 10000 auto 16777278
+note 15000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=weapon target=8 companions=0 skipped=0 why=dry speaker=-1 t=[\d.]+ who=\d+
+expect \[ACTION/squad-order\] order=weapon target=4 companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=18062
+expect \[FLOW/squad-weapon\] pin id=18062 pid=16777278 wpn=4 was=-1 hand=8
+expect \[FLOW/squad-weapon\] take id=18062 pid=16777278 wpn=4 was=8 why=pin
+expect \[FLOW/squad-weapon\] keep id=18062 pid=16777278 wpn=4
+expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777455
+expect \[FLOW/squad-weapon\] auto id=18062 pid=16777278 was=4
+# kept: the AI never draws another weapon for him while the pick holds, and the pick never lapses
+expect-not \[FLOW/(draw-weapon|npc-swap-weapon)\] (npc )?(id=18062 )?pid=16777278
+expect-not \[FLOW/squad-weapon\] (lapse|hopeless) id=18062

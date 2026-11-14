@@ -867,6 +867,20 @@ static bool gpui_hostile_in_range_cached = false;
 // run their own input loop, which must keep receiving gamepad input.
 static bool gpui_in_mouse_hook = false;
 
+// --- THE SQUAD COMMAND MODE: its flags, read from the hook (the mode itself is further down, gpui_squad_*) ---
+//
+// LT + A opens it (Fallout 2 Realtime, 2026-11-12, his design "A": „přidej nestřílej a vyléčit mě, změň zbraň, můžu
+// mu i říkat kam má jít?“). The flag lives here for both games so every wheel, the hook and the use-on tracker can
+// stand aside for it; only Fallout 2 ever sets it (Fallout 1 has no COMBAT CONTROL to order with).
+static bool gpui_squad_open = false;
+// "Some companion of his is on this floor, alive and awake" -- sampled once a frame by the tick (combat_rt reads the
+// party list) and read by the hook, which must stay I/O-free (see gpui_hostile_in_range_cached). Without one, LT + A
+// stays what A always was.
+static bool gpui_squad_have_companion = false;
+// LT + A pressed (gpui_action_buttons); the mode opens on the safe tick (gpui_drain_requests) -- it makes windows.
+static bool gpui_squad_open_pending = false;
+static unsigned int gpui_squad_open_since = 0;
+
 // A/Y -> left mouse button, RB -> right mouse button, and left-stick navigation
 // of hold-drag action popups. A's role is decided at the press edge and latched
 // for the press: in a modal menu A always clicks; in gameplay A interacts (left
@@ -899,6 +913,8 @@ static void gpui_action_buttons(SDL_GameController* pad, int* dx, int* dy, int* 
     // Last time (ms) a hostile was in attack range or a lock was held -- the anchor for
     // the post-kill loot cooldown that keeps an A-spam tail from looting a fresh corpse.
     static unsigned int gpui_combat_a_time = 0;
+    // This A press opened the squad command mode (LT + A): no interaction, no loot, no click comes of it.
+    bool squadPress = false;
 
     bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
     bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
@@ -957,7 +973,26 @@ static void gpui_action_buttons(SDL_GameController* pad, int* dx, int* dy, int* 
         }
         bool postKillCooldown = get_time() - gpui_combat_a_time < GPUI_POST_KILL_LOOT_MS;
 
-        if (aEdge) {
+#if FALLOUT_RT_GAME == 2
+        // ⚠️ LT + A = THE SQUAD COMMAND MODE (2026-11-12, his design "A", „přidej nestřílej a vyléčit mě, změň zbraň,
+        // můžu mu i říkat kam má jít?“): with LT held and a companion of his on this floor, A opens it instead of acting
+        // -- taken here, on the PRESS, as LT + Y and LT + D-pad are, and SPENT: no interaction, no loot, no walk-click,
+        // no use-on hold (gpui_useon_arm stands aside while the mode is up). Not over a menu, a conversation, a script's
+        // scene, a wheel or an armed crosshair (there A is the confirm). Opened on the safe tick (gpui_drain_requests).
+        // With nobody to order, LT + A is what A always was -- the adjacent corpse's loot under a held lock.
+        if (aEdge && gpui_squad_have_companion && !gpui_squad_open && gamepad_ui_aim_trigger_held()
+            && !gamepad_ui_menu_active() && !dialog_active() && !gpui_targeting_cursor_armed() && intface_is_enabled()
+            && !combat_rt_script_ui_locked() && !gpui_action_popup_active && !radial_wheel_is_open()) {
+            squadPress = true;
+            gpui_squad_open_pending = true;
+            gpui_squad_open_since = get_time();
+            gpui_a_interacting = true;
+            aLooting = true; // the press is spent: no click at the cursor while it stays down
+            trace_event(TRACE_INPUT, "squad-press", "src=lt+a");
+        }
+#endif
+
+        if (aEdge && !squadPress) {
             // A-button arbitration: attack vs. world interact.
             //  - Menu / dialog ALWAYS interact (so A picks a button / reply; a stale lock or
             //    hostile-in-range left over from combat must not swallow the click).
@@ -1099,7 +1134,7 @@ static void gpui_action_buttons(SDL_GameController* pad, int* dx, int* dy, int* 
             unsigned int now = get_time();
             bool second = now - aLastTapAt <= GPUI_LOOT_DOUBLE_TAP_MS;
 
-            if (second && !aTapLooted
+            if (second && !aTapLooted && !squadPress
                 && !gpui_targeting_cursor_armed()
                 && !gamepad_ui_menu_active()
                 && !dialog_active()
@@ -1374,6 +1409,13 @@ static bool gpui_reload_charged = false;
 // called-shot window the pad opens on R3. That window is modal, so the key only asks and the safe
 // tick opens it (gpui_drain_requests) -- the same deferral every item use here gets.
 static bool gpui_called_shot_pending = false;
+
+#if FALLOUT_RT_GAME == 2
+// SQUAD ORDERS (2026-11-11): the order an LT + D-pad press asked for (COMBAT_RT_ORDER_*), or -1. Given on the safe
+// tick (gpui_drain_requests): it floats a line over a companion and repaints the world, which the hook may not do.
+static int gpui_squad_order_pending = -1;
+static unsigned int gpui_squad_order_since = 0;
+#endif
 
 // When the player last moved the REAL mouse or pressed one of its buttons (see gpui_mouse_hook_impl).
 // The mouse only aims and attacks while it is actually being used: a pad player whose cursor merely
@@ -1712,6 +1754,18 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
         if (yNow) {
             gpui_consumed_y = true;
         }
+        // ...and a D-pad direction still down (review 2026-11-11): the forget below wipes the hold on every frame a
+        // menu is up, so a direction held as one closes (the called-shot window is moved with the D-pad, under LT)
+        // read as a fresh press -- with LT a squad order, without it a tap or a hold. Spent until it is let go.
+        int dirHeld = upNow ? GPUI_DPAD_PIPBOY
+            : downNow     ? GPUI_DPAD_CHAR
+            : leftNow     ? GPUI_DPAD_AUTOMAP
+            : rightNow    ? GPUI_DPAD_END_COMBAT
+                          : -1;
+        if (dirHeld != -1) {
+            gpui_dpad_held = dirHeld;
+            gpui_dpad_handled = true;
+        }
         return;
     }
 
@@ -1936,13 +1990,48 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
                     gsound_play_sfx_file("iisxxxx1");
                 }
             }
+#if FALLOUT_RT_GAME == 2
+            bool fromRest = gpui_dpad_held == -1;
+#endif
             gpui_dpad_held = dirNow;
             gpui_dpad_down_time = get_time();
             gpui_dpad_handled = false;
+#if FALLOUT_RT_GAME == 2
+            // ⚠️ LT + D-PAD = SQUAD ORDERS (2026-11-11, his design "B", „Obojí, nejdřív B“): with LT held, a D-pad
+            // PRESS orders every companion at once -- Up attack the locked target first, Down follow, Left hold, Right
+            // charge (combat_rt_squad_order). Taken on the press, as LT+Y is: on the release, letting go of LT a hair
+            // early would turn the order into a prompt cycle or a scroll. The press is spent either way -- no tap
+            // (the prompt, the messages) and no hold (a screen) comes of it. Only from a D-pad at rest: rolling the
+            // thumb from one direction into the next is not a second order. Without LT nothing here changes.
+            if (dirNow != -1 && gamepad_ui_aim_trigger_held()) {
+                gpui_dpad_handled = true;
+                if (fromRest) {
+                    int order = COMBAT_RT_ORDER_CHARGE; // Right
+                    if (dirNow == GPUI_DPAD_PIPBOY) {
+                        order = COMBAT_RT_ORDER_ATTACK; // Up
+                    } else if (dirNow == GPUI_DPAD_CHAR) {
+                        order = COMBAT_RT_ORDER_FOLLOW; // Down
+                    } else if (dirNow == GPUI_DPAD_AUTOMAP) {
+                        order = COMBAT_RT_ORDER_HOLD; // Left
+                    }
+                    gpui_squad_order_pending = order;
+                    gpui_squad_order_since = get_time();
+                    trace_event(TRACE_INPUT, "squad-press", "dir=%d order=%d", dirNow, order);
+                }
+            }
+#endif
         }
 
         if (dirNow != -1 && !gpui_dpad_handled && get_time() - gpui_dpad_down_time >= GPUI_DPAD_HOLD_MS) {
             gpui_dpad_handled = true;
+#if FALLOUT_RT_GAME == 2
+            // ...and no screen opens while LT is down (2026-11-11): LT came down during this hold (an order is taken
+            // only on a press with LT already held, above), so the hold is nobody's -- LT + D-pad is the squad's.
+            if (gamepad_ui_aim_trigger_held()) {
+                trace_event(TRACE_INPUT, "dpad-hold-lt", "dir=%d", dirNow);
+                return;
+            }
+#endif
             switch (dirNow) {
             case GPUI_DPAD_PIPBOY:
                 if (isInCombat()) {
@@ -2870,6 +2959,7 @@ enum {
     GPUI_WHEEL_WEAPON,
     GPUI_WHEEL_AMMO,
     GPUI_WHEEL_EXIT, // the BACK hold's "which exit" (gpui_exit_wheel)
+    GPUI_WHEEL_SQUAD_WEAPON, // a companion's weapons, from the squad command mode (gpui_squad_weapon_open)
 };
 static int gpui_wheel_owner = GPUI_WHEEL_NONE;
 
@@ -2998,7 +3088,8 @@ static void gpui_skill_wheel(SDL_GameController* pad)
         return;
     }
 
-    if (l3Edge && !blocked) {
+    // Not over the squad command mode (LT + A): L3 does nothing there.
+    if (l3Edge && !blocked && !gpui_squad_open) {
         releasedOn = -1;
         gpui_open_skill_wheel();
         if (radial_wheel_is_open()) {
@@ -3214,10 +3305,19 @@ static void gpui_ammo_detail(Object* ammo, char* out, size_t size)
 // "damage, what it eats, and how much of that I am carrying". The ammo count is the whole point of
 // the line: a gun's magazine is already on its badge, but whether there is a second magazine in
 // your pack is what actually decides which weapon you pull.
+// ...counting the rounds in `owner`'s pack: the dude's for his own wheel, a companion's for the squad command's WEAPON
+// wheel (gpui_squad_weapon_open).
+static void gpui_weapon_detail_of(Object* owner, Object* weapon, char* out, size_t size);
+
 static void gpui_weapon_detail(Object* weapon, char* out, size_t size)
 {
+    gpui_weapon_detail_of(obj_dude, weapon, out, size);
+}
+
+static void gpui_weapon_detail_of(Object* owner, Object* weapon, char* out, size_t size)
+{
     out[0] = '\0';
-    if (weapon == NULL) {
+    if (weapon == NULL || owner == NULL) {
         return;
     }
 
@@ -3239,7 +3339,7 @@ static void gpui_weapon_detail(Object* weapon, char* out, size_t size)
     // every box of that proto, not the number of boxes: "38" answers the question, "2 boxes" does
     // not without knowing how full they are.
     int rounds = 0;
-    Inventory* inventory = &(obj_dude->data.inventory);
+    Inventory* inventory = &(owner->data.inventory);
     for (int i = 0; i < inventory->length; i++) {
         Object* item = inventory->items[i].item;
         if (item != NULL && item->pid == ammoPid) {
@@ -4933,6 +5033,14 @@ static void gpui_quick_wheel(SDL_GameController* pad)
         }
         return;
     }
+    // ...and the same under the squad command mode (LT + A), where B backs out of it: held on after it closes, that B
+    // must not open the drug wheel 220 ms later.
+    if (gpui_squad_open) {
+        if (qbEdge) {
+            qbHandled = true;
+        }
+        return;
+    }
 
     // Don't bring up (or keep up) the wheel over a modal menu / inventory / a disabled interface
     // bar -- and not while the aimed-shot picker is up.
@@ -5433,8 +5541,8 @@ static void gpui_lockpick_retry_tick()
     }
 
     // Wait for the attempt to play out: the walk there, the hands, the script's roll.
-    if (age < GPUI_PICK_RETRY_MIN_MS || anim_busy(obj_dude) || radial_wheel_is_open() || gamepad_ui_menu_active()
-        || dialog_active() || inven_any_open() || !intface_is_enabled()) {
+    if (age < GPUI_PICK_RETRY_MIN_MS || anim_busy(obj_dude) || radial_wheel_is_open() || gpui_squad_open
+        || gamepad_ui_menu_active() || dialog_active() || inven_any_open() || !intface_is_enabled()) {
         return;
     }
 
@@ -5846,6 +5954,16 @@ static void gpui_weapon_wheel(SDL_GameController* pad)
         gpui_weapon_page = 0; // a fresh summon always starts on the first page
     }
 
+    // Y is the squad command mode's while it is up (LT + A: since 2026-11-13 Y there switches their healing of him,
+    // gpui_squad_mode), and a Y pressed there and held on after it is not a wheel hold -- that one Y closed the mode as
+    // an order. First, above the other wheels' return: the mode's own companion weapon wheel is one of them, and a Y
+    // pressed while it is up must be spent the same way.
+    if (gpui_squad_open) {
+        if (wyEdge) {
+            wyHandled = true;
+        }
+        return;
+    }
     // Ignore the shared overlay while one of the other wheels owns it.
     if (radial_wheel_is_open() && gpui_wheel_owner != GPUI_WHEEL_WEAPON) {
         return;
@@ -8296,8 +8414,8 @@ static void gpui_useon_arm(SDL_GameController* pad)
         return;
     }
 
-    // Nothing to arm from, or somewhere A means something else entirely.
-    if (radial_wheel_is_open() || gamepad_ui_menu_active() || dialog_active() || inven_any_open()
+    // Nothing to arm from, or somewhere A means something else entirely -- the squad command mode's A is an order.
+    if (radial_wheel_is_open() || gpui_squad_open || gamepad_ui_menu_active() || dialog_active() || inven_any_open()
         || !intface_is_enabled() || gpui_aim_picker_active() || gpui_self_nav) {
         return;
     }
@@ -8352,6 +8470,1694 @@ static void gpui_useon_arm(SDL_GameController* pad)
     gpui_cursor_show_time = get_time();
 }
 
+#if FALLOUT_RT_GAME == 2
+// --- THE SQUAD COMMAND MODE: LT + A (Fallout 2 Realtime, 2026-11-12, his design "A") -------------------------------
+//
+// His ask of 2026-11-11: „přidej nestřílej a vyléčit mě, změň zbraň, můžu mu i říkat kam má jít?“ -- hold fire, heal me,
+// change weapon, and can I tell him where to go. Design "A" of the squad orders he approved (the mock-up's left half;
+// the right half, LT + D-pad, is design "B", gpui_button_shortcuts).
+// ⚠️ "WHERE TO GO" WAS TAKEN OUT AGAIN (2026-11-13): „dej pryč ovládání a přikazování companions kam mají přesně chodit
+// … nehodí se to do této action oriented verze“ -- commanding companions exactly where to go does not fit this action
+// version. That was GO: A on free ground sent who to that tile to hold it (the post), green where somebody chosen could
+// get there, with the pathfinder asked once the cursor rested. His picks with it: the mode STAYS, without GO, and Y in
+// it switches their healing of him. GO as it was lives on the branch shelf/squad-orders-with-go.
+// LT + A, in the world, opens this mode. The world first SLOWS DOWN, eased, over 1.5 s (his pick 2026-11-12: „ten efekt
+// bude nejdříve zpomalení a pak zastavení“ -- combat_rt_squad_mode_set_open, RT_SQUAD_SLOW_SECONDS) and then holds
+// still, exactly as under a radial wheel (the engine's own background processes too, gpui_world_hold_sync); the mode
+// answers the pad from its first frame, and an order given while the world still slows is given at once. Its close
+// lets the world run at full speed at once.
+//   WHO     "All" to begin with -- every companion on this floor, alive and awake -- and LB / RB step All -> each one,
+//           nearest first -> All. Every one chosen wears an outline round his sprite (GPUI_SQUAD_OUTLINE_RGB) and his
+//           name in green over his head.
+//   CURSOR  a point on the map, moved by the right stick (the left one too, once it has been back in the centre: it is
+//           the walk stick), starting on the LT-locked enemy, else a few tiles in front of the dude. On a critter's
+//           sprite it takes that critter, else the tile under it; corner brackets frame what it takes.
+//   A       the order for what the cursor is on, named over it and in the legend: an enemy, red ATTACK (corner
+//           brackets round it); the dude, HEAL ME (grey when he is unhurt or nobody chosen has anything to heal with);
+//           a companion, WEAPON (a wheel of what he can hold, and "Auto"). Anything else -- free ground (GO's, until
+//           2026-11-13), a wall, a neutral, the map's black edge: no word, grey brackets round its tile or its sprite,
+//           and A buzzes.
+//   X       HOLD FIRE, or OPEN FIRE when every one chosen already holds it -- the legend says which.
+//   Y       NO HEALING, or HEAL ME AGAIN when every one chosen already keeps his supplies from him -- the legend says
+//           which, as for X (his pick 2026-11-13, his preview „A Heal me   X Hold fire   Y No healing   B Back“, after
+//           a press „Y Heal me again“). It is the party dialogue's own switch, „(Stop patching me up. Save your
+//           supplies.)“ / „(You can patch me up again.)“ (combat_rt_medic_set_treats_player): the same state, either
+//           way round. Their medic beat only -- A on the dude still brings him a stimpak whatever Y says. With the
+//           medic beat switched off (combat_rt_medic_beat_enabled, the test the dialogue hides its line by) the legend
+//           has no Y and Y does nothing, not even the buzz.
+//   D-pad   design B's four for who (Up ATTACK the enemy under the cursor, Down FOLLOW, Left HOLD, Right CHARGE), a
+//           compass of four words beside the cursor.
+//   B       back out, no order.
+// Every order closes the mode (combat_rt_squad_command: the nearest one who took it says so, "On it.", "Holding
+// fire."...); one refused buzzes and leaves it open. LB / RB and the cursor never close it. Its own marks -- the
+// outlines round who, the dotted line from who to the target (to an enemy from every one chosen, to him from the one
+// who would bring the stimpak), the brackets round the target -- are drawn by the tile overlay (gpui_squad_overlay,
+// after combat_rt's own), its words in small windows of their own over the world, each with the world under it as its
+// background (gpui_squad_text_window; the prompt word's way, interact_prompt.cc ip_place_word).
+#define GPUI_SQUAD_MAX 8 // companions it steps through: the party is a handful
+#define GPUI_SQUAD_WPN_AUTO_ID (-2) // the weapon wheel's "Auto" (never -1, radial_wheel_highlight_id's "none")
+#define GPUI_SQUAD_DASH 3 // the dotted line: this many pixels on, as many off
+#define GPUI_SQUAD_BRACKET 6 // an arm of a corner bracket, in pixels
+#define GPUI_SQUAD_BRACKET_GAP 2 // brackets stand this far off the box they frame (a sprite's, a tile's hex)
+// The outline round every one chosen (his pick 2026-11-12, „Obrys postavy“, after „nelíbí se mi zelené kruhy“ about the
+// hexes it replaced): WHITE, palette 220. No outline of the game's own is white -- it must not read as one of them:
+// vanilla's team green (palette 229-232, cycling: the LT lock's colour for a friendly too, combat_rt
+// rt_aim_outline_type_for) and red (243-247: an enemy, the lock on one; the focus chevron is red too), the yellow of an
+// item, a neutral under the lock and a friendly the right stick points at (OUTLINE_TYPE_ITEM, palette 58,
+// interact_prompt.cc ip_set_outline), and vanilla's ochre for a critter out of the line of fire (OUTLINE_TYPE_32,
+// palette 61 -- the badges' gold, palette 60, is next to it: that gold was the other candidate).
+#define GPUI_SQUAD_OUTLINE_RGB ((31 << 10) | (31 << 5) | 31)
+#define GPUI_SQUAD_LINE_CHUNK 48 // a line is repainted in pieces this long, not as one screen-wide box
+// The words' windows are taken down when the mode's tick has not run this long -- a screen came up over the world
+// (its own loop), and MOVE_ON_TOP windows would show through it (the prompt hand's lesson, ip_overlay_guard).
+#define GPUI_SQUAD_GUARD_MS 250
+
+enum {
+    GPUI_SQUAD_ON_NONE, // free ground, a wall, a neutral, the map's black edge: no order there (free ground was GO's)
+    GPUI_SQUAD_ON_ENEMY,
+    GPUI_SQUAD_ON_DUDE,
+    GPUI_SQUAD_ON_COMPANION,
+};
+
+static const char* const gpui_squad_kind_names[] = { "none", "enemy", "dude", "companion" };
+
+static Object* gpui_squad_members[GPUI_SQUAD_MAX]; // this frame's companions, nearest first (combat_rt_squad_members)
+static int gpui_squad_member_count = 0;
+static Object* gpui_squad_who = NULL; // NULL = All
+static float gpui_squad_cx = 0.0f; // the cursor, a point on the screen
+static float gpui_squad_cy = 0.0f;
+static int gpui_squad_tile = -1; // the tile under it
+static Object* gpui_squad_on = NULL; // the critter whose sprite is under it, or NULL
+static int gpui_squad_kind = GPUI_SQUAD_ON_NONE;
+static bool gpui_squad_ok = false; // A's order can be given there (else its word is grey)
+static bool gpui_squad_a_armed = false; // A has been up since the open: the opening press is not an order
+static bool gpui_squad_left_armed = false; // the left stick has been back in the centre since the open
+static bool gpui_squad_just_opened = false; // the open's own tick: the buttons are taken as they are
+static unsigned int gpui_squad_opened_at = 0; // get_time() at the open
+static int gpui_squad_game_at = 0; // the game clock at the open: the close traces how far it moved (not at all)
+static unsigned int gpui_squad_last_tick = 0; // the mode's last tick (gpui_squad_guard)
+static unsigned int gpui_squad_last_move = 0; // the cursor's last move (its speed is per 60th of a second)
+static bool gpui_squad_moving = false; // a stick is pushed (the rest is traced when it lets go)
+// A companion whose name stands aside: the refusal it just floated over its head ("No meds.") is where the name is.
+static Object* gpui_squad_mute = NULL;
+static bool gpui_squad_guard_on = false;
+// What the cursor is pinned to on the map -- the critter it is on, else its tile -- and where that was on the screen
+// at the last tick (gpui_squad_follow_world).
+static Object* gpui_squad_anchor_obj = NULL;
+static int gpui_squad_anchor_tile = -1;
+static int gpui_squad_anchor_x = 0;
+static int gpui_squad_anchor_y = 0;
+static void gpui_squad_anchor_set();
+
+// WEAPON: the wheel of a companion's weapons, while it is up (owner GPUI_WHEEL_SQUAD_WEAPON).
+static Object* gpui_squad_wpn_who = NULL;
+static Object* gpui_squad_wpn_slot[RADIAL_WHEEL_MAX];
+static int gpui_squad_wpn_count = 0;
+
+// The marks on the world, in window coordinates, built on the tick (gpui_squad_paint) and drawn by the tile overlay
+// (gpui_squad_overlay), which reads no object. Measured again every tick: in the mode's first 1.5 s the world still
+// moves under them (the slowdown), after it nothing can -- the camera, the scripts and the edge scroll all hold still.
+// One chosen companion's sprite as the renderer draws it this frame (object.cc _obj_render_object): its art, frame and
+// facing, and where that frame's top-left lands on the screen. Kept by value, so a walk frame or a glide that moved on
+// differs in the change test (gpui_squad_paint_marks) and the outline is drawn again round the new one.
+typedef struct GpuiSquadSprite {
+    int fid;
+    int frame;
+    int rotation;
+    int left; // the frame's top-left, window coordinates
+    int top;
+    int width; // the frame's size
+    int height;
+} GpuiSquadSprite;
+
+typedef struct GpuiSquadDraw {
+    int elevation;
+    int outlineCount;
+    GpuiSquadSprite outline[GPUI_SQUAD_MAX]; // every one chosen: the outline round his sprite
+    int outlineColor;
+    int lineCount;
+    int line[GPUI_SQUAD_MAX][4]; // from x, y to x, y
+    int lineColor;
+    int bracket; // corner brackets round bracketBox: the critter under the cursor, else its tile's hex
+    int bracketBox[4]; // left, top, right, bottom
+    int bracketColor;
+} GpuiSquadDraw;
+static GpuiSquadDraw gpui_squad_draw; // what the overlay draws now
+static bool gpui_squad_draw_on = false;
+static GpuiSquadDraw gpui_squad_painted; // what the world was last repainted with -- erased from where it was
+static bool gpui_squad_painted_on = false;
+
+// One word, or the legend, or the compass: a window of its own over the world (MOVE_ON_TOP, never MODAL -- that would
+// read as a menu, gamepad_ui_menu_active -- and never TRANSPARENT, which GNW only honours while it double-buffers).
+typedef struct GpuiSquadText {
+    bool shown; // `win` is ours
+    int win;
+    int x;
+    int y;
+    int w;
+    int h;
+} GpuiSquadText;
+static GpuiSquadText gpui_squad_legend;
+static GpuiSquadText gpui_squad_label;
+static GpuiSquadText gpui_squad_compass;
+static GpuiSquadText gpui_squad_names[GPUI_SQUAD_MAX];
+
+static int gpui_squad_green()
+{
+    return colorTable[(0 << 10) | (31 << 5) | 0]; // the wheels' green (radial_wheel.cc colorTable[992])
+}
+
+static int gpui_squad_red()
+{
+    return colorTable[(31 << 10) | (0 << 5) | 0]; // the blast dots' and the focus chevron's red
+}
+
+static int gpui_squad_grey()
+{
+    return colorTable[(18 << 10) | (18 << 5) | 18];
+}
+
+static int gpui_squad_white()
+{
+    return colorTable[(31 << 10) | (31 << 5) | 31];
+}
+
+static int gpui_squad_outline_color()
+{
+    return colorTable[GPUI_SQUAD_OUTLINE_RGB];
+}
+
+static void gpui_squad_text_hide(GpuiSquadText* t)
+{
+    if (t->shown) {
+        win_delete(t->win);
+        t->shown = false;
+        t->win = -1;
+    }
+}
+
+static void gpui_squad_windows_hide()
+{
+    gpui_squad_text_hide(&gpui_squad_legend);
+    gpui_squad_text_hide(&gpui_squad_label);
+    gpui_squad_text_hide(&gpui_squad_compass);
+    for (int i = 0; i < GPUI_SQUAD_MAX; i++) {
+        gpui_squad_text_hide(&gpui_squad_names[i]);
+    }
+}
+
+// The net under a screen nobody thought of (see GPUI_SQUAD_GUARD_MS): a background process, so it runs inside every
+// screen's own loop. The tick puts the words back once the world runs again -- or closes the mode, if the screen is
+// still up (gpui_squad_mode's `blocked`).
+static void gpui_squad_guard()
+{
+    if (gpui_squad_open && get_time() - gpui_squad_last_tick > GPUI_SQUAD_GUARD_MS) {
+        gpui_squad_windows_hide();
+    }
+}
+
+// The world under a window at (x, y), w x h, into buf -- false when any of it is off the world window (the bar).
+static bool gpui_squad_copy_under(unsigned char* buf, int x, int y, int w, int h)
+{
+    Rect world;
+    if (display_win == -1 || win_get_rect(display_win, &world) != 0) {
+        return false;
+    }
+    const unsigned char* src = win_get_buf(display_win);
+    if (src == NULL || x < world.ulx || y < world.uly || x + w - 1 > world.lrx || y + h - 1 > world.lry) {
+        return false;
+    }
+    int pitch = world.lrx - world.ulx + 1;
+    for (int row = 0; row < h; row++) {
+        memcpy(buf + row * w, src + (y - world.uly + row) * pitch + (x - world.ulx), w);
+    }
+    return true;
+}
+
+// The window for one piece of text, w x h at (x, y) -- moved inside the world window first -- made, moved, or made
+// again for another size, with the world under it as its background. Returns its buffer to draw the words in (then
+// win_draw), or NULL when it cannot be shown.
+static unsigned char* gpui_squad_text_window(GpuiSquadText* t, int x, int y, int w, int h)
+{
+    Rect world;
+    if (display_win == -1 || win_get_rect(display_win, &world) != 0 || w <= 0 || h <= 0
+        || w > world.lrx - world.ulx + 1 || h > world.lry - world.uly + 1) {
+        gpui_squad_text_hide(t);
+        return NULL;
+    }
+    if (x < world.ulx) {
+        x = world.ulx;
+    } else if (x + w - 1 > world.lrx) {
+        x = world.lrx - w + 1;
+    }
+    if (y < world.uly) {
+        y = world.uly;
+    } else if (y + h - 1 > world.lry) {
+        y = world.lry - h + 1;
+    }
+
+    if (t->shown && (t->w != w || t->h != h)) {
+        gpui_squad_text_hide(t);
+    }
+    if (!t->shown) {
+        t->win = win_add(x, y, w, h, colorTable[0], WINDOW_MOVE_ON_TOP);
+        if (t->win == -1) {
+            return NULL;
+        }
+        t->shown = true;
+        t->x = x;
+        t->y = y;
+        t->w = w;
+        t->h = h;
+    } else if (t->x != x || t->y != y) {
+        win_move(t->win, x, y);
+        t->x = x;
+        t->y = y;
+    }
+
+    unsigned char* buf = win_get_buf(t->win);
+    if (buf == NULL || !gpui_squad_copy_under(buf, x, y, w, h)) {
+        return NULL;
+    }
+    return buf;
+}
+
+// One word in the current font, with the bar's shadow, its top-left at (x, y) of a w-wide buffer.
+static void gpui_squad_put_text(unsigned char* buf, int w, int h, int x, int y, const char* text, int color)
+{
+    if (x < 0 || y < 0 || x >= w || y + text_height() > h) {
+        return;
+    }
+    text_to_buf(buf + y * w + x, text, w - x, w, color | FONT_SHADOW);
+}
+
+// A single word centred over (cx, bottom) -- its last row on `bottom` -- in its own window.
+static void gpui_squad_word(GpuiSquadText* t, const char* text, int color, int cx, int bottom)
+{
+    int w = text_width(text) + 1; // + the shadow's column
+    int h = text_height() + 1; // + the shadow's row
+    unsigned char* buf = gpui_squad_text_window(t, cx - w / 2, bottom - h + 1, w, h);
+    if (buf == NULL) {
+        return;
+    }
+    gpui_squad_put_text(buf, w, h, 0, 0, text, color);
+    win_draw(t->win);
+}
+
+// Who the order goes to: every companion (All), or the one chosen.
+static int gpui_squad_chosen(Object** out)
+{
+    if (gpui_squad_who != NULL) {
+        out[0] = gpui_squad_who;
+        return 1;
+    }
+    for (int i = 0; i < gpui_squad_member_count; i++) {
+        out[i] = gpui_squad_members[i];
+    }
+    return gpui_squad_member_count;
+}
+
+static void gpui_squad_who_text(char* out, size_t size)
+{
+    if (gpui_squad_who == NULL) {
+        snprintf(out, size, "all");
+    } else {
+        snprintf(out, size, "%d", gpui_squad_who->id);
+    }
+}
+
+// The critter whose sprite box holds the screen point (x, y), or NULL -- the one in front where two overlap (the lower
+// box: the engine draws the rows down the screen in order). A box, not the sprite's pixels: a thumb on a stick needs the
+// sprite's whole frame to land on it, the same box the LT lock and the mouse aim measure from (obj_bound).
+static Object* gpui_squad_critter_at(int x, int y)
+{
+    Object** list = NULL;
+    int count = obj_create_list(-1, map_elevation, OBJ_TYPE_CRITTER, &list);
+    Object* best = NULL;
+    int bestFront = 0;
+    int bestDist = 0;
+    for (int i = 0; i < count; i++) {
+        Object* obj = list[i];
+        if (obj == NULL || (obj->flags & OBJECT_HIDDEN) != 0 || critter_is_dead(obj)) {
+            continue;
+        }
+        Rect b;
+        obj_bound(obj, &b);
+        if (x < b.ulx || x > b.lrx || y < b.uly || y > b.lry) {
+            continue;
+        }
+        int dist = abs((b.ulx + b.lrx) / 2 - x) + abs((b.uly + b.lry) / 2 - y);
+        if (best == NULL || b.lry > bestFront || (b.lry == bestFront && dist < bestDist)) {
+            best = obj;
+            bestFront = b.lry;
+            bestDist = dist;
+        }
+    }
+    if (list != NULL) {
+        obj_delete_list(list);
+    }
+    return best;
+}
+
+// The middle of a tile's hex on the screen (the engine's own +16, +8).
+static bool gpui_squad_tile_centre(int tile, int* x, int* y)
+{
+    if (tile < 0 || tile_coord(tile, x, y, map_elevation) != 0) {
+        return false;
+    }
+    *x += 16;
+    *y += 8;
+    return true;
+}
+
+// What the cursor is on, and whether A's order can be given there (the word's colour). Asked when the cursor moves,
+// who changes, or the mode opens. Free ground is no order since GO went (2026-11-13): it stays NONE, like a wall.
+static void gpui_squad_classify(bool moved)
+{
+    int x = (int)gpui_squad_cx;
+    int y = (int)gpui_squad_cy;
+    int tile = tile_num(x, y, map_elevation);
+    gpui_squad_tile = tile;
+    if (moved) {
+        gpui_squad_on = gpui_squad_critter_at(x, y);
+    }
+
+    int kind = GPUI_SQUAD_ON_NONE;
+    if (gpui_squad_on != NULL) {
+        switch (combat_rt_squad_kind(gpui_squad_on)) {
+        case COMBAT_RT_SQUAD_KIND_ENEMY:
+            kind = GPUI_SQUAD_ON_ENEMY;
+            break;
+        case COMBAT_RT_SQUAD_KIND_DUDE:
+            kind = GPUI_SQUAD_ON_DUDE;
+            break;
+        case COMBAT_RT_SQUAD_KIND_COMPANION:
+            kind = GPUI_SQUAD_ON_COMPANION;
+            break;
+        }
+    }
+
+    bool ok = false;
+    switch (kind) {
+    case GPUI_SQUAD_ON_ENEMY:
+        ok = true;
+        break;
+    case GPUI_SQUAD_ON_DUDE:
+        ok = combat_rt_squad_healer(gpui_squad_who, NULL) != NULL;
+        break;
+    case GPUI_SQUAD_ON_COMPANION: {
+        Object* weapons[RADIAL_WHEEL_MAX];
+        ok = combat_rt_squad_weapons(gpui_squad_on, weapons, RADIAL_WHEEL_MAX - 1) > 0;
+        break;
+    }
+    }
+
+    // Traced when what it is on changes, not every tile a sweep crosses (the rest is traced when the stick lets go).
+    static Object* lastOn = NULL;
+    static int lastKind = -1;
+    static bool lastOk = false;
+    if (gpui_squad_on != lastOn || kind != lastKind || ok != lastOk) {
+        lastOn = gpui_squad_on;
+        lastKind = kind;
+        lastOk = ok;
+        trace_event(TRACE_INPUT, "squad-cursor", "on kind=%s ok=%d obj=%d pid=%d tile=%d x=%d y=%d",
+            gpui_squad_kind_names[kind], ok ? 1 : 0, gpui_squad_on != NULL ? gpui_squad_on->id : -1,
+            gpui_squad_on != NULL ? gpui_squad_on->pid : -1, tile, x, y);
+    }
+    gpui_squad_kind = kind;
+    gpui_squad_ok = ok;
+}
+
+// The members, again, every tick: in the slowdown they still move (nearest first may change), and once the world holds
+// still a companion the mode chose can still drop out (a load, a script).
+// One chosen who is not among them any more hands "who" back to All.
+static void gpui_squad_refresh_members()
+{
+    gpui_squad_member_count = combat_rt_squad_members(gpui_squad_members, GPUI_SQUAD_MAX);
+    if (gpui_squad_who != NULL) {
+        bool still = false;
+        for (int i = 0; i < gpui_squad_member_count && !still; i++) {
+            still = gpui_squad_members[i] == gpui_squad_who;
+        }
+        if (!still) {
+            trace_event(TRACE_INPUT, "squad-who", "who=all why=gone");
+            gpui_squad_who = NULL;
+        }
+    }
+    if (gpui_squad_mute != NULL) {
+        bool still = false;
+        for (int i = 0; i < gpui_squad_member_count && !still; i++) {
+            still = gpui_squad_members[i] == gpui_squad_mute;
+        }
+        if (!still) {
+            gpui_squad_mute = NULL;
+        }
+    }
+}
+
+// --- the marks on the world ---
+
+// Where the renderer draws `c` this frame (object.cc _obj_render_object): its art, frame and facing, the frame's size,
+// and its top-left on the screen -- the tile's spot + 16, 8, the art's shift for that facing, the critter's own x, y
+// and the smooth-movement glide (anim_smooth_offset, which obj_bound adds the same way). On the tick only: it reads the
+// critter. False when nothing of it is drawn -- hidden, off the map, another floor -- or its art cannot be had.
+static bool gpui_squad_sprite_of(Object* c, GpuiSquadSprite* s)
+{
+    if (c == NULL || c->tile == -1 || c->elevation != map_elevation || (c->flags & OBJECT_HIDDEN) != 0) {
+        return false;
+    }
+    CacheEntry* handle;
+    Art* art = art_ptr_lock(c->fid, &handle);
+    if (art == NULL) {
+        return false;
+    }
+    int w = art_frame_width(art, c->frame, c->rotation);
+    int h = art_frame_length(art, c->frame, c->rotation);
+    int shiftX = 0;
+    int shiftY = 0;
+    if (w > 0 && h > 0) {
+        // The facing is a valid one, then (art.cc artGetFrame refuses any other).
+        shiftX = art->xOffsets[c->rotation];
+        shiftY = art->yOffsets[c->rotation];
+    }
+    art_ptr_unlock(handle);
+    int x;
+    int y;
+    if (w <= 0 || h <= 0 || tile_coord(c->tile, &x, &y, c->elevation) != 0) {
+        return false;
+    }
+    int glideX;
+    int glideY;
+    anim_smooth_offset(c, &glideX, &glideY);
+    x += 16 + shiftX + c->x + glideX;
+    y += 8 + shiftY + c->y + glideY;
+    s->fid = c->fid;
+    s->frame = c->frame;
+    s->rotation = c->rotation;
+    s->left = x - w / 2;
+    s->top = y - (h - 1);
+    s->width = w;
+    s->height = h;
+    return true;
+}
+
+// A solid pixel of a frame's data (index 0 is see-through; outside the frame is too).
+static inline bool gpui_squad_solid(const unsigned char* data, int w, int h, int x, int y)
+{
+    return x >= 0 && y >= 0 && x < w && y < h && data[y * w + x] != 0;
+}
+
+// The outline round one sprite, 1 px: every see-through pixel of its frame, or of the ring just outside it, that has a
+// solid one above, below, left or right of it -- the pixels the engine's own outline takes (object.cc
+// objectDrawOutline), clipped to `clip`. The art is locked by its fid (the art cache): the overlay never reads the
+// critter, only what the tick measured -- and never its outline field, which vanilla's combat outlines and the LT lock
+// own (and a save keeps). Drawn last, so over everything, as the engine's outlines are.
+static void gpui_squad_outline(Rect* clip, const GpuiSquadSprite* s, int color)
+{
+    int l = s->left - 1;
+    int t = s->top - 1;
+    int r = s->left + s->width;
+    int b = s->top + s->height;
+    if (l < clip->ulx) {
+        l = clip->ulx;
+    }
+    if (t < clip->uly) {
+        t = clip->uly;
+    }
+    if (r > clip->lrx) {
+        r = clip->lrx;
+    }
+    if (b > clip->lry) {
+        b = clip->lry;
+    }
+    if (l > r || t > b) {
+        return;
+    }
+
+    CacheEntry* handle;
+    Art* art = art_ptr_lock(s->fid, &handle);
+    if (art == NULL) {
+        return;
+    }
+    const unsigned char* data = art_frame_data(art, s->frame, s->rotation);
+    int w = s->width;
+    int h = s->height;
+    if (data != NULL && art_frame_width(art, s->frame, s->rotation) == w
+        && art_frame_length(art, s->frame, s->rotation) == h) {
+        for (int y = t; y <= b; y++) {
+            int fy = y - s->top;
+            for (int x = l; x <= r; x++) {
+                int fx = x - s->left;
+                if (!gpui_squad_solid(data, w, h, fx, fy)
+                    && (gpui_squad_solid(data, w, h, fx - 1, fy) || gpui_squad_solid(data, w, h, fx + 1, fy)
+                        || gpui_squad_solid(data, w, h, fx, fy - 1) || gpui_squad_solid(data, w, h, fx, fy + 1))) {
+                    tile_overlay_line(clip, x, y, x, y, color);
+                }
+            }
+        }
+    }
+    art_ptr_unlock(handle);
+}
+
+static void gpui_squad_dashes(Rect* clip, const int* l, int color)
+{
+    int x0 = l[0];
+    int y0 = l[1];
+    int x1 = l[2];
+    int y1 = l[3];
+    int dx = abs(x1 - x0);
+    int dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (int step = 0; step < 4096; step++) {
+        if ((step / GPUI_SQUAD_DASH) % 2 == 0) {
+            tile_overlay_line(clip, x0, y0, x0, y0, color);
+        }
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+static void gpui_squad_brackets(Rect* clip, const int* b, int color)
+{
+    int l = b[0];
+    int t = b[1];
+    int r = b[2];
+    int bt = b[3];
+    int a = GPUI_SQUAD_BRACKET;
+    tile_overlay_line(clip, l, t, l + a, t, color);
+    tile_overlay_line(clip, l, t, l, t + a, color);
+    tile_overlay_line(clip, r, t, r - a, t, color);
+    tile_overlay_line(clip, r, t, r, t + a, color);
+    tile_overlay_line(clip, l, bt, l + a, bt, color);
+    tile_overlay_line(clip, l, bt, l, bt - a, color);
+    tile_overlay_line(clip, r, bt, r - a, bt, color);
+    tile_overlay_line(clip, r, bt, r, bt - a, color);
+}
+
+// combat_rt's world overlay calls this last (combat_rt_set_squad_mode_hooks), for every repainted rect: the lines
+// first, the outlines over them (a line starts at a chosen one's feet), the brackets on top. Reads no object -- only
+// what the tick measured, and the art it names.
+static void gpui_squad_overlay(Rect* rect, int elevation)
+{
+    if (!gpui_squad_draw_on || elevation != gpui_squad_draw.elevation) {
+        return;
+    }
+    const GpuiSquadDraw* d = &gpui_squad_draw;
+    for (int i = 0; i < d->lineCount; i++) {
+        gpui_squad_dashes(rect, d->line[i], d->lineColor);
+    }
+    for (int i = 0; i < d->outlineCount; i++) {
+        gpui_squad_outline(rect, &(d->outline[i]), d->outlineColor);
+    }
+    if (d->bracket) {
+        gpui_squad_brackets(rect, d->bracketBox, d->bracketColor);
+    }
+}
+
+static void gpui_squad_refresh_box(int l, int t, int r, int b, int elevation)
+{
+    Rect rect;
+    rect.ulx = l;
+    rect.uly = t;
+    rect.lrx = r;
+    rect.lry = b;
+    tile_refresh_rect(&rect, elevation);
+}
+
+// Repaints the world wherever `d` lies -- the overlay then draws what gpui_squad_draw holds now. An outline's box is
+// its frame and the 1 px ring round it. A line in pieces of GPUI_SQUAD_LINE_CHUNK, or a diagonal across the screen
+// would repaint the whole view.
+static void gpui_squad_refresh(const GpuiSquadDraw* d)
+{
+    for (int i = 0; i < d->outlineCount; i++) {
+        const GpuiSquadSprite* s = &(d->outline[i]);
+        gpui_squad_refresh_box(s->left - 1, s->top - 1, s->left + s->width, s->top + s->height, d->elevation);
+    }
+    for (int i = 0; i < d->lineCount; i++) {
+        const int* l = d->line[i];
+        int len = abs(l[2] - l[0]) > abs(l[3] - l[1]) ? abs(l[2] - l[0]) : abs(l[3] - l[1]);
+        int chunks = len / GPUI_SQUAD_LINE_CHUNK + 1;
+        for (int c = 0; c < chunks; c++) {
+            int ax = l[0] + (l[2] - l[0]) * c / chunks;
+            int ay = l[1] + (l[3] - l[1]) * c / chunks;
+            int bx = l[0] + (l[2] - l[0]) * (c + 1) / chunks;
+            int by = l[1] + (l[3] - l[1]) * (c + 1) / chunks;
+            gpui_squad_refresh_box((ax < bx ? ax : bx) - 1, (ay < by ? ay : by) - 1, (ax > bx ? ax : bx) + 1,
+                (ay > by ? ay : by) + 1, d->elevation);
+        }
+    }
+    if (d->bracket) {
+        const int* b = d->bracketBox;
+        int a = GPUI_SQUAD_BRACKET + 1;
+        gpui_squad_refresh_box(b[0] - 1, b[1] - 1, b[0] + a, b[1] + a, d->elevation);
+        gpui_squad_refresh_box(b[2] - a, b[1] - 1, b[2] + 1, b[1] + a, d->elevation);
+        gpui_squad_refresh_box(b[0] - 1, b[3] - a, b[0] + a, b[3] + 1, d->elevation);
+        gpui_squad_refresh_box(b[2] - a, b[3] - a, b[2] + 1, b[3] + 1, d->elevation);
+    }
+}
+
+// The marks for this frame. Only when they change is the world repainted -- where they were and where they are now.
+static void gpui_squad_paint_marks(Object** chosen, int chosenCount)
+{
+    GpuiSquadDraw d;
+    memset(&d, 0, sizeof(d)); // compared whole below: no stray padding
+    d.elevation = map_elevation;
+
+    int green = gpui_squad_green();
+    int grey = gpui_squad_grey();
+
+    // Every one chosen: the outline round his sprite, as it is drawn this frame.
+    d.outlineColor = gpui_squad_outline_color();
+    for (int i = 0; i < chosenCount && d.outlineCount < GPUI_SQUAD_MAX; i++) {
+        if (gpui_squad_sprite_of(chosen[i], &(d.outline[d.outlineCount]))) {
+            d.outlineCount++;
+        }
+    }
+
+    // The target: the critter's tile. A line only ever goes to a critter -- the cursor's own tile was GO's, and GO went
+    // on 2026-11-13.
+    int tx = 0;
+    int ty = 0;
+    bool target = gpui_squad_on != NULL && gpui_squad_tile_centre(gpui_squad_on->tile, &tx, &ty);
+    int wordColor = gpui_squad_kind == GPUI_SQUAD_ON_ENEMY ? gpui_squad_red() : (gpui_squad_ok ? green : grey);
+
+    // Corner brackets round what the cursor is on: the critter's sprite, else its tile's hex -- grey there: nothing is
+    // ordered on the ground (GO's green went with it). One or the other, never both, so they cannot collide.
+    if (gpui_squad_on != NULL) {
+        Rect b;
+        obj_bound(gpui_squad_on, &b);
+        d.bracket = 1;
+        d.bracketBox[0] = b.ulx - GPUI_SQUAD_BRACKET_GAP;
+        d.bracketBox[1] = b.uly - GPUI_SQUAD_BRACKET_GAP;
+        d.bracketBox[2] = b.lrx + GPUI_SQUAD_BRACKET_GAP;
+        d.bracketBox[3] = b.lry + GPUI_SQUAD_BRACKET_GAP;
+        d.bracketColor = gpui_squad_kind == GPUI_SQUAD_ON_NONE ? grey : wordColor;
+    } else if (gpui_squad_tile >= 0) {
+        int x;
+        int y;
+        if (tile_coord(gpui_squad_tile, &x, &y, map_elevation) == 0) {
+            // The engine's grid hex: 32 x 16 from its tile's spot (tile.cc _tile_grid).
+            d.bracket = 1;
+            d.bracketBox[0] = x - GPUI_SQUAD_BRACKET_GAP;
+            d.bracketBox[1] = y - GPUI_SQUAD_BRACKET_GAP;
+            d.bracketBox[2] = x + 31 + GPUI_SQUAD_BRACKET_GAP;
+            d.bracketBox[3] = y + 15 + GPUI_SQUAD_BRACKET_GAP;
+            d.bracketColor = grey;
+        }
+    }
+
+    // The dotted line from who to it: from every one chosen to an enemy; to him only from the one that would come with
+    // the stimpak (HEAL ME); none to a companion (WEAPON is about him) or to nothing.
+    if (target) {
+        Object* from[GPUI_SQUAD_MAX];
+        int fromCount = 0;
+        if (gpui_squad_kind == GPUI_SQUAD_ON_ENEMY) {
+            for (int i = 0; i < chosenCount; i++) {
+                from[fromCount++] = chosen[i];
+            }
+        } else if (gpui_squad_kind == GPUI_SQUAD_ON_DUDE) {
+            Object* healer = combat_rt_squad_healer(gpui_squad_who, NULL);
+            if (healer != NULL) {
+                from[fromCount++] = healer;
+            }
+        }
+        for (int i = 0; i < fromCount && d.lineCount < GPUI_SQUAD_MAX; i++) {
+            int fx;
+            int fy;
+            if (from[i] != gpui_squad_on && gpui_squad_tile_centre(from[i]->tile, &fx, &fy) && (fx != tx || fy != ty)) {
+                int* l = d.line[d.lineCount++];
+                l[0] = fx;
+                l[1] = fy;
+                l[2] = tx;
+                l[3] = ty;
+            }
+        }
+        d.lineColor = gpui_squad_ok ? green : grey;
+    }
+
+    if (!gpui_squad_painted_on || memcmp(&d, &gpui_squad_painted, sizeof(d)) != 0) {
+        gpui_squad_draw = d;
+        gpui_squad_draw_on = true;
+        if (gpui_squad_painted_on) {
+            gpui_squad_refresh(&gpui_squad_painted); // erased where it was (the overlay draws the new marks there)
+        }
+        gpui_squad_refresh(&d);
+        gpui_squad_painted = d;
+        gpui_squad_painted_on = true;
+    }
+}
+
+// --- the words ---
+
+// "LB RB All   A Heal me   X Hold fire   Y No healing   B Back" (his preview of 2026-11-13) across the top-left of the
+// world, in the bar's badges (dark pill or disc, gold letter) with the mock-up's light words; who in the names' green;
+// A's word grey where it cannot be given ("A Order" on free ground and anything else). Y only while the medic beat is
+// on (combat_rt_medic_beat_enabled). With a companion's weapon wheel up: "A Pick   B Back". The longest it gets --
+// "Pariah Dog", "Open fire", "Heal me again" -- is about 430 px, inside even a 640-wide view.
+static void gpui_squad_paint_legend(bool wheel)
+{
+    const int gap = 9; // between one button's words and the next button
+    const int badge = 17; // a disc or a two-letter pill, rim included (interface.cc pad_badge_*)
+    int lineH = text_height();
+
+    char who[40];
+    snprintf(who, sizeof(who), "%s", gpui_squad_who != NULL ? object_name(gpui_squad_who) : "All");
+    const char* aWord = "Pick";
+    bool aOk = true;
+    if (!wheel) {
+        switch (gpui_squad_kind) {
+        case GPUI_SQUAD_ON_ENEMY:
+            aWord = "Attack";
+            break;
+        case GPUI_SQUAD_ON_DUDE:
+            aWord = "Heal me";
+            break;
+        case GPUI_SQUAD_ON_COMPANION:
+            aWord = "Weapon";
+            break;
+        default:
+            aWord = "Order";
+            break;
+        }
+        aOk = gpui_squad_kind != GPUI_SQUAD_ON_NONE && gpui_squad_ok;
+    }
+    const char* xWord = combat_rt_squad_holds_fire(gpui_squad_who) ? "Open fire" : "Hold fire";
+    // Y: their healing of him, asked afresh every paint as X's is -- LB / RB change who, and the party dialogue's line
+    // flips the same state between two openings.
+    bool yShown = !wheel && combat_rt_medic_beat_enabled();
+    const char* yWord = combat_rt_squad_medic_off(gpui_squad_who) ? "Heal me again" : "No healing";
+
+    int w = 0;
+    if (!wheel) {
+        w += badge + 1 + badge + 4 + text_width(who) + gap;
+    }
+    w += badge + 3 + text_width(aWord) + gap;
+    if (!wheel) {
+        w += badge + 3 + text_width(xWord) + gap;
+    }
+    if (yShown) {
+        w += badge + 3 + text_width(yWord) + gap;
+    }
+    w += badge + 3 + text_width("Back") + 1;
+    int h = badge;
+
+    Rect world;
+    if (display_win == -1 || win_get_rect(display_win, &world) != 0) {
+        return;
+    }
+    unsigned char* buf = gpui_squad_text_window(&gpui_squad_legend, world.ulx + 4, world.uly + 4, w, h);
+    if (buf == NULL) {
+        return;
+    }
+
+    int cy = badge / 2;
+    int ty = cy - lineH / 2;
+    int x = 0;
+    int white = gpui_squad_white();
+    if (!wheel) {
+        intface_pad_pill(buf, w, w, h, x + badge / 2, cy, "LB");
+        x += badge + 1;
+        intface_pad_pill(buf, w, w, h, x + badge / 2, cy, "RB");
+        x += badge + 4;
+        gpui_squad_put_text(buf, w, h, x, ty, who, gpui_squad_green());
+        x += text_width(who) + gap;
+    }
+    intface_pad_face(buf, w, w, h, x + badge / 2, cy, 'A');
+    x += badge + 3;
+    gpui_squad_put_text(buf, w, h, x, ty, aWord, aOk ? white : gpui_squad_grey());
+    x += text_width(aWord) + gap;
+    if (!wheel) {
+        intface_pad_face(buf, w, w, h, x + badge / 2, cy, 'X');
+        x += badge + 3;
+        gpui_squad_put_text(buf, w, h, x, ty, xWord, white);
+        x += text_width(xWord) + gap;
+    }
+    if (yShown) {
+        intface_pad_face(buf, w, w, h, x + badge / 2, cy, 'Y');
+        x += badge + 3;
+        gpui_squad_put_text(buf, w, h, x, ty, yWord, white);
+        x += text_width(yWord) + gap;
+    }
+    intface_pad_face(buf, w, w, h, x + badge / 2, cy, 'B');
+    x += badge + 3;
+    gpui_squad_put_text(buf, w, h, x, ty, "Back", white);
+    win_draw(gpui_squad_legend.win);
+}
+
+// A small D-pad in the badges' gold, the middle of the compass.
+static void gpui_squad_cross(unsigned char* buf, int w, int h, int cx, int cy)
+{
+    int gold = colorTable[(23 << 10) | (19 << 5) | 5];
+    int rim = colorTable[(2 << 10) | (2 << 5) | 2];
+    for (int pass = 0; pass < 2; pass++) {
+        int color = pass == 0 ? rim : gold;
+        int grow = pass == 0 ? 1 : 0;
+        for (int dy = -3 - grow; dy <= 3 + grow; dy++) {
+            for (int dx = -3 - grow; dx <= 3 + grow; dx++) {
+                bool arm = (abs(dx) <= grow && abs(dy) <= 3 + grow) || (abs(dy) <= grow && abs(dx) <= 3 + grow);
+                int px = cx + dx;
+                int py = cy + dy;
+                if (arm && px >= 0 && py >= 0 && px < w && py < h) {
+                    buf[py * w + px] = (unsigned char)color;
+                }
+            }
+        }
+    }
+}
+
+// Whether the w x h box at (x, y) would cover the dude's or one chosen companion's sprite (the compass steps aside).
+static bool gpui_squad_covers_someone(int x, int y, int w, int h, Object** chosen, int chosenCount)
+{
+    for (int i = -1; i < chosenCount; i++) {
+        Object* c = i < 0 ? obj_dude : chosen[i];
+        if (c == NULL || c == gpui_squad_on || c->tile == -1) {
+            continue;
+        }
+        Rect b;
+        obj_bound(c, &b);
+        if (x <= b.lrx && x + w - 1 >= b.ulx && y <= b.lry && y + h - 1 >= b.uly) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Design B's four for who, beside the cursor (the mock-up's right half): Attack over the cross -- grey unless an enemy
+// is under the cursor -- Hold left of it, Charge right, Follow under it. Right of `box`, or left of it near the edge or
+// where the right side would cover the dude or one chosen (his words would sit on a sprite he is giving orders about).
+static void gpui_squad_paint_compass(const Rect* box, Object** chosen, int chosenCount)
+{
+    int lineH = text_height() + 1;
+    const int cross = 9;
+    const int gap = 2;
+    int wAttack = text_width("Attack");
+    int wHold = text_width("Hold");
+    int wCharge = text_width("Charge");
+    int wFollow = text_width("Follow");
+    int cx = wHold + gap + cross / 2; // the cross's middle
+    int w = wHold + gap + cross + gap + wCharge + 1;
+    if (cx + wAttack / 2 + 1 > w) {
+        w = cx + wAttack / 2 + 1;
+    }
+    if (cx + wFollow / 2 + 1 > w) {
+        w = cx + wFollow / 2 + 1;
+    }
+    int h = lineH * 3;
+
+    Rect world;
+    if (display_win == -1 || win_get_rect(display_win, &world) != 0) {
+        return;
+    }
+    int y = (box->uly + box->lry) / 2 - h / 2;
+    int x = box->lrx + 8;
+    int left = box->ulx - 8 - w;
+    if (x + w - 1 > world.lrx
+        || (left >= world.ulx && gpui_squad_covers_someone(x, y, w, h, chosen, chosenCount)
+            && !gpui_squad_covers_someone(left, y, w, h, chosen, chosenCount))) {
+        x = left;
+    }
+    unsigned char* buf = gpui_squad_text_window(&gpui_squad_compass, x, y, w, h);
+    if (buf == NULL) {
+        return;
+    }
+    int white = gpui_squad_white();
+    gpui_squad_put_text(buf, w, h, cx - wAttack / 2, 0, "Attack",
+        gpui_squad_kind == GPUI_SQUAD_ON_ENEMY ? white : gpui_squad_grey());
+    gpui_squad_put_text(buf, w, h, 0, lineH, "Hold", white);
+    gpui_squad_cross(buf, w, h, cx, lineH + lineH / 2 - 1);
+    gpui_squad_put_text(buf, w, h, wHold + gap + cross + gap, lineH, "Charge", white);
+    gpui_squad_put_text(buf, w, h, cx - wFollow / 2, lineH * 2, "Follow", white);
+    win_draw(gpui_squad_compass.win);
+}
+
+// Every word of the mode for this frame: the legend, the names over who, the order's word over the target and the
+// compass beside it. Each window takes the world under it as its background, so this runs after the marks were painted.
+static void gpui_squad_paint_words(Object** chosen, int chosenCount)
+{
+    int oldFont = text_curr();
+    text_font(101); // the prompt word's font
+    bool wheel = gpui_squad_wpn_who != NULL;
+    gpui_squad_paint_legend(wheel);
+
+    // The names, green, over every one chosen -- not over one whose refusal is floating there.
+    int nameTop[GPUI_SQUAD_MAX];
+    for (int i = 0; i < GPUI_SQUAD_MAX; i++) {
+        nameTop[i] = INT_MAX;
+        if (i >= chosenCount || chosen[i] == gpui_squad_mute) {
+            gpui_squad_text_hide(&gpui_squad_names[i]);
+            continue;
+        }
+        Rect b;
+        obj_bound(chosen[i], &b);
+        gpui_squad_word(&gpui_squad_names[i], object_name(chosen[i]), gpui_squad_green(), (b.ulx + b.lrx) / 2, b.uly - 2);
+        if (gpui_squad_names[i].shown) {
+            nameTop[i] = gpui_squad_names[i].y;
+        }
+    }
+
+    // The order's word over what the cursor is on (over its name when that is one chosen), and the compass beside it --
+    // beside the tile's hex too, where there is no word (free ground: GO's, until 2026-11-13).
+    Rect box;
+    bool haveBox = false;
+    if (gpui_squad_on != NULL) {
+        obj_bound(gpui_squad_on, &box);
+        haveBox = true;
+    } else if (gpui_squad_tile >= 0) {
+        int x;
+        int y;
+        if (tile_coord(gpui_squad_tile, &x, &y, map_elevation) == 0) {
+            box.ulx = x;
+            box.uly = y;
+            box.lrx = x + 31;
+            box.lry = y + 15;
+            haveBox = true;
+        }
+    }
+    const char* word = NULL;
+    switch (gpui_squad_kind) {
+    case GPUI_SQUAD_ON_ENEMY:
+        word = "ATTACK";
+        break;
+    case GPUI_SQUAD_ON_DUDE:
+        word = "HEAL ME";
+        break;
+    case GPUI_SQUAD_ON_COMPANION:
+        word = "WEAPON";
+        break;
+    }
+    if (word != NULL && haveBox && !wheel) {
+        int bottom = box.uly - 2;
+        for (int i = 0; i < chosenCount && i < GPUI_SQUAD_MAX; i++) {
+            if (chosen[i] == gpui_squad_on && nameTop[i] != INT_MAX) {
+                bottom = nameTop[i] - 1;
+            }
+        }
+        int color = gpui_squad_kind == GPUI_SQUAD_ON_ENEMY ? gpui_squad_red()
+                                                            : (gpui_squad_ok ? gpui_squad_green() : gpui_squad_grey());
+        gpui_squad_word(&gpui_squad_label, word, color, (box.ulx + box.lrx) / 2, bottom);
+    } else {
+        gpui_squad_text_hide(&gpui_squad_label);
+    }
+    if (haveBox && !wheel) {
+        gpui_squad_paint_compass(&box, chosen, chosenCount);
+    } else {
+        gpui_squad_text_hide(&gpui_squad_compass);
+    }
+    text_font(oldFont);
+}
+
+static void gpui_squad_paint()
+{
+    Object* chosen[GPUI_SQUAD_MAX];
+    int chosenCount = gpui_squad_chosen(chosen);
+    gpui_squad_paint_marks(chosen, chosenCount);
+    gpui_squad_paint_words(chosen, chosenCount);
+}
+
+// --- open, close, forget ---
+
+// Every way out: the marks are erased (the state first, then the world repainted where they were), the words' windows
+// go, the world moves again (combat_rt at once, the engine's own processes at the tick's gpui_world_hold_sync), and the
+// input epoch moves on -- the hook skipped its button edges while the mode was up, so the A, B, X, Y, D-pad... it took
+// are spent, not fresh presses in the world (the exit wheel's close, gpui_exit_wheel_close): a Y still held is no hand
+// swap on its release and no LT + Y firing mode (gpui_consumed_y).
+static void gpui_squad_weapon_close();
+
+static void gpui_squad_close(const char* why)
+{
+    if (!gpui_squad_open) {
+        return;
+    }
+    gpui_squad_weapon_close();
+    gpui_squad_open = false;
+    gpui_squad_draw_on = false;
+    if (gpui_squad_painted_on) {
+        gpui_squad_refresh(&gpui_squad_painted);
+        gpui_squad_painted_on = false;
+    }
+    gpui_squad_windows_hide();
+    // ...and the whole view once, when the world was held: an order given then cuts a walk under a body whose glide
+    // (Smooth movement) does not tick while the world holds, and the repaint of the cut missed where it was drawn -- a
+    // companion's LT outline stood as a green stroke beside him after an ATTACK (squad-pad-attack, 2026-11-12).
+    if (combat_rt_squad_mode_frozen()) {
+        tile_refresh_display();
+    }
+    combat_rt_squad_mode_set_open(false, why);
+    gamepad_ui_bump_input_epoch();
+    trace_event(TRACE_INPUT, "squad-mode", "close why=%s ms=%u gameTicks=%d", why, elapsed_time(gpui_squad_opened_at),
+        game_time() - gpui_squad_game_at);
+    gpui_squad_on = NULL;
+    gpui_squad_who = NULL;
+    gpui_squad_mute = NULL;
+    gpui_squad_member_count = 0;
+    gpui_squad_anchor_obj = NULL;
+    gpui_squad_anchor_tile = -1;
+}
+
+// combat_rt, before `obj` is freed -- NULL: before every object goes (a map change, a load, a new game, the end). The
+// map going takes the mode with it, without a repaint of a world that is being freed (its view is drawn whole after).
+static void gpui_squad_forget(Object* obj)
+{
+    if (obj == NULL) {
+        if (gpui_squad_open) {
+            gpui_squad_weapon_close();
+            gpui_squad_open = false;
+            gpui_squad_draw_on = false;
+            gpui_squad_painted_on = false;
+            gpui_squad_windows_hide();
+            combat_rt_squad_mode_set_open(false, "map");
+            gamepad_ui_bump_input_epoch();
+            trace_event(TRACE_INPUT, "squad-mode", "close why=map ms=%u", elapsed_time(gpui_squad_opened_at));
+        }
+        gpui_squad_on = NULL;
+        gpui_squad_who = NULL;
+        gpui_squad_mute = NULL;
+        gpui_squad_member_count = 0;
+        gpui_squad_wpn_who = NULL;
+        gpui_squad_wpn_count = 0;
+        gpui_squad_anchor_obj = NULL;
+        gpui_squad_anchor_tile = -1;
+        return;
+    }
+    if (gpui_squad_anchor_obj == obj) {
+        gpui_squad_anchor_obj = NULL;
+        gpui_squad_anchor_tile = -1;
+    }
+    for (int i = 0; i < gpui_squad_member_count;) {
+        if (gpui_squad_members[i] == obj) {
+            gpui_squad_members[i] = gpui_squad_members[--gpui_squad_member_count];
+            continue;
+        }
+        i++;
+    }
+    if (gpui_squad_who == obj) {
+        gpui_squad_who = NULL;
+    }
+    if (gpui_squad_on == obj) {
+        gpui_squad_on = NULL;
+        gpui_squad_kind = GPUI_SQUAD_ON_NONE;
+    }
+    if (gpui_squad_mute == obj) {
+        gpui_squad_mute = NULL;
+    }
+    if (gpui_squad_wpn_who == obj) {
+        gpui_squad_weapon_close();
+    }
+    for (int i = 0; i < gpui_squad_wpn_count; i++) {
+        if (gpui_squad_wpn_slot[i] == obj) {
+            gpui_squad_wpn_slot[i] = NULL;
+        }
+    }
+}
+
+// LT + A, from the safe tick (gpui_drain_requests). Refused with a buzz where the world is not his to order in, or
+// while a quick slot's throw is out or a held heal chain runs: their buttons' releases would never reach their hook
+// under the mode (gpui_qs_release), and a drawn grenade would stay drawn.
+static void gpui_squad_open_mode()
+{
+    if (gpui_squad_open) {
+        return;
+    }
+    const char* refused = NULL;
+    if (obj_dude == NULL || gpui_dude_down()) {
+        refused = "dude";
+    } else if (radial_wheel_is_open()) {
+        refused = "wheel";
+    } else if (gamepad_ui_menu_active() || inven_any_open() || dialog_active() || !intface_is_enabled()) {
+        refused = "screen";
+    } else if (gpui_targeting_cursor_armed() || gpui_aim_picker_active()) {
+        refused = "cursor";
+    } else if (gpui_qt_state != GPUI_QT_IDLE || gpui_chain_slot != -1 || gpui_ap_wait_slot != -1) {
+        refused = "busy";
+    } else {
+        gpui_squad_member_count = combat_rt_squad_members(gpui_squad_members, GPUI_SQUAD_MAX);
+        if (gpui_squad_member_count == 0) {
+            refused = "no-companions";
+        }
+    }
+    if (refused != NULL) {
+        gsound_play_sfx_file("iisxxxx1");
+        trace_event(TRACE_INPUT, "squad-mode", "refused why=%s", refused);
+        return;
+    }
+
+    if (!gpui_squad_guard_on) {
+        add_bk_process(gpui_squad_guard, "squad-guard");
+        gpui_squad_guard_on = true;
+    }
+
+    // The cursor starts on the LT-locked enemy when it is on screen, else a few tiles in front of the dude (where the
+    // use-on crosshair parks, gpui_useon_park_cursor). Not the pointer: the engine's cursor is off while the world holds.
+    Rect world;
+    bool haveWorld = display_win != -1 && win_get_rect(display_win, &world) == 0;
+    const char* start = "ahead";
+    Object* lock = combat_rt_lock_target();
+    bool placed = false;
+    if (lock != NULL && haveWorld && lock->elevation == map_elevation && (lock->flags & OBJECT_HIDDEN) == 0) {
+        Rect b;
+        obj_bound(lock, &b);
+        int x = (b.ulx + b.lrx) / 2;
+        int y = (b.uly + b.lry) / 2;
+        if (x >= world.ulx && x <= world.lrx && y >= world.uly && y <= world.lry) {
+            gpui_squad_cx = (float)x;
+            gpui_squad_cy = (float)y;
+            placed = true;
+            start = "lock";
+        }
+    }
+    if (!placed) {
+        int x;
+        int y;
+        int dest = tile_num_in_direction(obj_dude->tile, obj_dude->rotation, GPUI_USEON_PARK_TILES);
+        if (!gpui_squad_tile_centre(dest, &x, &y) && !gpui_squad_tile_centre(obj_dude->tile, &x, &y)) {
+            x = haveWorld ? (world.ulx + world.lrx) / 2 : 0;
+            y = haveWorld ? (world.uly + world.lry) / 2 : 0;
+        }
+        gpui_squad_cx = (float)x;
+        gpui_squad_cy = (float)y;
+    }
+    if (haveWorld) {
+        gpui_squad_cx = gpui_squad_cx < world.ulx + 2 ? world.ulx + 2 : (gpui_squad_cx > world.lrx - 2 ? world.lrx - 2 : gpui_squad_cx);
+        gpui_squad_cy = gpui_squad_cy < world.uly + 2 ? world.uly + 2 : (gpui_squad_cy > world.lry - 2 ? world.lry - 2 : gpui_squad_cy);
+    }
+
+    // A D-pad direction held now and let go inside the mode must not come back as a tap once it closes.
+    gpui_dpad_forget();
+    gpui_squad_who = NULL;
+    gpui_squad_mute = NULL;
+    gpui_squad_on = NULL;
+    gpui_squad_kind = GPUI_SQUAD_ON_NONE;
+    gpui_squad_tile = -1;
+    gpui_squad_a_armed = false;
+    gpui_squad_left_armed = false;
+    gpui_squad_just_opened = true;
+    gpui_squad_moving = false;
+    gpui_squad_last_move = 0;
+    gpui_squad_opened_at = get_time();
+    gpui_squad_last_tick = gpui_squad_opened_at;
+    gpui_squad_game_at = game_time();
+    gpui_squad_wpn_who = NULL;
+    gpui_squad_wpn_count = 0;
+    gpui_squad_painted_on = false;
+    gpui_squad_draw_on = false;
+    gpui_squad_open = true;
+    combat_rt_squad_mode_set_open(true, "lt+a");
+    gpui_squad_classify(true);
+    gpui_squad_anchor_set();
+    // dude= is his tile's hex on the screen (its top-left): where the screen tests aim the stick from.
+    int dudeX = 0;
+    int dudeY = 0;
+    tile_coord(obj_dude->tile, &dudeX, &dudeY, map_elevation);
+    trace_event(TRACE_INPUT, "squad-mode", "open members=%d start=%s x=%d y=%d tile=%d kind=%s dude=%d,%d",
+        gpui_squad_member_count, start, (int)gpui_squad_cx, (int)gpui_squad_cy, gpui_squad_tile,
+        gpui_squad_kind_names[gpui_squad_kind], dudeX, dudeY);
+}
+
+// --- the orders ---
+
+// An order given: a click, and the mode closes; refused: the buzz, and it stays open. A refusal with words to it
+// (HEAL ME's "No meds.", "You're fine.") floats over the nearest one asked -- where his name is, so the name stands
+// aside for it. X's and Y's refusals have no words: the buzz alone.
+static bool gpui_squad_given(bool ok, int order, const char* src)
+{
+    if (ok) {
+        gsound_play_sfx_file("ib1p1xx1");
+        gpui_squad_close(src);
+        return true;
+    }
+    gsound_play_sfx_file("iisxxxx1");
+    if (order == COMBAT_RT_ORDER_HEAL_ME) {
+        Object* chosen[GPUI_SQUAD_MAX];
+        if (gpui_squad_chosen(chosen) > 0) {
+            gpui_squad_mute = chosen[0]; // nearest first: the one combat_rt had say it
+        }
+    }
+    return false;
+}
+
+// The trace's name of a COMBAT_RT_ORDER_*, combat_rt's own names in combat_rt's order (combat_rt.h): one entry per
+// order, or the build stops -- a stale list compiles and names every order after a removed one wrong (GO's went
+// 2026-11-13).
+static const char* gpui_squad_order_name(int order)
+{
+    static const char* const names[] = { "attack", "follow", "hold", "charge", "hold-fire", "open-fire", "heal-me",
+        "no-healing", "heal-again" };
+    static_assert((int)(sizeof(names) / sizeof(names[0])) == COMBAT_RT_ORDER_COUNT, "one name per COMBAT_RT_ORDER_*");
+    return order >= 0 && order < (int)(sizeof(names) / sizeof(names[0])) ? names[order] : "?";
+}
+
+// --- WEAPON: a companion's weapon wheel ---
+
+static void gpui_squad_weapon_close()
+{
+    if (radial_wheel_is_open() && gpui_wheel_owner == GPUI_WHEEL_SQUAD_WEAPON) {
+        radial_wheel_close();
+        gpui_wheel_owner = GPUI_WHEEL_NONE;
+        gpui_icons_release();
+    }
+    gpui_squad_wpn_who = NULL;
+    gpui_squad_wpn_count = 0;
+}
+
+// The wheel of what `c` can hold (combat_rt_squad_weapons: his art has the frames for it), titled with his name, with
+// "Auto" -- the AI chooses again -- at the top. A gun with no rounds in it or for it is red; A on it still asks, so he
+// says why ("Out of ammo."). False when he can hold nothing at all (a dog, a robot): the caller buzzes.
+static bool gpui_squad_weapon_open(Object* c)
+{
+    Object* list[RADIAL_WHEEL_MAX - 1];
+    int n = c != NULL ? combat_rt_squad_weapons(c, list, RADIAL_WHEEL_MAX - 1) : 0;
+    if (n <= 0 || radial_wheel_is_open()) {
+        return false;
+    }
+
+    gpui_icons_release();
+    gpui_load_skill_art(); // the digit strip for the rounds in each gun
+
+    RadialSegment segs[RADIAL_WHEEL_MAX];
+    memset(segs, 0, sizeof(segs));
+    segs[0].label = "Auto";
+    segs[0].id = GPUI_SQUAD_WPN_AUTO_ID;
+    segs[0].enabled = true;
+    segs[0].value = -1;
+    segs[0].detail = "AI picks";
+    int pick = combat_rt_squad_weapon_pick(c);
+    for (int i = 0; i < n; i++) {
+        Object* item = list[i];
+        RadialSegment* seg = &segs[1 + i];
+        seg->label = object_name(item);
+        seg->id = i;
+        seg->enabled = combat_rt_squad_weapon_ready(c, item);
+        seg->value = item_w_max_ammo(item) > 0 ? item_w_curr_ammo(item) : -1;
+        gpui_weapon_detail_of(c, item, gpui_detail_buf[1 + i], sizeof(gpui_detail_buf[1 + i]));
+        seg->detail = gpui_detail_buf[1 + i][0] != '\0' ? gpui_detail_buf[1 + i] : NULL;
+        seg->description = object_description(item);
+        gpui_icon_from_pid(segs, 1 + i, item->pid);
+        gpui_squad_wpn_slot[i] = item;
+    }
+    gpui_squad_wpn_count = n;
+
+    RadialWheelArt art;
+    radial_wheel_open(segs, n + 1, object_name(c), gpui_wheel_art_for_icons(&art, gpui_icons_held), -1, -1, false);
+    if (!radial_wheel_is_open()) {
+        gpui_icons_release();
+        gpui_squad_wpn_count = 0;
+        return false;
+    }
+    gpui_wheel_owner = GPUI_WHEEL_SQUAD_WEAPON;
+    gpui_squad_wpn_who = c;
+    char layout[96];
+    size_t len = 0;
+    layout[0] = '\0';
+    for (int i = 0; i < n && len < sizeof(layout); i++) {
+        int w = snprintf(layout + len, sizeof(layout) - len, "%sseg%d=%d%s", i > 0 ? " " : "", 1 + i, list[i]->pid,
+            segs[1 + i].enabled ? "" : "(dry)");
+        len = w > 0 ? len + (size_t)w : sizeof(layout);
+    }
+    trace_event(TRACE_INPUT, "squad-weapon-wheel", "open id=%d pid=%d weapons=%d pick=%d hand=%d seg0=auto %s", c->id,
+        c->pid, n, pick, inven_right_hand(c) != NULL ? inven_right_hand(c)->pid : -1, layout);
+    return true;
+}
+
+// One tick of the companion's wheel: both sticks aim it (whichever is pushed further; it opened disarmed -- the right
+// stick was just moving the cursor), A takes what is aimed at, B goes back to the mode with nothing changed.
+static void gpui_squad_weapon_tick(SDL_GameController* pad, bool aEdge, bool bEdge)
+{
+    if (bEdge) {
+        trace_event(TRACE_INPUT, "squad-weapon-wheel", "back");
+        gpui_squad_weapon_close();
+        return;
+    }
+    if (aEdge) {
+        Object* c = gpui_squad_wpn_who;
+        int index = radial_wheel_highlight(); // 0 = Auto, 1.. = the weapons; red ones too (they get their refusal)
+        Object* item = index >= 1 && index - 1 < gpui_squad_wpn_count ? gpui_squad_wpn_slot[index - 1] : NULL;
+        if (c == NULL || index < 0 || (index >= 1 && item == NULL)) {
+            gsound_play_sfx_file("iisxxxx1");
+            trace_event(TRACE_INPUT, "squad-weapon-wheel", "pick seg=%d none", index);
+            return;
+        }
+        bool ok = combat_rt_squad_set_weapon(c, item);
+        trace_event(TRACE_INPUT, "squad-weapon-wheel", "pick seg=%d wpn=%d ok=%d", index, item != NULL ? item->pid : -1,
+            ok ? 1 : 0);
+        if (ok) {
+            gpui_squad_given(true, -1, "weapon");
+        } else {
+            gsound_play_sfx_file("iisxxxx1"); // the wheel stays: another pick, or B
+        }
+        return;
+    }
+
+    float x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX) / GPUI_AXIS_MAX;
+    float y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY) / GPUI_AXIS_MAX;
+    float lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) / GPUI_AXIS_MAX;
+    float ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) / GPUI_AXIS_MAX;
+    if (lx * lx + ly * ly > x * x + y * y) {
+        x = lx;
+        y = ly;
+    }
+    radial_wheel_update(x, y);
+}
+
+// --- the cursor ---
+
+// What the cursor is pinned to (gpui_squad_anchor_obj / _tile, declared with the mode's state): in the mode's first
+// 1.5 s the world still moves (the slowdown, combat_rt_squad_mode_set_open) -- a walking critter goes on walking,
+// slower and slower, and the view may still ease. The cursor goes with what it is on, so a stick nudged afterwards
+// starts from it, not from where it used to be.
+static bool gpui_squad_anchor_pos(int* x, int* y)
+{
+    if (gpui_squad_anchor_obj != NULL) {
+        Rect b;
+        obj_bound(gpui_squad_anchor_obj, &b);
+        *x = (b.ulx + b.lrx) / 2;
+        *y = b.lry; // its feet: steadier than the middle of a sprite whose frames differ in size
+        return true;
+    }
+    return gpui_squad_anchor_tile >= 0 && tile_coord(gpui_squad_anchor_tile, x, y, map_elevation) == 0;
+}
+
+// Pinned again to what the cursor is on now (after gpui_squad_classify).
+static void gpui_squad_anchor_set()
+{
+    gpui_squad_anchor_obj = gpui_squad_on;
+    gpui_squad_anchor_tile = gpui_squad_on == NULL ? gpui_squad_tile : -1;
+    if (!gpui_squad_anchor_pos(&gpui_squad_anchor_x, &gpui_squad_anchor_y)) {
+        gpui_squad_anchor_obj = NULL;
+        gpui_squad_anchor_tile = -1;
+    }
+}
+
+// Before the stick moves it: as far as what it is pinned to moved since the last tick (nothing, once the world holds).
+static void gpui_squad_follow_world()
+{
+    int x;
+    int y;
+    if ((gpui_squad_anchor_obj == NULL && gpui_squad_anchor_tile < 0) || !gpui_squad_anchor_pos(&x, &y)
+        || (x == gpui_squad_anchor_x && y == gpui_squad_anchor_y)) {
+        return;
+    }
+    gpui_squad_cx += (float)(x - gpui_squad_anchor_x);
+    gpui_squad_cy += (float)(y - gpui_squad_anchor_y);
+    gpui_squad_anchor_x = x;
+    gpui_squad_anchor_y = y;
+    Rect world;
+    if (display_win != -1 && win_get_rect(display_win, &world) == 0) {
+        gpui_squad_cx = gpui_squad_cx < world.ulx + 2 ? world.ulx + 2 : (gpui_squad_cx > world.lrx - 2 ? world.lrx - 2 : gpui_squad_cx);
+        gpui_squad_cy = gpui_squad_cy < world.uly + 2 ? world.uly + 2 : (gpui_squad_cy > world.lry - 2 ? world.lry - 2 : gpui_squad_cy);
+    }
+}
+
+// The right stick moves it, on the pointer's curve (squared past the dead zone, cursor_speed at full tilt) but by the
+// clock -- a 60th of a second is one of the pointer's frames -- and the left stick does too once it has been back in
+// the centre since the open (it may still be walking when LT + A comes). Whichever is pushed further. Kept on the world.
+static bool gpui_squad_move_cursor(SDL_GameController* pad)
+{
+    unsigned int now = get_time();
+    float scale = gpui_squad_last_move != 0 ? (float)(now - gpui_squad_last_move) / (1000.0f / 60.0f) : 1.0f;
+    if (scale > 3.0f) {
+        scale = 3.0f; // a hitch does not fling it across the screen
+    }
+    gpui_squad_last_move = now;
+
+    float x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX) / GPUI_AXIS_MAX;
+    float y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY) / GPUI_AXIS_MAX;
+    float lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) / GPUI_AXIS_MAX;
+    float ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) / GPUI_AXIS_MAX;
+    float lmag = sqrtf(lx * lx + ly * ly);
+    if (lmag <= gpui_stick_deadzone) {
+        gpui_squad_left_armed = true;
+    }
+    if (gpui_squad_left_armed && lmag * lmag > x * x + y * y) {
+        x = lx;
+        y = ly;
+    }
+    float mag = sqrtf(x * x + y * y);
+    if (mag <= gpui_stick_deadzone) {
+        if (gpui_squad_moving) {
+            gpui_squad_moving = false;
+            trace_event(TRACE_INPUT, "squad-cursor", "rest tile=%d x=%d y=%d kind=%s", gpui_squad_tile,
+                (int)gpui_squad_cx, (int)gpui_squad_cy, gpui_squad_kind_names[gpui_squad_kind]);
+        }
+        return false;
+    }
+    gpui_squad_moving = true;
+    float t = (mag - gpui_stick_deadzone) / (1.0f - gpui_stick_deadzone);
+    if (t > 1.0f) {
+        t = 1.0f;
+    }
+    float speed = t * t * gpui_cursor_max_speed * scale;
+    float ox = gpui_squad_cx;
+    float oy = gpui_squad_cy;
+    gpui_squad_cx += x / mag * speed;
+    gpui_squad_cy += y / mag * speed;
+
+    Rect world;
+    if (display_win != -1 && win_get_rect(display_win, &world) == 0) {
+        if (gpui_squad_cx < world.ulx + 2) {
+            gpui_squad_cx = (float)(world.ulx + 2);
+        } else if (gpui_squad_cx > world.lrx - 2) {
+            gpui_squad_cx = (float)(world.lrx - 2);
+        }
+        if (gpui_squad_cy < world.uly + 2) {
+            gpui_squad_cy = (float)(world.uly + 2);
+        } else if (gpui_squad_cy > world.lry - 2) {
+            gpui_squad_cy = (float)(world.lry - 2);
+        }
+    }
+    return (int)ox != (int)gpui_squad_cx || (int)oy != (int)gpui_squad_cy;
+}
+
+// --- the driver ---
+
+// Every tick from gamepad_ui_tick, after the other wheels (their guards see this tick's B and Y while the mode is still
+// up) and before the aim picker and the A-hold tracker. Its buttons are its own, sampled every tick, open or not: the
+// hook stands aside while it is up.
+static void gpui_squad_mode(SDL_GameController* pad)
+{
+    static bool prevB = false;
+    static bool prevX = false;
+    static bool prevY = false;
+    static bool prevLb = false;
+    static bool prevRb = false;
+    static bool prevDir[4] = { false, false, false, false };
+    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool xNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
+    bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    bool lbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+    bool rbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
+    static const SDL_GameControllerButton dirButtons[4] = {
+        SDL_CONTROLLER_BUTTON_DPAD_UP,
+        SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+        SDL_CONTROLLER_BUTTON_DPAD_LEFT,
+        SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
+    };
+    bool dirNow[4];
+    bool dirEdge[4];
+    for (int i = 0; i < 4; i++) {
+        dirNow[i] = SDL_GameControllerGetButton(pad, dirButtons[i]) != 0;
+        dirEdge[i] = dirNow[i] && !prevDir[i];
+        prevDir[i] = dirNow[i];
+    }
+    bool bEdge = bNow && !prevB;
+    bool xEdge = xNow && !prevX;
+    bool yEdge = yNow && !prevY;
+    bool lbEdge = lbNow && !prevLb;
+    bool rbEdge = rbNow && !prevRb;
+    prevB = bNow;
+    prevX = xNow;
+    prevY = yNow;
+    prevLb = lbNow;
+    prevRb = rbNow;
+
+    if (!gpui_squad_open) {
+        return;
+    }
+    gpui_squad_last_tick = get_time();
+    // LT's latch is read only when someone asks it; asked every tick while the mode is up, it reads let go as soon as
+    // LT is, and a D-pad tap right after the mode is not taken for LT + D-pad on a stale "held".
+    gamepad_ui_aim_trigger_held();
+
+    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool aEdge = gpui_wheel_a_edge && gpui_squad_a_armed;
+    if (!aNow) {
+        gpui_squad_a_armed = true;
+    }
+    if (gpui_squad_just_opened) {
+        // The open's own tick: whatever is down now was down before the mode -- nothing of it is an order.
+        gpui_squad_just_opened = false;
+        bEdge = xEdge = yEdge = lbEdge = rbEdge = aEdge = false;
+        for (int i = 0; i < 4; i++) {
+            dirEdge[i] = false;
+        }
+    }
+
+    const char* blocked = NULL;
+    if (obj_dude == NULL || gpui_dude_down()) {
+        blocked = "dude";
+    } else if (gamepad_ui_menu_active() || inven_any_open() || dialog_active() || !intface_is_enabled()) {
+        blocked = "screen";
+    } else if (combat_rt_script_ui_locked()) {
+        blocked = "scene";
+    }
+    if (blocked != NULL) {
+        gpui_squad_close(blocked);
+        return;
+    }
+
+    gpui_squad_refresh_members();
+    if (gpui_squad_member_count == 0) {
+        gsound_play_sfx_file("iisxxxx1");
+        gpui_squad_close("no-companions");
+        return;
+    }
+
+    // A companion's weapon wheel is up: it has the pad (A, B and the sticks); the rest waits for it.
+    if (gpui_squad_wpn_who != NULL) {
+        if (!radial_wheel_is_open() || gpui_wheel_owner != GPUI_WHEEL_SQUAD_WEAPON) {
+            gpui_squad_weapon_close(); // somebody else closed it
+        } else {
+            gpui_squad_weapon_tick(pad, aEdge, bEdge);
+            if (gpui_squad_open) {
+                gpui_squad_paint();
+            }
+            return;
+        }
+    }
+
+    if (bEdge) {
+        trace_event(TRACE_INPUT, "squad-b", "close");
+        gpui_squad_close("b");
+        return;
+    }
+
+    if (lbEdge || rbEdge) {
+        // All -> the nearest -> ... -> the farthest -> All; LB the other way round.
+        int at = -1; // All
+        for (int i = 0; i < gpui_squad_member_count; i++) {
+            if (gpui_squad_members[i] == gpui_squad_who) {
+                at = i;
+            }
+        }
+        at += rbEdge ? 1 : -1;
+        if (at >= gpui_squad_member_count) {
+            at = -1;
+        } else if (at < -1) {
+            at = gpui_squad_member_count - 1;
+        }
+        gpui_squad_who = at >= 0 ? gpui_squad_members[at] : NULL;
+        gpui_squad_mute = NULL;
+        gsound_play_sfx_file("ib1p1xx1");
+        trace_event(TRACE_INPUT, "squad-who", "who=%s id=%d pid=%d index=%d of=%d", gpui_squad_who != NULL ? object_name(gpui_squad_who) : "all",
+            gpui_squad_who != NULL ? gpui_squad_who->id : -1, gpui_squad_who != NULL ? gpui_squad_who->pid : -1, at,
+            gpui_squad_member_count);
+    }
+
+    gpui_squad_follow_world();
+    bool moved = gpui_squad_move_cursor(pad);
+    gpui_squad_classify(moved || lbEdge || rbEdge);
+    gpui_squad_anchor_set();
+
+    char whoText[16];
+    gpui_squad_who_text(whoText, sizeof(whoText));
+
+    // X: hold fire for who -- or open fire, when every one of them already holds it (what the legend says X does).
+    if (xEdge) {
+        int order = combat_rt_squad_holds_fire(gpui_squad_who) ? COMBAT_RT_ORDER_OPEN_FIRE : COMBAT_RT_ORDER_HOLD_FIRE;
+        bool ok = combat_rt_squad_command(gpui_squad_who, order, NULL);
+        trace_event(TRACE_INPUT, "squad-x", "order=%s who=%s ok=%d", gpui_squad_order_name(order), whoText, ok ? 1 : 0);
+        if (gpui_squad_given(ok, order, "x")) {
+            return;
+        }
+    }
+
+    // Y: no healing for who -- or heal me again, when every one of them already keeps his supplies from him (what the
+    // legend says Y does). His pick of 2026-11-13, when GO went: „Y No healing“, after a press „Y Heal me again“. The
+    // party dialogue's own "stop patching me up" (combat_rt_medic_set_treats_player), so its line reads the flip and
+    // the realtime chunk saves it. X's way in everything: a fresh press only (prevY above, none on the open's tick),
+    // given -> the click and the mode closes (its close spends a Y still held, gpui_squad_close, and the Y-hold wheel
+    // stood aside while the mode was up, gpui_weapon_wheel), refused -> the buzz and the mode stays. With the medic
+    // beat switched off there is nothing to switch: no Y in the legend, and the press does nothing at all.
+    if (yEdge && combat_rt_medic_beat_enabled()) {
+        int order = combat_rt_squad_medic_off(gpui_squad_who) ? COMBAT_RT_ORDER_HEAL_AGAIN : COMBAT_RT_ORDER_NO_HEALING;
+        bool ok = combat_rt_squad_command(gpui_squad_who, order, NULL);
+        trace_event(TRACE_INPUT, "squad-y", "order=%s who=%s ok=%d", gpui_squad_order_name(order), whoText, ok ? 1 : 0);
+        if (gpui_squad_given(ok, order, "y")) {
+            return;
+        }
+    }
+
+    // The D-pad: design B's four, for who -- Up attacks the enemy under the cursor (nothing to attack: the buzz).
+    for (int i = 0; i < 4; i++) {
+        if (!dirEdge[i]) {
+            continue;
+        }
+        static const int orders[4] = {
+            COMBAT_RT_ORDER_ATTACK, // Up
+            COMBAT_RT_ORDER_FOLLOW, // Down
+            COMBAT_RT_ORDER_HOLD, // Left
+            COMBAT_RT_ORDER_CHARGE, // Right
+        };
+        static const char* const dirNames[4] = { "up", "down", "left", "right" };
+        int order = orders[i];
+        bool ok = false;
+        if (order != COMBAT_RT_ORDER_ATTACK || gpui_squad_kind == GPUI_SQUAD_ON_ENEMY) {
+            ok = combat_rt_squad_command(gpui_squad_who, order, order == COMBAT_RT_ORDER_ATTACK ? gpui_squad_on : NULL);
+        }
+        trace_event(TRACE_INPUT, "squad-dpad", "dir=%s order=%s who=%s ok=%d", dirNames[i], gpui_squad_order_name(order),
+            whoText, ok ? 1 : 0);
+        if (gpui_squad_given(ok, order, "dpad")) {
+            return;
+        }
+        break; // one direction a tick
+    }
+
+    // A: the order for what the cursor is on. Anything else -- free ground (GO's until 2026-11-13) too -- is no order:
+    // the trace says kind=none order=-, the buzz, and the mode stays.
+    if (aEdge) {
+        bool ok = false;
+        int order = -1;
+        switch (gpui_squad_kind) {
+        case GPUI_SQUAD_ON_ENEMY:
+            order = COMBAT_RT_ORDER_ATTACK;
+            ok = combat_rt_squad_command(gpui_squad_who, order, gpui_squad_on);
+            break;
+        case GPUI_SQUAD_ON_DUDE:
+            order = COMBAT_RT_ORDER_HEAL_ME;
+            ok = combat_rt_squad_command(gpui_squad_who, order, NULL);
+            break;
+        case GPUI_SQUAD_ON_COMPANION:
+            if (gpui_squad_weapon_open(gpui_squad_on)) {
+                gsound_play_sfx_file("ib1p1xx1");
+                trace_event(TRACE_INPUT, "squad-a", "kind=companion obj=%d who=%s wheel=1", gpui_squad_on->id, whoText);
+                gpui_squad_paint();
+                return;
+            }
+            break;
+        }
+        trace_event(TRACE_INPUT, "squad-a", "kind=%s order=%s obj=%d tile=%d who=%s ok=%d",
+            gpui_squad_kind_names[gpui_squad_kind], order >= 0 ? gpui_squad_order_name(order) : "-",
+            gpui_squad_on != NULL ? gpui_squad_on->id : -1, gpui_squad_tile, whoText, ok ? 1 : 0);
+        if (gpui_squad_given(ok, order, "a")) {
+            return;
+        }
+    }
+
+    gpui_squad_paint();
+}
+#endif
+
 // AIMING IS LB (hold = the called-shot window, which binds a part AND puts the weapon slot on its
 // AIMED mode) + RT (attack -- aimed while the slot shows the bullseye). RB is the heal since
 // 2026-10-09. ⚠️ RT IS ONLY EVER THE ATTACK BUTTON: while the picker is up that
@@ -8396,8 +10202,8 @@ static void gpui_aim_wheel(SDL_GameController* pad)
 
 
     // Don't run the aim picker while a wheel (skills on LB, drugs on Y, weapons on X, ammo on RB) owns the
-    // shared radial overlay.
-    if (radial_wheel_is_open()) {
+    // shared radial overlay -- nor the called-shot window over the squad command mode (LT + A).
+    if (radial_wheel_is_open() || gpui_squad_open) {
         gpui_aim_picker_close();
         return;
     }
@@ -8571,6 +10377,12 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
         && !gamepad_ui_menu_active()
         && !inven_any_open();
 
+    // THE SQUAD COMMAND MODE (LT + A) OWNS THE PAD WHILE IT IS UP, as a radial wheel does: its own driver on the tick
+    // reads every button and both sticks (gpui_squad_mode), so nothing below may act on them. Not under a modal that
+    // came up over it (a script's dialogue): that one's own loop never runs the tick that closes the mode, and would
+    // otherwise get no pad at all.
+    bool squadHeld = gpui_squad_open && !gamepad_ui_menu_active() && !dialog_active() && !inven_any_open();
+
     // Right stick -> cursor delta. Magnitude past the deadzone is rescaled to
     // 0..1 and squared so small pushes give fine control and full deflection is
     // fast. NOT while a screen drives its own nav (gpui_self_nav: main menu, options,
@@ -8595,7 +10407,7 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
     // An ARMED cursor (the rope, a skill) steps between the objects it can be used on, see
     // gpui_tpick_stick; where nothing lies that way it falls through to the free pointer below.
     bool tpickTook = false;
-    if (gpui_targeting_cursor_armed() && !lockedGameplay && !radial_wheel_is_open() && !gpui_self_nav
+    if (gpui_targeting_cursor_armed() && !lockedGameplay && !radial_wheel_is_open() && !squadHeld && !gpui_self_nav
         && !gamepad_ui_menu_active() && !dialog_active() && !inven_any_open()) {
         tpickTook = gpui_tpick_stick(x, y, mag);
     } else if (!gpui_targeting_cursor_armed()) {
@@ -8604,14 +10416,14 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
 
     // Pointing with the stick lights the prompt's target yellow for a moment, one candidate or several
     // (interact_prompt_note_stick, his call 2026-10-17).
-    if (mag > gpui_stick_deadzone && !lockedGameplay && !radial_wheel_is_open() && !gpui_aim_body_on
+    if (mag > gpui_stick_deadzone && !lockedGameplay && !radial_wheel_is_open() && !squadHeld && !gpui_aim_body_on
         && !gpui_aim_gesture && !gpui_self_nav && !gamepad_ui_menu_active() && !dialog_active()
         && !inven_any_open() && !gpui_targeting_cursor_armed()) {
         interact_prompt_note_stick();
     }
 
     bool ipPickTook = false;
-    if (!lockedGameplay && !radial_wheel_is_open() && !gpui_aim_body_on && !gpui_aim_gesture && !gpui_self_nav
+    if (!lockedGameplay && !radial_wheel_is_open() && !squadHeld && !gpui_aim_body_on && !gpui_aim_gesture && !gpui_self_nav
         && !gamepad_ui_menu_active() && !dialog_active() && !inven_any_open()
         && !gpui_targeting_cursor_armed()
         && interact_prompt_candidate_count() >= 2) {
@@ -8699,7 +10511,7 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
     }
     lastCursorCallMs = cursorNowMs;
 
-    if (mag > gpui_stick_deadzone && (selfNavCursor || (!inWorld && !gpui_self_nav)) && !ipPickTook && !tpickTook && !lockedGameplay && !radial_wheel_is_open() && !gpui_aim_body_on && !gpui_aim_gesture) {
+    if (mag > gpui_stick_deadzone && (selfNavCursor || (!inWorld && !gpui_self_nav)) && !ipPickTook && !tpickTook && !lockedGameplay && !radial_wheel_is_open() && !squadHeld && !gpui_aim_body_on && !gpui_aim_gesture) {
         float t = (mag - gpui_stick_deadzone) / (1.0f - gpui_stick_deadzone);
         if (t > 1.0f) {
             t = 1.0f;
@@ -8755,8 +10567,9 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
     // While a radial wheel (skill on L3) OR the on-body aimed-shot picker (LB) is up, the right
     // stick is selecting and the hold button owns the frame: suppress the face-button
     // click/shortcut actions so a stray A/B/X/Y can't fire a world click or open a menu
-    // mid-selection. (Both are driven from gamepad_ui_tick, not here.)
-    if (!radial_wheel_is_open() && !gpui_aim_body_on) {
+    // mid-selection. (Both are driven from gamepad_ui_tick, not here.) The squad command mode the same: its
+    // close bumps the input epoch, so the presses it took are spent when these come back (gpui_squad_close).
+    if (!radial_wheel_is_open() && !squadHeld && !gpui_aim_body_on) {
         // A/Y -> left mouse button (interact/attack arbitration) and left-stick
         // navigation of hold-drag action popups. Called UNCONDITIONALLY: it suppresses
         // itself under self_nav, but only after updating its press edges -- see the note
@@ -8867,7 +10680,7 @@ static SDL_GameController* gpui_rumble_pad()
     }
     if (in_main_menu || gpui_no_session || gpui_in_dpad_screen || gpui_action_popup_active
         || gamepad_ui_menu_active() || inven_any_open() || options_is_open() || dialog_active()
-        || radial_wheel_is_open()) {
+        || radial_wheel_is_open() || gpui_squad_open) {
         return NULL;
     }
     return gamepad_ui_get_controller();
@@ -9162,6 +10975,37 @@ static void gpui_drain_requests()
         gpui_run_to_exit();
     }
 
+#if FALLOUT_RT_GAME == 2
+    // SQUAD ORDERS (LT + a D-pad press, gpui_button_shortcuts). Not under a script's scene, nor long after the press
+    // (it was read in the hook, which runs in every loop). A refusal buzzes -- no lock to attack, nobody to take the
+    // Distance -- the way the pad's other refusals do; an order taken clicks, and a companion says so.
+    if (gpui_squad_order_pending != -1) {
+        int order = gpui_squad_order_pending;
+        gpui_squad_order_pending = -1;
+        if (combat_rt_script_ui_locked() || elapsed_time(gpui_squad_order_since) > GPUI_HEAL_STALE_MS) {
+            trace_event(TRACE_INPUT, "squad-order-dropped", "order=%d lock=%d age=%u", order,
+                combat_rt_script_ui_locked() ? 1 : 0, elapsed_time(gpui_squad_order_since));
+        } else if (combat_rt_squad_order(order)) {
+            gsound_play_sfx_file("ib1p1xx1");
+        } else {
+            gsound_play_sfx_file("iisxxxx1");
+        }
+    }
+
+    // SQUAD COMMAND: LT + A (gpui_action_buttons) opens the mode here -- before the wheels' A edge is judged, so the
+    // opening press is the mode's (gpui_a_for_wheel) and never the start of a use-on hold. Not under a script's scene,
+    // nor long after the press, like the orders above.
+    if (gpui_squad_open_pending) {
+        gpui_squad_open_pending = false;
+        if (combat_rt_script_ui_locked() || elapsed_time(gpui_squad_open_since) > GPUI_HEAL_STALE_MS) {
+            trace_event(TRACE_INPUT, "squad-mode", "dropped lock=%d age=%u", combat_rt_script_ui_locked() ? 1 : 0,
+                elapsed_time(gpui_squad_open_since));
+        } else {
+            gpui_squad_open_mode();
+        }
+    }
+#endif
+
     // The keyboard's called shot (V, or a right-click on an enemy). The same window and the same
     // binding as the pad's R3 in gpui_aim_wheel: choosing a part binds it and puts the weapon slot
     // on AIMED, nothing is fired here. It opens on the enemy the mouse is aiming at, or failing that
@@ -9222,6 +11066,20 @@ void gamepad_ui_request_called_shot()
 bool gamepad_ui_handle_key(int* keyCode)
 {
     int key = *keyCode;
+
+#if FALLOUT_RT_GAME == 2
+    // The squad command mode (LT + A) holds the keyboard as it holds the pad: Esc backs out of it like B, and nothing
+    // else reaches the world under it -- no reload, no inventory, no save or load while it slows and holds the world, and
+    // no mouse click (-2) walking the dude off under it either.
+    if (gpui_squad_open && key != -1 && obj_dude != NULL && !gamepad_ui_menu_active()) {
+        if (key == KEY_ESCAPE) {
+            trace_event(TRACE_INPUT, "kbm-key", "key=ESC squad=1");
+            gpui_squad_close("esc");
+        }
+        return true;
+    }
+#endif
+
     if (key < 0 || obj_dude == NULL || gamepad_ui_menu_active()) {
         return false;
     }
@@ -9331,15 +11189,49 @@ void gamepad_ui_inventory_tick()
     intface_update_quick_slot_lb(item, count, gpui_qs_drawn(GPUI_QS_LB));
 }
 
+// PAUSE THE WORLD WHILE A WHEEL IS UP -- or the squad command mode (LT + A), once its slowdown has run out. combat_rt
+// freezes its own clock (see combat_rt_update), but critter animations and scripts run off the engine's background
+// processes, so without this the enemies would keep walking and swinging behind the panel while you picked a stimpak.
+//
+// ⚠️ THE SQUAD COMMAND MODE SLOWS FIRST (his pick 2026-11-12: „nejdříve zpomalení a pak zastavení“): for its first
+// 1.5 s the world winds down on combat_rt's rate (combat_rt_world_rate: the animations' own clock, the combat model,
+// the game clock) and is held here only when combat_rt_squad_mode_frozen says the slowdown is over. Its own weapon
+// wheel (WEAPON) is the mode's -- it follows the slowdown too, and no other wheel opens over the mode.
+//
+// Edge-triggered against the previous frame: isoDisable / isoEnable are a switch in Fallout 2 (a counter in Fallout 1),
+// and calling disable every frame the wheel is up would sink a counter arbitrarily deep. Called after the wheel drivers
+// so an open and its pause land in the same frame -- and from the no-pad branch too, where a wheel or the mode closed
+// for the pad going away used to leave the world paused until it came back. The hand-off from the mode to a
+// companion's weapon wheel keeps it held, with no toggle.
+static void gpui_world_hold_sync()
+{
+    static bool held = false;
+    bool want = gpui_squad_open ? combat_rt_squad_mode_frozen() : radial_wheel_is_open();
+    if (want != held) {
+        held = want;
+        if (want) {
+            map_disable_bk_processes();
+        } else {
+            map_enable_bk_processes();
+        }
+        trace_event(TRACE_FLOW, "world-hold", "%s why=%s", want ? "on" : "off",
+            gpui_squad_open ? "squad" : (radial_wheel_is_open() ? "wheel" : "-"));
+    }
+}
+
 void gamepad_ui_tick()
 {
     SDL_GameController* pad = gamepad_ui_get_controller();
     if (pad == NULL) {
         // Controller vanished mid-selection: drop the overlay so it can't linger.
+#if FALLOUT_RT_GAME == 2
+        gpui_squad_close("no-pad"); // ...and the squad command mode with it (its weapon wheel included)
+#endif
         if (radial_wheel_is_open()) {
             radial_wheel_close();
             gpui_wheel_owner = GPUI_WHEEL_NONE;
         }
+        gpui_world_hold_sync();
         // No controller -> restore the pointer (a mouse/keyboard player needs it).
         gmouse_set_move_cursor_hidden(false);
 
@@ -9367,6 +11259,13 @@ void gamepad_ui_tick()
     // Sample the hostile-in-range answer HERE (safe main-loop context), not in the mouse hook --
     // the query reads protos off disk and the hook can run from inside the engine's file I/O.
     gpui_hostile_in_range_cached = combat_rt_hostile_in_attack_range();
+#if FALLOUT_RT_GAME == 2
+    // ...and whether LT + A has anyone to order (the squad command mode), for the same reason.
+    {
+        Object* members[GPUI_SQUAD_MAX];
+        gpui_squad_have_companion = combat_rt_squad_members(members, GPUI_SQUAD_MAX) > 0;
+    }
+#endif
 
     // A = SELECT for every radial wheel, sampled ONCE here so all five wheels share one edge.
     // Sampled every tick whether or not a wheel is open, and that is the point: A doubles as the
@@ -9404,45 +11303,37 @@ void gamepad_ui_tick()
 
     // The dude dead or out: no request, no wheel, and a wheel already up closes (gpui_dude_down).
     bool dudeDown = gpui_dude_down();
+#if FALLOUT_RT_GAME == 2
+    if (dudeDown) {
+        gpui_squad_close("dude"); // the squad command mode, its weapon wheel included
+    }
+#endif
     if (dudeDown && radial_wheel_is_open()) {
         radial_wheel_close();
         gpui_wheel_owner = GPUI_WHEEL_NONE;
     }
 
-    // The requests from the hook and the keyboard (heal, reload, exit run, called shot).
+    // The requests from the hook and the keyboard (heal, reload, exit run, called shot, the squad command mode).
     if (!dudeDown) {
         gpui_drain_requests();
 
         // An A pressed while a wheel is up belongs to that wheel: it picks and closes it below, and the
-        // A-hold tracker after them must not take the same press as a use-on hold (gpui_useon_arm).
-        gpui_a_for_wheel = radial_wheel_is_open() && gpui_wheel_a_edge;
+        // A-hold tracker after them must not take the same press as a use-on hold (gpui_useon_arm). The squad
+        // command mode's the same -- the LT + A that opened it this tick included.
+        gpui_a_for_wheel = (radial_wheel_is_open() || gpui_squad_open) && gpui_wheel_a_edge;
         gpui_skill_wheel(pad);
         gpui_quick_wheel(pad);
         gpui_weapon_wheel(pad);
         gpui_exit_wheel(pad); // opened by the BACK hold's request, drained just above
+#if FALLOUT_RT_GAME == 2
+        gpui_squad_mode(pad); // after the wheels: their guards see this tick's B and Y with the mode still up
+#endif
         gpui_aim_wheel(pad);
         gpui_useon_arm(pad);
     }
     gpui_wheel_a_edge = false; // consumed by whichever wheel was open
 
-    // PAUSE THE WORLD WHILE A WHEEL IS UP. combat_rt freezes its own clock (see combat_rt_update),
-    // but critter animations and scripts run off the engine's background processes, so without this
-    // the enemies would keep walking and swinging behind the panel while you picked a stimpak.
-    //
-    // Edge-triggered against the previous frame, and it must be, because these calls are a COUNTER
-    // inside the engine, not a flag: calling disable every frame the wheel is up would sink it
-    // arbitrarily deep and one enable would never bring it back. Toggled after the wheel drivers
-    // above so an open and its pause land in the same frame.
-    static bool gpui_wheel_paused = false;
-    bool wheelUp = radial_wheel_is_open();
-    if (wheelUp != gpui_wheel_paused) {
-        gpui_wheel_paused = wheelUp;
-        if (wheelUp) {
-            map_disable_bk_processes();
-        } else {
-            map_enable_bk_processes();
-        }
-    }
+    gpui_world_hold_sync();
 
     // Contextual world "use" prompt (nearest interactable + floating hand + A to use). Safe main-
     // loop context, so it also performs any interaction the A hook queued this frame.
@@ -9526,6 +11417,10 @@ void gamepad_ui_init()
         gpui_acquire();
     }
     mouse_set_input_hook(gpui_mouse_hook);
+#if FALLOUT_RT_GAME == 2
+    // The squad command mode's marks ride on combat_rt's world overlay, and combat_rt tells it what is being freed.
+    combat_rt_set_squad_mode_hooks(gpui_squad_overlay, gpui_squad_forget);
+#endif
     // Cursor-hiding TEMPORARILY DISABLED: it kept stranding controller input. With the
     // hook not installed the mouse is 100% vanilla (cursor always drawn, input tracked
     // everywhere). Re-enable by restoring this call once hiding is proven safe.
@@ -9534,6 +11429,10 @@ void gamepad_ui_init()
 
 void gamepad_ui_exit()
 {
+#if FALLOUT_RT_GAME == 2
+    gpui_squad_forget(NULL); // its windows, and the world held for it
+    combat_rt_set_squad_mode_hooks(NULL, NULL);
+#endif
     gpui_free_skill_art();
     gpui_icons_release();
 

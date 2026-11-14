@@ -1,0 +1,54 @@
+# SQUAD COMMAND (2026-11-13, his pick when GO went: the LT + A mode stays without GO, and Y in it switches their healing
+# of him -- „Y No healing“): NO HEALING, then HEAL AGAIN, given straight to combat_rt -- the medic opt-out the party
+# dialogue line toggles („(Stop patching me up. Save your supplies.)“), for All.
+# The dude is at 150 of 400 HP, under the medic's 50 %. Vic (10mm pistol, five stimpaks) stands beside him: HOLD keeps
+# him there (the medic doses within 3 tiles) and HOLD FIRE keeps the fight on -- he never shoots the knife raider that
+# comes at the dude from off the screen at 1 s, so nobody ends it, and one holding his fire still heals (the medic is a
+# fighter's beat). NO HEALING before it all: his medic beat never doses the dude (rt_medic_patient passes him over) --
+# yet HEAL ME at 5 s is answered, it goes past the opt-out: he asked. HEAL AGAIN at 10 s: the beat doses the dude
+# again, once the 6 s cooldown of the HEAL ME dose has run out. NO HEALING / HEAL AGAIN write no Distance (HOLD's Stay
+# stays).
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-noheal.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-noheal
+map DESERT1.MAP
+seed 1
+duration 20
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 150
+dude armor 2
+
+spawn 16777278 20102 rot 2 wield 8 item 29 3 item 40 5 party
+spawn 16777455 16700 rot 2 wield 4 team 50
+
+# Vic stays beside him and holds his fire; no healing of the dude from him
+squad 100 hold all
+squad 150 holdfire all
+squad 200 noheal all
+# the fight: the knife raider turns on the dude
+hostile 1000 16777455
+# A on the dude (HEAL ME): past the opt-out
+squad 5000 healme all
+# HEAL AGAIN (what Y gives once every one of who keeps his supplies)
+squad 10000 healagain all
+note 19000 end
+
+# the checks (run.js)
+expect \[FLOW/autotest\] squad t=\d+ order=noheal who=-1 whoId=-1 arg=-1 ok=1
+expect \[ACTION/squad-order\] order=no-healing target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
+expect \[FLOW/medic-optout\] id=18062 treats=0 count=1
+expect \[FLOW/autotest\] hostile t=\d+ pid=16777455 id=\d+
+# the fight was on for him: he would take the raider, but holds his fire
+expect \[FLOW/squad-fire\] refuse id=18062 pid=16777278 tgt=\d+ tgtPid=16777455
+# HEAL ME goes past the opt-out
+expect \[FLOW/squad-heal\] dose id=18062 pid=16777278 item=40 kind=1 ok=1
+expect \[FLOW/medic\] id=18062 pid=16777278 patient=18000 self=0 kind=1 item=40 .*why=heal-me
+expect \[FLOW/autotest\] squad t=\d+ order=healagain who=-1 whoId=-1 arg=-1 ok=1
+expect \[ACTION/squad-order\] order=heal-again target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
+expect \[FLOW/medic-optout\] id=18062 treats=1 count=0
+# ...and his medic beat doses the dude again
+expect \[FLOW/medic\] id=18062 pid=16777278 patient=18000 self=0 kind=1 item=40 .* ap=\d+ t=1\d\.\d+ why=beat
+# held: no dose of the beat's to him before HEAL AGAIN (t is rt_clock, about the timeline's seconds); his Distance
+# untouched by either order (a Distance table entry left out would write Stay close)
+expect-not \[FLOW/medic\] id=18062 pid=16777278 patient=18000 .* ap=\d+ t=\d\.\d+ why=beat
+expect-not \[FLOW/party-distance\] id=\d+ pid=16777278 dist=stay-close was=stay

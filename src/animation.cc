@@ -3970,6 +3970,41 @@ static int _anim_animate(Object* obj, int anim, int animationSequenceIndex, int 
     return 0;
 }
 
+// THE ANIMATION CLOCK (Fallout 2 Realtime, 2026-11-12). Every animation is timed against this clock, not the wall
+// clock: when a frame is due (_object_animate), the smooth-movement glides between steps (anim_smooth_*), the stride
+// holds and the cadence holds. It keeps pace with real time, millisecond for millisecond (until the first slowdown it
+// is getTicks() itself), except while something slows the world: the squad command mode's slowdown (his pick: „ten
+// efekt bude nejdříve zpomalení a pak zastavení“, combat_rt_world_rate) runs it at the world's rate, eased down toward
+// a standstill and then held, and the mode's close lets it run at full pace again at once -- from where it stood, so
+// nothing jumps. Slowing the CLOCK rather than the ticksPerFrame is what slows everything already under way: an
+// animation takes its ticksPerFrame when it starts (only walk and run steps re-time, see the note in _object_move), so a
+// swing in the air, a projectile in flight or a glide half done would otherwise finish at full speed -- and one started
+// during the slowdown would keep a slowed tpf after the world sped up again.
+// ⚠️ Every timestamp compared with this clock must come from it (getTicksBetween refuses a start after its end).
+static double anim_clock_virtual = 0.0; // the clock at anim_clock_real
+static unsigned int anim_clock_real = 0; // getTicks() at the last change of rate
+static float anim_clock_rate = 1.0f;
+static bool anim_clock_started = false;
+
+static unsigned int anim_clock_now()
+{
+    unsigned int real = getTicks();
+    if (!anim_clock_started) {
+        anim_clock_started = true;
+        anim_clock_real = real;
+        anim_clock_virtual = (double)real;
+    }
+    double now = anim_clock_virtual + (double)(real - anim_clock_real) * anim_clock_rate;
+    float rate = combat_rt_world_rate();
+    if (rate != anim_clock_rate) {
+        // A new rate from now on: what ran so far ran at the old one.
+        anim_clock_virtual = now;
+        anim_clock_real = real;
+        anim_clock_rate = rate;
+    }
+    return (unsigned int)now;
+}
+
 // How long the frame on screen holds before the next one (Fallout 2, the throw's wind-up and snap -- see
 // RT_THROW_WINDUP). ⚠️ The sad's ticksPerFrame itself is never touched (see its note above): this only
 // reads it. ⚠️ The animation comes from the sad's FID: an ANIMATE sad never fills ->anim (only
@@ -4016,7 +4051,7 @@ void _object_animate()
 
         Object* object = sad_entry->obj;
 
-        unsigned int time = getTicks();
+        unsigned int time = anim_clock_now(); // the world's pace (anim_clock_now), not the wall's
         if (getTicksBetween(time, sad_entry->animationTimestamp) < anim_frame_ticks(sad_entry, object)) {
             continue;
         }
@@ -6131,7 +6166,7 @@ static void anim_smooth_end(Object* obj, float drawnX, float drawnY, unsigned in
     s->elevation = obj->elevation;
     s->fromX = drawnX;
     s->fromY = drawnY;
-    s->t0 = getTicks();
+    s->t0 = anim_clock_now(); // the glide runs on the world's clock, slowed with it (anim_clock_now)
 
     // A hair LONGER than the step itself, so the glide is still under way when the next step lands
     // and the motion never pauses on a step boundary. The lag that builds settles at a few percent
@@ -6199,7 +6234,7 @@ static void anim_smooth_settle(Object* obj, const Rect* before)
     sm->elevation = obj->elevation;
     sm->fromX = wx + ox;
     sm->fromY = wy + oy;
-    sm->t0 = getTicks();
+    sm->t0 = anim_clock_now();
     sm->dur = ANIM_SETTLE_MS;
     sm->dx = (int)lroundf(ox);
     sm->dy = (int)lroundf(oy);
@@ -6327,7 +6362,7 @@ void anim_smooth_tick()
         return;
     }
 
-    unsigned int now = getTicks();
+    unsigned int now = anim_clock_now(); // the clock the glides were stamped with
 
     for (int i = 0; i < anim_smooth_count;) {
         AnimSmooth* s = &(anim_smooth[i]);
@@ -6396,7 +6431,7 @@ static bool anim_defer_stand(Object* obj)
 {
     for (int i = 0; i < anim_deferred_count; i++) {
         if (anim_deferred[i].obj == obj) {
-            anim_deferred[i].since = getTicks();
+            anim_deferred[i].since = anim_clock_now();
             return true;
         }
     }
@@ -6406,7 +6441,7 @@ static bool anim_defer_stand(Object* obj)
     }
 
     anim_deferred[anim_deferred_count].obj = obj;
-    anim_deferred[anim_deferred_count].since = getTicks();
+    anim_deferred[anim_deferred_count].since = anim_clock_now();
     anim_deferred_count++;
     anim_stat_stride_holds++;
     return true;
@@ -6422,7 +6457,7 @@ static void anim_deferred_stands(bool now)
         return;
     }
 
-    unsigned int time = getTicks();
+    unsigned int time = anim_clock_now(); // the clock the holds were stamped with
 
     for (int i = 0; i < anim_deferred_count;) {
         Object* obj = anim_deferred[i].obj;

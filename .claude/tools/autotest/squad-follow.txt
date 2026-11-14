@@ -1,0 +1,37 @@
+# SQUAD ORDERS (2026-11-11, his design "B"): LT + D-pad Down = FOLLOW (COMBAT CONTROL Distance "Stay close").
+# Sulik (a knife: his art has no club) comes on his own packet's Distance, Charge: he runs out at a pistol raider 16
+# tiles off (party-charge). Vic (10mm pistol) is on Stay close already. At 3 s LT + Down: both take FOLLOW. Sulik, far
+# out by then, must turn back toward the dude (party-leash, follow-step why=leash) instead of chasing on; Vic keeps
+# shooting from where he is (the raider is in his reach). Then the dude walks off to the right and they come after him.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-follow.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-follow
+map DESERT1.MAP
+seed 1
+duration 25
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777313 20302 rot 2 wield 4 party
+spawn 16777278 19902 rot 2 wield 8 item 29 3 party
+spawn 16777454 23300 rot 5 wield 8 item 29 2 hostile
+
+# Sulik charges on his own for 3 s; then LT down, Down = FOLLOW, LT up
+axis 3000 LT 32767
+tap 3200 DOWN
+axis 3600 LT -32768
+# the dude walks off to the right for 2.5 s
+axis 9000 LX 32767
+axis 11500 LX 0
+note 23000 end
+
+# the checks (run.js)
+expect \[FLOW/party-distance\] id=\d+ pid=16777313 dist=charge
+expect \[FLOW/party-charge\] id=\d+ pid=16777313 tgt=\d+ tgtPid=16777454
+expect \[ACTION/squad-order\] order=follow target=- companions=2 skipped=0 why=ok speaker=\d+
+expect \[FLOW/party-distance\] id=\d+ pid=16777313 dist=stay-close was=charge
+expect \[FLOW/party-leash\] id=\d+ pid=16777313 dist=\d+ limit=7
+expect \[FLOW/follow-step\] id=\d+ pid=16777313 dist=\d+ blk=-?\d+ limit=5 why=leash
+expect \[COMBAT/attack\] NPC aid=\d+ ->pid=16777454
+# no charging after the order (t is rt_clock: the order is at ~3.2 s)
+expect-not \[FLOW/party-charge\] id=\d+ pid=16777313 .*t=([4-9]|\d\d+)\.

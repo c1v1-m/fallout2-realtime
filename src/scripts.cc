@@ -848,7 +848,23 @@ static void _script_chk_critters()
                     proc = slaveRunHeartbeatProc(script);
                 }
                 if (proc != -1 && !combat_rt_critter_fighting(script->owner)) {
+                    // ⚠️ SQUAD COMMAND (Fallout 2 Realtime, 2026-11-12, his „vyléčit mě“): a companion on its way to
+                    // him with a stimpak (HEAL ME) must not be walked back to the dude by its own party script's
+                    // follow -- animate_move_obj_to_tile once it is 3FD/2 tiles off, and reg_anim_func(CLEAR) on its
+                    // walk. Every companion's follow asks GVAR_PARTY_NO_FOLLOW first, vanilla's own switch (the
+                    // scenes set it), so its heartbeat runs with that switch on and the rest of its critter_p_proc --
+                    // its karma checks, leaving the party -- as ever. Put back after, unless the script wrote it
+                    // itself. (GO's post, a tile he sent them to, was held the same way until he took GO out on
+                    // 2026-11-13: „nehodí se to do této action oriented verze“.)
+                    bool followHeld = combat_rt_party_follow_held(script->owner);
+                    int noFollowWas = followHeld ? gameGetGlobalVar(GVAR_PARTY_NO_FOLLOW) : 0;
+                    if (followHeld) {
+                        gameSetGlobalVar(GVAR_PARTY_NO_FOLLOW, 1);
+                    }
                     scriptExecProc(script->sid, proc);
+                    if (followHeld && gameGetGlobalVar(GVAR_PARTY_NO_FOLLOW) == 1) {
+                        gameSetGlobalVar(GVAR_PARTY_NO_FOLLOW, noFollowWas);
+                    }
                 }
             }
         }
@@ -909,7 +925,10 @@ static void _script_chk_timed_events()
                 }
             }
 
-            clockCarry += rate;
+            // ...and with the world: the squad command mode's slowdown (Fallout 2 Realtime, 2026-11-12, his „nejdříve
+            // zpomalení a pak zastavení“) slows the clock with everything else on its way to the hold, where the
+            // scripts stop altogether (map_disable_bk_processes). combat_rt_world_rate is 1 otherwise.
+            clockCarry += rate * combat_rt_world_rate();
             int whole = (int)clockCarry;
             clockCarry -= (float)whole;
             gGameTime += whole;

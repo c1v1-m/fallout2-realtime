@@ -27,7 +27,7 @@ note 12000 the world should be back
 
 # the checks (run.js)
 expect-count 1 \[FLOW/controls-open\]
-expect \[FLOW/controls-open\] rows=24 size=\d+x\d+
+expect \[FLOW/controls-open\] rows=26 size=\d+x\d+
 expect \[FLOW/controls-closed\] by=esc
 # the pause menu stayed up from START to the last B
 expect-not \[FLOW/autotest\] modal none t=[2-9]\d\d\d

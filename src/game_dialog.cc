@@ -4664,6 +4664,9 @@ void partyMemberControlWindowHandleEvents()
             }
 
             if (keyCode == KEY_LOWERCASE_W) {
+                // "Use best weapon" chooses for it: the weapon the squad command gave it (Fallout 2 Realtime,
+                // 2026-11-12) is forgotten, or it would take that one back out the moment the talk ends.
+                combat_rt_squad_forget_weapon(gGameDialogSpeaker, "panel");
                 _inven_unwield(gGameDialogSpeaker, 1);
 
                 Object* weapon = _ai_search_inven_weap(gGameDialogSpeaker, 0, nullptr);

@@ -1,0 +1,54 @@
+# SQUAD COMMAND BY THE PAD: WEAPON (2026-11-12, his design "A", „změň zbraň“). Vic holds a loaded 10mm pistol and
+# carries a knife. LT + A opens the mode (no enemy on the screen: the cursor 3 tiles in front of the dude), the right
+# stick takes the cursor onto Vic: WEAPON. A opens his wheel ("Vic": Auto, his pistol, the knife); the stick aims the
+# knife, A picks it: "Got it.", the mode closes, he takes it in hand at once. Then a knife raider, off the screen until
+# now and neutral, turns on the dude and comes: Vic fights with the knife -- the AI never trades it back for the pistol
+# he is better with.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-weapon.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-pad-weapon
+map DESERT1.MAP
+seed 1
+duration 18
+dude tile 20100 rot 2
+dude stat PE 8
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 item 4 1 party
+spawn 16777455 16700 rot 2 wield 4 team 50 hp 60
+
+# LT + A: the mode, the cursor 3 tiles ahead (474,226)
+axis 500 LT 32767
+tap 700 A
+axis 1000 LT -32768
+# the cursor onto Vic (474,226 -> 314,180)
+axis 1300 RX -18895
+axis 1300 RY -5432
+axis 2093 RX 0
+axis 2093 RY 0
+# A: his weapon wheel -- Auto at the top, then clockwise his weapons (the open line: seg1 the knife, at 4 o'clock;
+# seg2 the pistol, at 8); the stick aims the knife
+tap 2600 A
+axis 3200 RX 28377
+axis 3200 RY 16384
+tap 3500 A
+axis 3800 RX 0
+axis 3800 RY 0
+# the fight
+hostile 6000 16777455
+note 17500 end
+
+# the checks (run.js)
+expect \[INPUT/squad-cursor\] on kind=companion ok=1 obj=18062 pid=16777278
+expect \[INPUT/squad-weapon-wheel\] open id=18062 pid=16777278 weapons=2 pick=-1 hand=8 seg0=auto seg1=4 seg2=8
+expect \[INPUT/squad-weapon-wheel\] pick seg=\d wpn=4 ok=1
+expect \[ACTION/squad-order\] order=weapon target=4 companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=18062
+expect \[FLOW/squad-weapon\] pin id=18062 pid=16777278 wpn=4 was=-1 hand=8
+expect \[FLOW/squad-weapon\] take id=18062 pid=16777278 wpn=4 was=8 why=pin
+expect \[INPUT/squad-mode\] close why=weapon
+expect \[FLOW/autotest\] hostile t=\d+ pid=16777455 id=\d+
+expect \[FLOW/squad-weapon\] keep id=18062 pid=16777278 wpn=4
+expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777455
+# kept: the AI never draws another weapon for him while the pick holds, and the pick never lapses
+expect-not \[FLOW/(draw-weapon|npc-swap-weapon)\] (npc )?(id=18062 )?pid=16777278
+expect-not \[FLOW/squad-weapon\] (lapse|hopeless) id=18062

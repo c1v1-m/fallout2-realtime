@@ -1,0 +1,64 @@
+# SQUAD COMMAND MODE: FIRST A SLOWDOWN, THEN THE STOP (2026-11-12, his pick: „ten efekt bude nejdříve zpomalení a pak
+# zastavení. prostě prvně se bude zpomalovat 1-3 sekund třeba 1 nebo 2 a pak se zastaví“). The dude is hurt and Vic,
+# 12 tiles off with a stimpak, is told HEAL ME; while he comes, LT + A opens the mode. The world eases from full speed
+# to a standstill over 1.5 s of real time -- rt_clock and Vic (the probe: the critter on the move nearest the dude)
+# advance less and less on every [FLOW/squad-mode] slow line -- then holds still exactly as under a radial wheel
+# (world-hold on; neither rt_clock nor Vic moves until B). B: everything runs at full speed at once, Vic comes on and
+# doses the dude. Then an order given DURING the slowdown (X, hold fire, 0.4 s after the open) is given at once and the
+# world never holds. Then LT + D-pad (design B) opens nothing and slows nothing. (GO's walk to a post was the walker
+# until GO went, 2026-11-13.)
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-mode-slow.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-mode-slow
+map DESERT1.MAP
+seed 1
+duration 13
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 200
+dude armor 2
+
+spawn 16777278 20112 rot 5 wield 8 item 29 3 item 40 1 party
+
+# Vic comes to dose him (HEAL ME, 12 tiles: rt_step_toward's 4-tile legs, run while his AP lasts)
+squad 300 healme 16777278
+# ...and 0.7 s into his walk, LT + A: the mode opens, the world slows for 1.5 s, then holds
+axis 800 LT 32767
+tap 1000 A
+axis 1300 LT -32768
+# held for a while; B: the world runs again, at once
+tap 4500 B
+# an order in the slowdown: LT + A, X 0.4 s later -- HOLD FIRE given at once, the mode closes before the hold
+axis 7000 LT 32767
+tap 7200 A
+axis 7400 LT -32768
+tap 7600 X
+# design B: LT + D-pad Down (FOLLOW) -- no mode, no slowdown
+axis 9500 LT 32767
+tap 9800 DOWN
+axis 10100 LT -32768
+note 12500 end
+
+# the checks (run.js)
+# 1. the open, with Vic on the move as the probe
+expect \[FLOW/squad-mode\] open why=lt\+a slow=1\.50 probe=\d+ probePid=16777278
+# the slowdown: lines from nearly full speed down to the floor, rt_clock creeping less and less
+expect \[FLOW/squad-mode\] slow f=0\.9\d after=0\.\d\d rt=\+0\.(0[5-9]|1[0-3])\d probe=\d+ moved=\d+
+expect \[FLOW/squad-mode\] slow f=0\.[3-6]\d after=0\.\d\d rt=\+0\.0[1-7]\d probe=\d+ moved=\d+
+expect \[FLOW/squad-mode\] slow f=0\.0\d after=1\.\d\d rt=\+0\.0[01]\d probe=\d+ moved=[0-2] dude=
+expect-count >=10 \[FLOW/squad-mode\] slow f=
+# ...and then the hold, after 1.5 s of real time and about half of that on rt_clock
+expect \[FLOW/squad-mode\] freeze after=1\.5\d rtSlowed=0\.[5-9]\d\d probe=\d+
+expect-count 1 \[FLOW/squad-mode\] freeze
+expect \[FLOW/world-hold\] on why=squad
+# B: nothing moved while it held -- rt_clock to the millisecond, Vic to the pixel
+expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000 probeHeld=0
+expect \[FLOW/world-hold\] off
+# ...and Vic came on and dosed him afterwards
+expect \[FLOW/squad-heal\] dose id=\d+ pid=16777278 item=40 kind=1 ok=1
+# 2. an order in the slowdown: given at once, the mode closed before the hold, the world never held for it
+expect \[ACTION/squad-order\] order=hold-fire target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
+expect \[FLOW/squad-mode\] close why=x slowed=0\.[3-7]\d frozen=0 heldMs=0
+expect-count 1 \[FLOW/world-hold\] on why=squad
+# 3. design B's LT + D-pad opens no mode
+expect \[ACTION/squad-order\] order=follow target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
+expect-count 2 \[FLOW/squad-mode\] open why=

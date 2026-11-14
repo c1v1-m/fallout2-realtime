@@ -1,0 +1,33 @@
+# SQUAD COMMAND MODE: THE DUDE COASTS TO THE STOP WITH THE WORLD (2026-11-12, his pick „nejdříve zpomalení a pak
+# zastavení“). The dude walks right with the left stick; LT + A opens the mode with the stick still pushed. The stick is
+# the mode's now (its cursor, once it has been back in the centre), not his legs -- but the walk he had going does not
+# stop dead: he coasts on his heading, slower and slower with everyone else, and stands still at the hold. B: the world
+# runs again; the stick let go meanwhile, so he stands.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-mode-coast.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-mode-coast
+map DESERT1.MAP
+seed 1
+duration 9
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 party
+
+# walking right; LT + A at 1.5 s with the stick still pushed; the stick let go inside the mode
+axis 500 LX 32767
+axis 1300 LT 32767
+tap 1500 A
+axis 1800 LT -32768
+axis 2600 LX 0
+tap 5000 B
+note 8500 end
+
+# the checks (run.js)
+expect \[FLOW/squad-mode\] open why=lt\+a slow=1\.50
+# he coasts: early lines move him several pixels a tenth of a second, the last ones not at all
+expect \[FLOW/squad-mode\] slow f=0\.9\d .* dude=([4-9]|\d\d) t=
+expect \[FLOW/squad-mode\] slow f=0\.0\d .* dude=[0-1] t=
+expect \[FLOW/squad-mode\] freeze after=1\.5\d
+expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+expect-not \[ACTION/interact-(queue|do)\]

@@ -1,0 +1,52 @@
+# SQUAD COMMAND BY THE PAD: HEAL ME (2026-11-12, his design "A", „vyléčit mě“). The dude is hurt (200 of 400). Vic
+# (stimpaks) stands 4 tiles left of him, Sulik (nothing to heal with) right below. LT + A opens the mode (the cursor 3
+# tiles in front of the dude), RB picks Sulik, the right stick brings the cursor onto the dude: HEAL ME, grey -- A is
+# refused ("No meds." over Sulik, the buzz) and the mode stays. RB: who = Vic, HEAL ME green, A: he comes and doses
+# the dude with a stimpak at once (the medic's dose, past its threshold, cooldown and opt-out), "Hold still.".
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-heal.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-pad-heal
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 200
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 item 40 2 party
+spawn 16777313 20302 rot 4 wield 4 party
+
+# LT + A: the mode, the cursor 3 tiles ahead (474,226)
+axis 500 LT 32767
+tap 700 A
+axis 1000 LT -32768
+# RB: who = Sulik (the nearest)
+tap 1200 RB
+# the cursor onto the dude (474,226 -> 426,168)
+axis 1500 RX -12535
+axis 1500 RY -15146
+axis 1859 RX 0
+axis 1859 RY 0
+# A: HEAL ME from Sulik -- refused, the mode stays
+tap 2300 A
+# RB: who = Vic; A: HEAL ME from him
+tap 2900 RB
+tap 3400 A
+note 11500 end
+
+# the checks (run.js)
+expect \[INPUT/squad-who\] who=\w+ id=18097 pid=16777313 index=0 of=2
+expect \[INPUT/squad-cursor\] on kind=dude ok=0
+expect \[INPUT/squad-a\] kind=dude order=heal-me obj=18000 tile=\d+ who=18097 ok=0
+expect \[ACTION/squad-order\] order=heal-me target=- companions=0 skipped=0 why=no-meds speaker=-1 t=[\d.]+ who=18097
+expect \[INPUT/squad-who\] who=\w+ id=18062 pid=16777278 index=1 of=2
+expect \[INPUT/squad-a\] kind=dude order=heal-me obj=18000 tile=\d+ who=18062 ok=1
+expect \[ACTION/squad-order\] order=heal-me target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=18062
+expect \[FLOW/squad-heal\] order id=18062 pid=16777278 item=40
+expect \[FLOW/squad-heal\] dose id=18062 pid=16777278 item=40 kind=1 ok=1 hp=200->2\d\d
+expect \[FLOW/medic\] id=18062 pid=16777278 patient=\d+ self=0 kind=1 item=40 .*why=heal-me
+expect \[FLOW/squad-heal\] end id=18062 pid=16777278 why=dosed
+# the refusal left the mode open: one close, by the order that was taken
+expect-count 1 \[INPUT/squad-mode\] close why=
+expect \[INPUT/squad-mode\] close why=a
+expect-not \[ACTION/interact-(queue|do)\]

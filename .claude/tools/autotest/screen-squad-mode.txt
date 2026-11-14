@@ -1,0 +1,81 @@
+# SCREEN: THE SQUAD COMMAND MODE, OUT OF A FIGHT (2026-11-12, his design "A", „přidej nestřílej a vyléčit mě, změň
+# zbraň, můžu mu i říkat kam má jít?“; GO, its last part, was taken out on 2026-11-13 and Y's healing switch came in).
+# LT + A opens it; the world slows for 1.5 s, then holds. Vic (10mm pistol, stimpaks) stands 4 tiles left of the dude,
+# Sulik (knife, nothing to heal with) right below him; the dude is hurt (200 of 400). No enemy: the cursor starts 3
+# tiles in front of the dude, on free ground. Shots (the screen's 853x480):
+#   1 who = All on free ground -- nothing to order there since GO went: no word, GREY corner brackets round the tile,
+#     no dotted line; both names in green over their heads and a white outline round each (2026-11-12, his „Obrys
+#     postavy“: no more green hexes), the legend "LB RB All  A Order  X Hold fire  Y No healing  B Back" with A's word
+#     grey, the compass
+#   2 RB: who = Sulik (the nearest) -- his name and outline only, Vic's gone; the legend says Sulik
+#   3 the cursor on the dude: HEAL ME grey (Sulik carries nothing to heal with), no line
+#   4 LB: who = All -- HEAL ME green, the line from Vic (the one who would come), the legend his preview of 2026-11-13:
+#     "A Heal me  X Hold fire  Y No healing  B Back"
+#   5 the cursor on Vic: WEAPON
+#   6 A: Vic's weapon wheel ("Auto" and his 10mm pistol), the legend "A Pick  B Back"
+#   7 B (the wheel goes, the mode stays), B (the mode goes): everything erased, the world runs again
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-mode.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-squad-mode
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 200
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 item 40 2 party
+spawn 16777313 20302 rot 4 wield 4 party
+
+# LT down, A = the mode (no lock: nobody to lock), LT up -- the mode stays; the world holds from about 2.3 s
+axis 600 LT 32767
+tap 800 A
+axis 1100 LT -32768
+shot 2600
+# RB: who = the nearest companion
+tap 3000 RB
+shot 3400
+# the cursor onto the dude (474,226 -> 426,168)
+axis 3800 RX -12535
+axis 3800 RY -15146
+axis 4159 RX 0
+axis 4159 RY 0
+shot 4600
+# LB: who = All again
+tap 5000 LB
+shot 5400
+# the cursor onto Vic (426,168 -> 314,180)
+axis 5800 RX -19548
+axis 5800 RY 2094
+axis 6336 RX 0
+axis 6336 RY 0
+shot 6800
+# A: his weapon wheel
+tap 7200 A
+shot 7700
+# B: the wheel goes, the mode stays; B: the mode goes
+tap 8200 B
+tap 8800 B
+shot 9400
+note 11500 end
+
+# the checks (run.js)
+# free ground is the mode's "anything else" since GO went: kind none, nothing to give there
+expect \[INPUT/squad-cursor\] on kind=none ok=0 obj=-1 pid=-1 tile=20700
+expect \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=none
+expect \[FLOW/squad-mode\] open why=lt\+a slow=1\.50
+expect \[FLOW/squad-mode\] freeze after=1\.5\d
+expect \[FLOW/world-hold\] on why=squad
+expect \[INPUT/squad-who\] who=\w+ id=18097 pid=16777313 index=0 of=2
+expect \[INPUT/squad-cursor\] on kind=dude ok=0
+expect \[INPUT/squad-who\] who=all id=-1 pid=-1 index=-1 of=2
+expect \[INPUT/squad-cursor\] on kind=dude ok=1
+expect \[INPUT/squad-cursor\] on kind=companion ok=1 obj=18062 pid=16777278
+expect \[INPUT/squad-weapon-wheel\] open id=18062 pid=16777278 weapons=1 pick=-1 hand=8 seg0=auto seg1=8
+expect \[INPUT/squad-weapon-wheel\] back
+expect \[INPUT/squad-mode\] close why=b
+expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+expect \[FLOW/world-hold\] off
+# the opening A was the mode's: no interaction, no order
+expect-not \[ACTION/interact-(queue|do)\]
+expect-not \[ACTION/squad-order\]

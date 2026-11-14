@@ -1,0 +1,65 @@
+# SQUAD COMMAND BY THE PAD: NO HEALING, then HEAL ME AGAIN (2026-11-13, his pick when GO went: the LT + A mode stays
+# without GO, and Y in it switches their healing of him -- his preview
+# „A Heal me   X Hold fire   Y No healing   B Back“, after a press „Y Heal me again“).
+# The dude is at 150 of 400 HP; Vic (10mm pistol, three stimpaks) stands beside him, HOLD keeps him there. No fight
+# yet. LT + A opens the mode (shot 1: the legend says "Y No healing") and Y -- LT still down, and Y held half a second:
+# outside the mode LT + Y is the firing mode and a Y hold the weapon wheel -- gives NO HEALING to All (Vic) in the
+# slowdown: at once, "Saving supplies." over him, the mode closes (shot 2). He is told to hold his fire, and a knife
+# raider, off the screen until now and neutral, turns on the dude: a fight nobody ends, in which Vic's medic beat (a
+# fighter's, his hold fire or not) never doses the dude. At 7 s LT + A again: every one of who keeps his supplies now,
+# so the legend says "Y Heal me again" (shot 3), and Y gives HEAL AGAIN ("I'll patch you up.", shot 4) -- and Vic's
+# medic beat doses the dude.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-noheal.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-pad-noheal
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 150
+dude armor 2
+
+spawn 16777278 20102 rot 2 wield 8 item 29 3 item 40 3 party
+spawn 16777455 16700 rot 2 wield 4 team 50
+
+# Vic stays beside him (the medic doses within 3 tiles)
+squad 100 hold all
+# LT + A; Y 0.25 s later, in the slowdown, with LT still down and Y held 500 ms: NO HEALING
+axis 200 LT 32767
+tap 400 A
+shot 600
+tap 650 Y 500
+axis 1300 LT -32768
+shot 1400
+# he holds his fire (nobody ends the fight), and the raider turns on the dude
+squad 1500 holdfire all
+hostile 2000 16777455
+# LT + A, Y: HEAL AGAIN
+axis 6800 LT 32767
+tap 7000 A
+axis 7300 LT -32768
+shot 7350
+tap 7500 Y
+shot 7800
+note 15000 end
+
+# the checks (run.js)
+expect \[INPUT/squad-y\] order=no-healing who=all ok=1
+expect \[ACTION/squad-order\] order=no-healing target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
+expect \[FLOW/medic-optout\] id=18062 treats=0 count=1
+expect \[FLOW/squad-mode\] close why=y slowed=0\.\d\d frozen=0
+expect \[FLOW/autotest\] hostile t=\d+ pid=16777455 id=\d+
+# the fight was on for him: he would take the raider, but holds his fire
+expect \[FLOW/squad-fire\] refuse id=18062 pid=16777278 tgt=\d+ tgtPid=16777455
+expect \[INPUT/squad-y\] order=heal-again who=all ok=1
+expect \[ACTION/squad-order\] order=heal-again target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
+expect \[FLOW/medic-optout\] id=18062 treats=1 count=0
+# ...and his medic beat doses the dude
+expect \[FLOW/medic\] id=18062 pid=16777278 patient=18000 self=0 kind=1 item=40 .* ap=\d+ t=([7-9]|\d\d)\.\d+ why=beat
+# held: no dose of the beat's to him before HEAL AGAIN (t is rt_clock, about the timeline's seconds)
+expect-not \[FLOW/medic\] id=18062 pid=16777278 patient=18000 .* ap=\d+ t=[0-6]\.\d+ why=beat
+expect-count 2 \[INPUT/squad-mode\] close why=y
+# the Y was the mode's: no LT + Y firing mode, no Y-hold weapon wheel, no interaction
+expect-not \[INPUT/fire-mode\]
+expect-not \[FLOW/world-hold\] on why=wheel
+expect-not \[ACTION/interact-(queue|do)\]

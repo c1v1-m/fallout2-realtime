@@ -1,0 +1,26 @@
+# SQUAD COMMAND (2026-11-12, his design "A"): hold fire and the weapon pick are SAVED -- the realtime chunk's RTSQ
+# section, keyed by object id like the medic opt-out. Vic is told to hold fire and given his knife, then a quick save
+# (START held) writes SLOT01. squad-load.txt reads it back. ⚠️ Overwrites build/Release/data/SAVEGAME/SLOT01 -- back it
+# up first and put it back after.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-save.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-save
+map DESERT1.MAP
+seed 1
+duration 9
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 item 4 1 party
+
+squad 300 holdfire all
+squad 500 weapon 16777278 4
+pad 4000 start 1
+pad 5000 start 0
+note 8000 saved
+
+# the checks (run.js)
+expect \[FLOW/squad-fire\] hold id=18062 pid=16777278 why=order
+expect \[FLOW/squad-weapon\] pin id=18062 pid=16777278 wpn=4
+expect \[STATE/squad-save\] n=1
+expect save-slot\] slot=1 desc=Quick Save rc=

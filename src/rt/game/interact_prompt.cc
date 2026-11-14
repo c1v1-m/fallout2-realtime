@@ -1926,7 +1926,7 @@ void interact_prompt_tick()
         int reason = 0;
         if (gamepad_ui_menu_active()) reason = 1;        // menu
         else if (dialog_active()) reason = 2;            // dialog
-        else if (radial_wheel_is_open()) reason = 3;     // wheel
+        else if (radial_wheel_is_open() || combat_rt_squad_mode_is_open()) reason = 3; // wheel, squad command
         else if (inven_any_open()) reason = 4;           // inventory
         else if (combat_rt_has_lock()) reason = 5;       // lock-on held
         else if (combat_rt_hostile_in_attack_range()) reason = 6; // active hostile in range
@@ -1983,8 +1983,10 @@ void interact_prompt_tick()
     // press -- so the one object you armed the rope FOR was the one it could not be used on. That
     // was the user's report, twice.
     int ipCursorMode = gmouse_3d_get_mode();
+    // ...and under the squad command mode (LT + A, gamepad_ui.cc), which slows the world and then holds it still as a
+    // wheel does, and draws its own cursor: no hand, no outline beside it.
     if (obj_dude == NULL || gamepad_ui_menu_active() || dialog_active()
-        || radial_wheel_is_open() || inven_any_open()
+        || radial_wheel_is_open() || combat_rt_squad_mode_is_open() || inven_any_open()
         || combat_rt_has_lock()
         || ipCursorMode == GAME_MOUSE_MODE_USE_CROSSHAIR
         || ipCursorMode >= FIRST_GAME_MOUSE_MODE_SKILL) {

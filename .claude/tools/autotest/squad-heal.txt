@@ -1,0 +1,32 @@
+# SQUAD COMMAND (2026-11-12, his design "A", „vyléčit mě“): HEAL ME.
+# The dude is at 40 of 400 HP. Sulik (beside him) carries nothing to heal with: HEAL ME to Sulik is refused ("No meds.").
+# HEAL ME to All: the nearest companion that carries something -- Vic, 8 tiles off with two stimpaks -- walks to him
+# (follow-step why=heal) and doses him (the medic's dose, why=heal-me) past the medic's 50 % threshold and cooldown.
+# Out of a fight the stimpak is vanilla's: at once.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-heal.txt 1 --exe build/Release/fallout2-ce.exe
+name squad-heal
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 40
+dude armor 2
+
+spawn 16777313 20300 rot 4 wield 4 party
+spawn 16777278 20108 rot 1 wield 8 item 29 3 item 40 2 party
+
+squad 500 healme 16777313
+squad 1000 healme all
+note 13000 end
+
+# the checks (run.js)
+expect \[ACTION/squad-order\] order=heal-me target=- companions=0 skipped=0 why=no-meds speaker=-1 t=[\d.]+ who=\d+
+expect \[ACTION/squad-order\] order=heal-me target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
+expect \[FLOW/squad-heal\] order id=\d+ pid=16777278 item=40 kind=1 dist=8
+expect \[FLOW/follow-step\] id=\d+ pid=16777278 dist=\d+ blk=-?\d+ limit=3 why=heal
+expect \[FLOW/squad-heal\] dose id=\d+ pid=16777278 item=40 kind=1 ok=1 hp=40->[4-6]\d
+expect \[FLOW/medic\] id=\d+ pid=16777278 patient=\d+ self=0 kind=1 item=40 .*why=heal-me
+expect \[FLOW/squad-heal\] end id=\d+ pid=16777278 why=dosed
+expect-not \[FLOW/squad-heal\] order id=\d+ pid=16777313
+expect-not \[FLOW/squad-heal\] end id=\d+ pid=16777278 why=(no-route|timeout|cannot-walk)
