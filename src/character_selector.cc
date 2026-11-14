@@ -14,6 +14,7 @@
 #include "debug.h"
 #include "draw.h"
 #include "game.h"
+#include "game_mouse.h"
 #include "game_sound.h"
 #include "input.h"
 #include "kb.h"
@@ -215,6 +216,63 @@ static void sel_pad_poll(SDL_GameController* pad, bool* held)
             sent = true;
         }
         held[i] = down;
+    }
+}
+
+// THE POINTER: hidden while a pad is in, as on the title menu, Preferences, load / save and the editor -- the pad does
+// everything here, and the arrow only sat over the screen (Fallout 1's „při new game vidím myšítko, teď je zbytečné“,
+// the same screen). The real mouse brings it back while it moves, and SEL_CURSOR_IDLE_MS of rest hides it again. The
+// blank shape, never mouseHideCursor(), which would gate the input hook off; hidden where it stands, never moved. Without
+// a pad it stays the arrow.
+#define SEL_CURSOR_IDLE_MS 2000
+
+static bool sel_cursor_pad = false; // kept for a pad (hidden at rest); false = nothing kept, hidden on the next tick
+static bool sel_cursor_shown = false;
+static int sel_cursor_x;
+static int sel_cursor_y;
+static unsigned int sel_cursor_move;
+
+// Once a frame, and once before the screen fades in.
+static void sel_tick_cursor(bool pad)
+{
+    if (!pad) {
+        if (sel_cursor_pad) { // the pad went: the pointer is the mouse's again
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            sel_cursor_pad = false;
+        }
+        return;
+    }
+
+    int x;
+    int y;
+    mouseGetPosition(&x, &y);
+
+    if (!sel_cursor_pad) {
+        sel_cursor_pad = true;
+        sel_cursor_shown = false;
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        trace_event(TRACE_FLOW, "charsel-cursor", "hidden");
+    } else if (x != sel_cursor_x || y != sel_cursor_y) {
+        sel_cursor_move = getTicks();
+        if (!sel_cursor_shown) {
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            sel_cursor_shown = true;
+        }
+    } else if (sel_cursor_shown && getTicksSince(sel_cursor_move) >= SEL_CURSOR_IDLE_MS) {
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        sel_cursor_shown = false;
+    }
+
+    sel_cursor_x = x;
+    sel_cursor_y = y;
+}
+
+// On the way out: the shape the pointer had when the screen opened (the title menu's arrow), if a pad took it.
+static void sel_cursor_restore(int shape)
+{
+    if (sel_cursor_pad) {
+        gameMouseSetCursor(shape);
+        sel_cursor_pad = false;
     }
 }
 
@@ -433,6 +491,10 @@ int characterSelectorOpen()
     // inherit anyone else's.
     inputEventQueueReset();
 
+    // A pad hides the pointer before the screen fades in (sel_tick_cursor); the shape it had comes back on the way out.
+    int cursorWas = gameMouseGetCursor();
+    sel_tick_cursor(gamepad_ui_get_controller() != nullptr);
+
     colorPaletteLoad("color.pal");
     paletteFadeTo(_cmap);
 
@@ -461,6 +523,7 @@ int characterSelectorOpen()
             windowRefresh(gCharacterSelectorWindow);
         }
         sel_red_show(pad != nullptr); // the red buttons' badges: nothing unless the pad came or went
+        sel_tick_cursor(pad != nullptr);
 
         int keyCode = inputGetInput();
 
@@ -493,6 +556,7 @@ int characterSelectorOpen()
             }
             gamepad_ui_set_self_nav(true);
             sel_pad_rearm(padHeld);
+            sel_cursor_pad = false; // the editor put the arrow back as it closed: hidden again on the next frame
 
             break;
         case KEY_UPPERCASE_M:
@@ -506,6 +570,7 @@ int characterSelectorOpen()
             }
             gamepad_ui_set_self_nav(true);
             sel_pad_rearm(padHeld);
+            sel_cursor_pad = false; // as CREATE's
 
             break;
         case KEY_UPPERCASE_T:
@@ -555,6 +620,7 @@ int characterSelectorOpen()
 
     paletteFadeTo(gPaletteBlack);
     characterSelectorWindowFree();
+    sel_cursor_restore(cursorWas); // after the fade, so the arrow does not show on the screen going out
 
     if (cursorWasHidden) {
         mouseHideCursor();

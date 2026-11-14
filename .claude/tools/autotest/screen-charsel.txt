@@ -31,6 +31,8 @@ note +1500 the selector should be closed by now
 # the checks (run.js)
 expect \[FLOW/autotest\] opened screen=selector
 expect \[FLOW/charsel\] open premades=3 pad=1
+# the pointer: hidden for the pad on entry, and again once the editor (which puts the arrow back) has closed
+expect-count 2 \[FLOW/charsel-cursor\] hidden
 expect-not \[INPUT/charsel-pad\] button=A
 expect-count 2 \[INPUT/charsel-pad\] button=RB
 expect-count 1 \[INPUT/charsel-pad\] button=LB
