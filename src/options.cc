@@ -23,6 +23,7 @@
 
 #include <SDL.h>
 
+#include "rt/game/game_trace.h"
 #include "rt/game/gamepad_ui.h"
 #include "rt/rt_hooks.h"
 
@@ -133,6 +134,179 @@ static void options_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned in
     *lastY = y;
 }
 
+// --- CONTROLS FROM THE PAUSE MENU (Fallout 2 Realtime, approved 2026-11-10) ------------------------------
+//
+// The pad's CONTROLS list lived only in the Pip-Boy's archives, and a new Fallout 2 character has no Pip-Boy
+// until the Temple of Trials is behind him, so the first hours had no way to look a button up. With a pad, Y
+// here shows the same list in a window of its own (the Pip-Boy's rows and Deck names, read from pipboy.cc,
+// drawn like the MODS page), and "Y Controls" under the buttons says so.
+
+#define OPTIONS_CONTROLS_PAD 14
+#define OPTIONS_CONTROLS_GAP 12
+
+// "Y Controls" under DONE: the bar's Y badge, the word in the menu's gold (a resting button's label colour).
+// The strip between the last button and the panel's frame (y 199-213 on opbase.frm, between the corner
+// rivets) is bare art no button repaints. The menu's label font (103) is 16 px tall and that strip 15, so the
+// word is in the small interface font, its 7 px capitals centred on the badge.
+static void options_draw_pad_hint()
+{
+    int width = _optionsFrmImages[OPTIONS_WINDOW_FRM_BACKGROUND].getWidth();
+    int height = _optionsFrmImages[OPTIONS_WINDOW_FRM_BACKGROUND].getHeight();
+    int buttonHeight = _optionsFrmImages[OPTIONS_WINDOW_FRM_BUTTON_ON].getHeight();
+
+    // The rows start at y 17 and step by a button and 3 px (optionsWindowInit); the badge's disc is 15 px.
+    int cy = 17 + OPTIONS_MENU_COUNT * (buttonHeight + 3) - 3 + 7;
+    if (gOptionsWindowBuffer == nullptr || cy + 7 >= height) {
+        return;
+    }
+
+    const char* word = "Controls";
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+    int wordWidth = fontGetStringWidth(word) + 1;
+    int x = (width - (17 + wordWidth)) / 2;
+    if (x >= 0) {
+        intface_pad_face(gOptionsWindowBuffer, width, width, height, x + 7, cy, 'Y');
+        fontDrawText(gOptionsWindowBuffer + width * (cy - 3) + x + 17, word, wordWidth, width, _colorTable[18979] | FONT_SHADOW);
+    }
+    fontSetCurrent(oldFont);
+}
+
+// The window: the title, a rule, then button | action rows as the Pip-Boy page lays them out (the actions
+// start where the widest button ends, plus a gap). Modal, on top of this menu, which stays up underneath.
+static void options_show_controls()
+{
+    int count = pipboy_controls_count();
+    if (count <= 0) {
+        return;
+    }
+
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+    int lineHeight = fontGetLineHeight();
+    const char* title = pipboy_controls_title();
+
+    char button[64];
+    char action[96];
+
+    // The actions' column from the widest button, the window's width from the widest row.
+    int column = 0;
+    int spacers = 0;
+    for (int index = 0; index < count; index++) {
+        if (!pipboy_controls_row(index, button, sizeof(button), action, sizeof(action))) {
+            spacers++;
+            continue;
+        }
+        int buttonWidth = fontGetStringWidth(button);
+        if (buttonWidth > column) {
+            column = buttonWidth;
+        }
+    }
+    column += OPTIONS_CONTROLS_GAP;
+
+    int titleWidth = fontGetStringWidth(title);
+    int textWidth = titleWidth;
+    for (int index = 0; index < count; index++) {
+        if (pipboy_controls_row(index, button, sizeof(button), action, sizeof(action))) {
+            int rowWidth = (button[0] != '\0' ? column : 0) + fontGetStringWidth(action);
+            if (rowWidth > textWidth) {
+                textWidth = rowWidth;
+            }
+        }
+    }
+
+    // Rows 2 px apart. On a screen too short for that, at the line height with the blank spacers dropped -- the
+    // Pip-Boy page drops those first too.
+    int ruleY = OPTIONS_CONTROLS_PAD + lineHeight + 4;
+    int firstY = ruleY + 8;
+    int pitch = lineHeight + 2;
+    bool keepSpacers = true;
+    int height = firstY + count * pitch - (pitch - lineHeight) + OPTIONS_CONTROLS_PAD;
+    if (height > screenGetHeight() - 20) {
+        pitch = lineHeight;
+        keepSpacers = false;
+        height = firstY + (count - spacers) * pitch + OPTIONS_CONTROLS_PAD;
+    }
+    int width = OPTIONS_CONTROLS_PAD + textWidth + OPTIONS_CONTROLS_PAD;
+
+    int win = windowCreate((screenGetWidth() - width) / 2,
+        (screenGetHeight() - height) / 2,
+        width,
+        height,
+        256,
+        WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        fontSetCurrent(oldFont);
+        return;
+    }
+
+    unsigned char* buf = windowGetBuffer(win);
+    bufferFill(buf, width, height, width, _colorTable[0]);
+    bufferDrawRect(buf, width, 0, 0, width - 1, height - 1, _colorTable[992]);
+    fontDrawText(buf + width * OPTIONS_CONTROLS_PAD + (width - titleWidth) / 2, title, titleWidth, width, _colorTable[32767]);
+    bufferDrawLine(buf, width, OPTIONS_CONTROLS_PAD, ruleY, width - OPTIONS_CONTROLS_PAD - 1, ruleY, _colorTable[992]);
+
+    int y = firstY;
+    for (int index = 0; index < count; index++) {
+        if (!pipboy_controls_row(index, button, sizeof(button), action, sizeof(action))) {
+            if (keepSpacers) {
+                y += pitch;
+            }
+            continue;
+        }
+
+        unsigned char* row = buf + width * y + OPTIONS_CONTROLS_PAD;
+        if (button[0] == '\0') {
+            // A heading, in the Pip-Boy page's heading colour.
+            fontDrawText(row, action, textWidth, width, _colorTable[32747] | FONT_UNDERLINE);
+        } else {
+            fontDrawText(row, button, column, width, _colorTable[992]);
+            fontDrawText(row + column, action, textWidth - column, width, _colorTable[992]);
+        }
+        y += pitch;
+    }
+
+    windowRefresh(win);
+    trace_event(TRACE_FLOW, "controls-open", "rows=%d size=%dx%d", count - spacers, width, height);
+
+    // B or Y puts it away, ESC on a keyboard -- and START, which gamepad_ui.cc turns into ESC while this menu is
+    // up. ⚠️ Each pad button must be seen RELEASED first (rt_pad_pressed): the Y that opened it is still down.
+    bool armedB = false;
+    bool armedY = false;
+    const char* closedBy = nullptr;
+    while (closedBy == nullptr) {
+        sharedFpsLimiter.mark();
+
+        int keyCode = inputGetInput();
+        if (keyCode == KEY_ESCAPE) {
+            closedBy = "esc";
+        } else if (_game_user_wants_to_quit != 0) {
+            closedBy = "quit";
+        }
+
+        if (closedBy == nullptr && gamepad_ui_get_controller() != nullptr) {
+            SDL_GameControllerUpdate();
+            if (rt_pad_pressed(SDL_CONTROLLER_BUTTON_B, &armedB)) {
+                closedBy = "b";
+            } else if (rt_pad_pressed(SDL_CONTROLLER_BUTTON_Y, &armedY)) {
+                closedBy = "y";
+            }
+        }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    windowDestroy(win);
+    fontSetCurrent(oldFont);
+    trace_event(TRACE_FLOW, "controls-closed", "by=%s", closedBy);
+
+    // ⚠️ The B or Y that closed it is still down as the menu resumes: nothing queued here may reach the menu, and
+    // every edge tracker adopts the live pad -- the menu's own B would otherwise read a fresh press and shut it.
+    inputEventQueueReset();
+    gamepad_ui_bump_input_epoch();
+}
+
 // 0x48FC50
 int showOptions()
 {
@@ -144,30 +318,21 @@ int showOptions()
     }
 
     // Gamepad navigation: highlight the selected row and move it with the D-pad / left stick, confirm
-    // with A, close with B -- the main menu's feel, without the jumpy snap cursor.
-    SDL_GameController* optnPad = gamepad_ui_get_controller();
+    // with A, close with B -- the main menu's feel, without the jumpy snap cursor. Y shows the CONTROLS.
+    // ⚠️ THE PAD IS LOOKED FOR EVERY FRAME, NOT LATCHED AT ENTRY (prefs-gamepad-nav; review 2026-11-10): one
+    // that comes in while the menu is up gets the pad nav, the hint and Y's CONTROLS from that frame on.
+    // `optnPadSetUp` says the set-up in the loop has run, and owes the clean-up on the way out.
+    bool optnPadSetUp = false;
     int optnSel = 0;
     bool optnPrevUp = false;
     bool optnPrevDown = false;
     bool optnPrevA = false;
     bool optnPrevB = false;
+    bool optnPrevY = false;
     bool optnCursorShown = true;
     int optnCursorX = 0;
     int optnCursorY = 0;
     unsigned int optnCursorMove = getTicks();
-    if (optnPad != nullptr) {
-        gamepad_ui_set_self_nav(true);
-        options_gamepad_highlight(optnSel);
-        windowRefresh(gOptionsWindow);
-        mouseGetPosition(&optnCursorX, &optnCursorY);
-        gameMouseSetCursor(MOUSE_CURSOR_NONE);
-        optnCursorShown = false;
-
-        // Seeded as HELD: the button that opened this menu is very likely still down.
-        SDL_GameControllerUpdate();
-        optnPrevA = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_A) != 0;
-        optnPrevB = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_B) != 0;
-    }
 
     unsigned int optnEpoch = gamepad_ui_input_epoch();
 
@@ -175,21 +340,45 @@ int showOptions()
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
-        if (optnPad != nullptr) {
+        // ⚠️ The handle is fetched again every frame, never kept from the entry: gamepad_ui_get_controller()
+        // closes a pad that went away and opens the next one, so a kept handle can dangle (prefs-gamepad-nav).
+        SDL_GameController* pad = gamepad_ui_get_controller();
+        if (pad != nullptr && !optnPadSetUp) {
+            // The first frame with a pad: the menu's opening frame, or the one a pad arrives on.
+            optnPadSetUp = true;
+            gamepad_ui_set_self_nav(true);
+            options_gamepad_highlight(optnSel);
+            options_draw_pad_hint();
+            windowRefresh(gOptionsWindow);
+            mouseGetPosition(&optnCursorX, &optnCursorY);
+            gameMouseSetCursor(MOUSE_CURSOR_NONE);
+            optnCursorShown = false;
+
+            // Seeded as HELD: the button that opened this menu is very likely still down, and nothing down
+            // as a pad arrives is a press.
+            SDL_GameControllerUpdate();
+            optnPrevA = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+            optnPrevB = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+            optnPrevY = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+            optnPrevUp = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+            optnPrevDown = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+        }
+        if (pad != nullptr) {
             // Re-assert after a sub-screen (Save / Load / Preferences run their own loops and clear
             // self_nav / restore the cursor on exit).
             gamepad_ui_set_self_nav(true);
 
             SDL_GameControllerUpdate();
-            bool upNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
-                || SDL_GameControllerGetAxis(optnPad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
-            bool downNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
-                || SDL_GameControllerGetAxis(optnPad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
-            bool aNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_A) != 0;
-            bool bNow = SDL_GameControllerGetButton(optnPad, SDL_CONTROLLER_BUTTON_B) != 0;
+            bool upNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0
+                || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
+            bool downNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0
+                || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+            bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+            bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+            bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
 
             // A sub-screen ran its own loop: the button that closed it is still down. Adopt the live
-            // state, act on nothing this frame.
+            // state, act on nothing this frame. (Y is DONE on Preferences, so it often comes back held.)
             unsigned int epoch = gamepad_ui_input_epoch();
             if (epoch != optnEpoch) {
                 optnEpoch = epoch;
@@ -197,6 +386,7 @@ int showOptions()
                 optnPrevDown = downNow;
                 optnPrevA = aNow;
                 optnPrevB = bNow;
+                optnPrevY = yNow;
                 options_gamepad_highlight(optnSel);
                 windowRefresh(gOptionsWindow);
                 gameMouseSetCursor(MOUSE_CURSOR_NONE);
@@ -220,12 +410,18 @@ int showOptions()
                 enqueueInputEvent(500 + optnSel);
             } else if (bNow && !optnPrevB) {
                 enqueueInputEvent(KEY_ESCAPE);
+            } else if (yNow && !optnPrevY) {
+                // The CONTROLS window, over this menu. It bumps the input epoch on the way out, so the next
+                // frame adopts whatever it was closed with.
+                soundPlayFile("ib1p1xx1");
+                options_show_controls();
             }
 
             optnPrevUp = upNow;
             optnPrevDown = downNow;
             optnPrevA = aNow;
             optnPrevB = bNow;
+            optnPrevY = yNow;
 
             options_tick_cursor(&optnCursorShown, &optnCursorX, &optnCursorY, &optnCursorMove);
         }
@@ -292,7 +488,7 @@ int showOptions()
         sharedFpsLimiter.throttle();
     }
 
-    if (optnPad != nullptr) {
+    if (optnPadSetUp) {
         gamepad_ui_set_self_nav(false);
         gameMouseSetCursor(MOUSE_CURSOR_ARROW);
     }

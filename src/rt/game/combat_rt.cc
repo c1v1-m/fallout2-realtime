@@ -19460,14 +19460,23 @@ static void rt_world_overlay(Rect* rect, int elevation)
 // when the hand holds nothing that goes off, or there is nobody to throw at.
 static bool rt_blast_ring_aim(int* tile, int* radius)
 {
+    // ⚠️ ONLY WHILE HE CAN ACT (the Fallout 1 port's review, 2026-11-10). Once the dude is dead or knocked out his
+    // pad is not read any more (gamepad_ui's button handler returns while he is down), so a held RB stays "held"
+    // and a held LT lock is never let go through the whole fall; a script's scene stops the pad the same way. The
+    // ring would sit on the ground for a throw or a shot that cannot come. What is in the air keeps its ring.
+    if (!rt_is_combatant(obj_dude) || combat_rt_script_ui_locked()) {
+        return false;
+    }
     int hitMode;
     Object* target;
-    if (combat_rt_quick_throw_hit_mode(&hitMode)) {
+    bool quickThrow = combat_rt_quick_throw_hit_mode(&hitMode);
+    if (quickThrow) {
         target = combat_rt_quick_throw_target();
-    } else if (rt_lock_target != NULL && rt_is_combatant(rt_lock_target)) {
+    } else if (rt_lock_target != NULL && rt_is_targetable(rt_lock_target)) {
         // ...AND THE LT LOCK WITH AN EXPLOSIVE IN THE HAND (2026-11-08, his „raketomet bude taky ukazovat aoe
         // awareness?“): a rocket launcher, or a grenade held in the hand rather than in a quick slot -- round the
-        // locked target, the one RT fires at.
+        // locked target, the one RT fires at. rt_is_targetable, as the lock and RT take it: a knocked-out target
+        // is still fired at (rt_is_combatant left it without a ring; F1 review 2026-11-10).
         hitMode = rt_player_hit_mode();
         target = rt_lock_target;
     } else {
@@ -19477,6 +19486,9 @@ static bool rt_blast_ring_aim(int* tile, int* radius)
     if (weapon == NULL || item_get_type(weapon) != ITEM_TYPE_WEAPON) {
         return false; // a hand can hold a non-weapon (non-weapon-in-hand)
     }
+    if (rt_needs_reload(obj_dude, hitMode)) {
+        return false; // an empty launcher only clicks (F1 review 2026-11-10); a throw has no magazine
+    }
     int blast = rt_blast_radius_of(obj_dude, weapon, hitMode);
     if (blast <= 0 || target == NULL || target->tile < 0 || target->elevation != obj_dude->elevation) {
         return false;
@@ -19484,8 +19496,12 @@ static bool rt_blast_ring_aim(int* tile, int* radius)
     int reach = item_w_range(obj_dude, hitMode);
     int lands = target->tile;
     if (obj_dist(obj_dude, target) > reach) {
-        if (item_w_subtype(weapon, hitMode) != ATTACK_TYPE_THROW) {
-            return false; // a launcher does not fire past its range: no blast to show
+        // ⚠️ ONLY THE QUICK THROW GOES PAST ITS REACH (F1 review 2026-11-10). RT with the lock fires only within
+        // item_w_range, and the one way past it, rt_player_far_target, is the quick slot's
+        // (combat_rt_request_throw). A launcher, or a grenade wielded in the hand, out of reach: nothing would go
+        // off, so no ring -- the old test let a wielded grenade's ring sit where no throw would land.
+        if (!quickThrow) {
+            return false;
         }
         lands = tile_num_beyond(obj_dude->tile, target->tile, reach);
         Object* blocker = obj_dude;
@@ -19677,6 +19693,9 @@ void combat_rt_flight_launched(Object* projectile, int tile)
 // (photographed in scenario shooter-far). And the trace says when a shooter is out of view.
 #define RT_OFFSCREEN_MAX 8
 #define RT_OFFSCREEN_INSET_X 40.0f // px inside the window edge: room for the crosshair and its %
+// ...on the RIGHT, room for the whole to-hit canvas since it carries the target's health under the % (art.cc
+// widens it to 140 px; the crosshair sits 10 px into it): "Severely Wounded" ran off the window's edge there.
+#define RT_OFFSCREEN_INSET_RIGHT 130.0f
 #define RT_OFFSCREEN_INSET_Y 28.0f
 #define RT_OFFSCREEN_BODY_LIFT 30 // aim from body to body, not feet to feet
 
@@ -19718,7 +19737,7 @@ static bool rt_offscreen_edge_point(Object* o, float* x, float* y)
 
     // Where the line from the dude leaves the inset window.
     float minX = RT_OFFSCREEN_INSET_X;
-    float maxX = (float)(win.lrx - win.ulx) - RT_OFFSCREEN_INSET_X;
+    float maxX = (float)(win.lrx - win.ulx) - RT_OFFSCREEN_INSET_RIGHT;
     float minY = RT_OFFSCREEN_INSET_Y;
     float maxY = (float)(win.lry - win.uly) - RT_OFFSCREEN_INSET_Y;
     float t = 1.0e9f;

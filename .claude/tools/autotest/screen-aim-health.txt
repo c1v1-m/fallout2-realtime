@@ -1,0 +1,38 @@
+# F2 (2026-11-10, his „to wounded nebo almost dead je taky ve vanille?“; 2026-11-11 „Jen při změně“): under
+# the LT lock's hit chance a second line says how hurt the target is, in vanilla's Examine word (proto.msg
+# 500-504) -- but only for 2 s after the target drops into a worse band. This dude has NO Awareness, so it is
+# the word. The raider (pid 16777455: 30 + 33 = 63 max HP, PRO 00000239) is not hostile, so it stands still
+# under the lock; sethp walks it down the bands 2 s apart, each photographed 1 s after the drop:
+#   63/63 Unhurt (the lock: nothing shows), 80 % = 50 Wounded, 50 % = 31 Severely Wounded, 20 % = 12 Almost Dead.
+# The trace line comes only when a word appears, so exactly three; the last shot, 2.5 s after the last drop,
+# shows the chance alone again.
+name screen-aim-health
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude hp 300
+# without armour the test dude's art cannot hold the pistol (wield-failed), and the chance would be an X
+dude armor 2
+dude wield 8
+dude item 29 6
+
+spawn 16777455 20504 rot 5 wield 4
+
+axis 1500 LT 32767
+shot 2500
+sethp 16777455 80 3.5
+shot 4500
+sethp 16777455 50 5.5
+shot 6500
+sethp 16777455 20 7.5
+shot 8500
+shot 10000
+axis 10500 LT -32768
+
+expect-not \[COMBAT/aim-health\] .*line="Unhurt"
+expect \[COMBAT/aim-health\] target=16777455 .*line="Wounded" hp=50/63 aware=0
+expect \[COMBAT/aim-health\] target=16777455 .*line="Severely Wounded" hp=31/63 aware=0
+expect \[COMBAT/aim-health\] target=16777455 .*line="Almost Dead" hp=12/63 aware=0
+expect-not \[COMBAT/aim-health\] .*line="\d
+expect-count 3 \[COMBAT/aim-health\]

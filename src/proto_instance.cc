@@ -385,17 +385,9 @@ int _obj_examine_func(Object* critter, Object* target, void (*fn)(char* string))
                 v12 -= 2;
             }
 
-            int v16;
-
-            const int maxiumHitPoints = critterGetStat(target, STAT_MAXIMUM_HIT_POINTS);
-            const int currentHitPoints = critterGetStat(target, STAT_CURRENT_HIT_POINTS);
-            if (currentHitPoints <= 0 || critterIsDead(target)) {
-                v16 = 0;
-            } else if (currentHitPoints == maxiumHitPoints) {
-                v16 = 4;
-            } else {
-                v16 = (currentHitPoints * 3) / maxiumHitPoints + 1;
-            }
+            // Realtime build: the band is a function of its own now (objectExamineHealthBand), so the
+            // to-hit cursor says the very same word (game_mouse.cc, gameMouseToHitHealth).
+            int v16 = objectExamineHealthBand(target);
 
             MessageListItem hpMessageListItem;
             hpMessageListItem.num = 500 + v16;
@@ -569,6 +561,28 @@ int _obj_examine_func(Object* critter, Object* target, void (*fn)(char* string))
     }
 
     return 0;
+}
+
+// HOW HURT A CRITTER LOOKS, in the Examine's own bands (Realtime build, 2026-11-10): taken out of
+// _obj_examine_func unchanged, because the realtime to-hit cursor prints the same word under the hit
+// chance (game_mouse.cc, gameMouseToHitHealth). proto.msg 500 + the band is the word: 0 Dead, 1 Almost
+// Dead, 2 Severely Wounded, 3 Wounded, 4 Unhurt. Above 4 is what vanilla calls "lookup_val out of
+// range" (a third more hit points than the maximum, or more): there is no word for it.
+// ⚠️ A living critter whose maximum is 0 divides by zero here, as it always did in the Examine; a
+// caller that asks every frame rules that out first (gameMouseToHitHealth does).
+int objectExamineHealthBand(Object* critter)
+{
+    const int maxiumHitPoints = critterGetStat(critter, STAT_MAXIMUM_HIT_POINTS);
+    const int currentHitPoints = critterGetStat(critter, STAT_CURRENT_HIT_POINTS);
+    if (currentHitPoints <= 0 || critterIsDead(critter)) {
+        return 0;
+    }
+
+    if (currentHitPoints == maxiumHitPoints) {
+        return 4;
+    }
+
+    return (currentHitPoints * 3) / maxiumHitPoints + 1;
 }
 
 // 0x49B650

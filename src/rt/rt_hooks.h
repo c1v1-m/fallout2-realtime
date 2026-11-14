@@ -209,6 +209,11 @@ void tile_overlay_line(Rect* clip, int x0, int y0, int x1, int y1, int color);
 bool options_is_open();
 const char* perk_realtime_note(int perk);
 unsigned int pipboy_quest_state_hash();
+// The Pip-Boy's CONTROLS list, for the pause menu's own window of it (Fallout 2, options.cc): the title, the
+// row count, and row `index` spelt as the page spells it. False for a blank spacer; a heading has no button.
+const char* pipboy_controls_title();
+int pipboy_controls_count();
+bool pipboy_controls_row(int index, char* button, size_t buttonSize, char* action, size_t actionSize);
 void scr_load_before_first_event(Object* obj);
 
 // --- plib: input.cc (bk process timing), winmain.cc (the headless autotest window) -----------------

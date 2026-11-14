@@ -1,0 +1,31 @@
+# F2 exit wheel (2026-11-10), the two ways the BACK hold still runs as it always did. At Arroyo's bridge
+# the exits lead to two places (Village, 13 hexes up-left -- the nearest; World map, 74 hexes down) so the
+# wheel opens, and BACK let go with nothing aimed at runs for the NEAREST one: the village loads. Then in
+# the Klamath mall, whose only exit leads downtown, the hold opens no wheel and runs straight there, as
+# before the wheel existed: downtown loads.
+name screen-exit-wheel-nearest
+map ARBRIDGE.MAP
+seed 1
+duration 30
+dude tile 16686 rot 2
+cleararea 40
+
+note 1500 hold-back-aim-nothing
+pad 2000 BACK 1
+shot 2800
+pad 3000 BACK 0
+
+mapgo 12000 KLAMALL.MAP 28291 0
+note 15500 hold-back-one-place
+pad 16000 BACK 1
+pad 17000 BACK 0
+
+expect-count 1 exit-wheel\] places=2 open=1 0:Village \| 1:World map
+expect exit-pick\] aimed=-1 map=4 elev=0 src=back
+expect exit-nav\] .*rc=0 map=4 elev=0
+expect Heading for Village\.
+expect map-load-stage\] done name=(arvillag|ARVILLAG)
+expect exit-nav\] .*rc=0 map=9 elev=0
+expect Heading for Downtown\.
+expect map-load-stage\] done name=(kladwtwn|KLADWTWN)
+expect-not autotest\] modal .*inv=1

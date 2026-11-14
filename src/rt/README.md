@@ -196,6 +196,27 @@ reads the target after that frame's moves and can be a hex out. `[COMBAT/blast-r
 480 lines, pitch 12 = the `lineH + 2` floor: the next MODS row needs a new layout). Not in fallout1-ce yet
 (module delta in `combat_rt.cc` / `.h`, `mods_page.cc`, `autotest.cc`).
 
+**The exit wheel** (2026-11-10, his „pokud není možné vybrat východ, tak to tlačítko docela ztrácí smysl“):
+BACK held, when the exit grids on the dude's floor lead to two places or more, opens a radial wheel of them
+(`gamepad_ui.cc` `gpui_run_to_exit` / `gpui_exit_wheel`): "World map" for every grid with a map <= 0, else
+that map and floor's name from map.msg (`mapGetName` -- the Pip-Boy automap list's and the save screen's;
+`FALLOUT_RT_GAME == 2`), the segments in the order the places lie round the dude on screen. The right stick
+(or the left) aims; letting go of BACK, or A, runs for that place's nearest grid; nothing aimed = the
+nearest exit; B closes it with no run. One place = the old straight run, and G (keyboard) always is.
+`radial_wheel.cc`: the plain text look widens to fit its labels and no longer inherits the last icon
+wheel's description band. `[INPUT/exit-wheel]` (the layout), `[INPUT/exit-pick]`, `[ACTION/exit-nav]`
+(+ `map=` `elev=`), `screen-exit-wheel-pick.txt`, `screen-exit-wheel-nearest.txt`. Not in fallout1-ce yet
+(module delta in `gamepad_ui.cc`, `radial_wheel.cc`).
+**How hurt the target is** (2026-11-10, his „to wounded nebo almost dead je taky ve vanille?“; no MODS row): a
+second line under the to-hit chance, wherever the chance is drawn (LT lock, held quick throw, mouse), in its
+font, colour and outline — the Examine's own word (proto.msg 500-504, Dead … Unhurt, banded by
+`proto_instance.cc` `objectExamineHealthBand`, taken out of `_obj_examine_func`), or with Awareness the hit
+points as `cur/max` (`game_mouse.cc` `gameMouseToHitHealth`, `gameMouseRenderAccuracy`'s `line2`). A critter
+only, never the dude. The to-hit canvas (ACTTOHIT.FRM, 50 x 21) is widened to 140 when it loads (`art.cc`
+`artWidenToHitCanvas`, fallout1-ce's trick for its Awareness line), the crosshair where it was. Awareness's
+perk card now says so (fallout1-ce's note). `[COMBAT/aim-health]` on a change, `screen-aim-health.txt` /
+`screen-aim-health-aware.txt`.
+
 **Resyncing from fallout1-ce** (last: 99edef7 → 0be4c88, v0.1.0, 2026-10-23): the modules by a three-way
 merge — `git merge-file -L F2 -L F1-old -L F1-new <ours> <F1 old> <F1 new>`, the two F1 copies taken with
 `git -C ../fallout1-ce show <rev>:src/game/<file>` — then `git -C ../fallout1-ce diff <old> <new> -- src/game src/int`

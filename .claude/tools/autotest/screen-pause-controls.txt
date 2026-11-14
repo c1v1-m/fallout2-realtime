@@ -1,0 +1,42 @@
+# CONTROLS FROM THE PAUSE MENU (2026-11-10): START opens the pause menu, which with a pad shows "Y Controls"
+# under DONE; Y opens the Pip-Boy's CONTROLS list in a window of its own (options.cc options_show_controls).
+# B puts it away and the pause menu must STAY (the B is still down when the menu resumes: input epoch). Y opens
+# it again, held: the hold must not close it (rt_pad_pressed, seen released first); a second Y closes it. A
+# last B shuts the pause menu. Shots: the menu with the hint, the list, the menu again, the list again.
+name screen-pause-controls-f2
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+
+# START tapped: the pause menu opens on the release, its highlight on SAVE GAME
+open 1000 options
+shot 2000
+# Y: the CONTROLS window over the menu
+tap 2600 Y
+shot 3600
+# B: back to the pause menu
+tap 4400 B
+shot 5200
+# Y again, held 0.4 s
+tap 6000 Y 400
+shot 7000
+# Y closes it this time
+tap 7800 Y
+# B shuts the pause menu
+tap 9400 B
+note 11500 the world should be back
+
+# the checks (run.js)
+# 27 rows in ctrl_lines (BACK hold's run to an exit included), 3 of them blank spacers; 220x372 on a PC
+# (font 101), the menu is 164x217
+expect \[FLOW/controls-open\] rows=24 size=\d+x\d+
+expect-count 2 \[FLOW/controls-open\]
+expect \[FLOW/controls-closed\] by=b
+expect \[FLOW/controls-closed\] by=y
+expect-not \[FLOW/controls-closed\] by=esc
+expect \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=2\d\dx3\d\d inv=0 options=1
+# the B that closed the list left the pause menu on top, not the world
+expect \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=164x217 inv=0 options=1 talk=0 t=4[4-9]\d\d
+expect-not \[FLOW/autotest\] modal none t=[2-8]\d\d\d
+expect \[FLOW/autotest\] end why=time .* modal=-1

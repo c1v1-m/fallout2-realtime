@@ -547,9 +547,6 @@ char* perkGetDescription(int perk)
 //
 // ⚠️ KEEP THEM SHORT: the level-up window has room for about three more lines under the longest
 // description, and a longer note is cut off there, not wrapped past the card.
-//
-// Fallout 1's second note (Awareness: hit points on the to-hit cursor) is NOT here, because that
-// readout has not been ported yet -- a note must never promise what this build does not do.
 const char* perk_realtime_note(int perk)
 {
     switch (perk) {
@@ -559,6 +556,10 @@ const char* perk_realtime_note(int perk)
         // inventory costs (gpui_pack_cost: the quick slots and their drugs, items and grenades, the weapon
         // wheel, armour) -- 4 AP, one less per rank, so the perk reaches all of them.
         return "Realtime: quick slots, weapon wheel, armour too: 4 AP, 1 less per rank.";
+    case PERK_AWARENESS:
+        // Fallout 1's note, word for word. game_mouse.cc gameMouseToHitHealth (2026-11-10): the to-hit
+        // cursor's second line is the hit points with the perk (the Examine's word without it).
+        return "Realtime: aim at someone to see their hit points.";
     }
     return nullptr;
 }

@@ -1,0 +1,36 @@
+# F2 (2026-11-10, his „to wounded nebo almost dead je taky ve vanille?“): the same aim as screen-aim-health,
+# but this dude HAS the Awareness perk (dude perk 0), so the second line under the hit chance is what vanilla
+# Awareness's Examine gives instead: the hit points, here "cur/max". The raider (pid 16777455) has 63 max HP;
+# sethp takes it to 50, 31 and 12, each photographed. No Examine word may show. Exactly four trace lines.
+name screen-aim-health-aware
+map DESERT1.MAP
+seed 1
+duration 11
+dude tile 20100 rot 2
+dude hp 300
+# without armour the test dude's art cannot hold the pistol (wield-failed), and the chance would be an X
+dude armor 2
+dude wield 8
+dude item 29 6
+dude perk 0
+
+spawn 16777455 20504 rot 5 wield 4
+
+axis 1500 LT 32767
+shot 2500
+sethp 16777455 80 3.5
+shot 4500
+sethp 16777455 50 5.5
+shot 6500
+sethp 16777455 20 7.5
+shot 8500
+axis 9500 LT -32768
+
+expect \[COMBAT/aim-health\] target=16777455 .*line="63/63" hp=63/63 aware=1
+expect \[COMBAT/aim-health\] target=16777455 .*line="50/63" hp=50/63 aware=1
+expect \[COMBAT/aim-health\] target=16777455 .*line="31/63" hp=31/63 aware=1
+expect \[COMBAT/aim-health\] target=16777455 .*line="12/63" hp=12/63 aware=1
+# every line is the target's real hit points (if only this passes, the 63 above is what is wrong)
+expect-count 4 \[COMBAT/aim-health\] target=16777455 .*line="(\d+)/(\d+)" hp=\1/\2 aware=1
+expect-not \[COMBAT/aim-health\] .*line="[A-Za-z]
+expect-count 4 \[COMBAT/aim-health\]

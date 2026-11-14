@@ -924,6 +924,72 @@ int artAliasFid(int fid)
     return -1;
 }
 
+// THE TO-HIT CURSOR IS A CANVAS, NOT A PICTURE (Realtime build, fallout1-ce's art.cc). ACTTOHIT.FRM
+// (interface 284) is blanked and repainted every time it is shown (game_mouse.cc gameMouseRenderAccuracy:
+// the crosshair on the left, the text to its right), so only its size matters. The file is 50 x 21,
+// which leaves 29 px of text: "75%" and nothing more. Since 2026-11-10 the target's health goes on a
+// second line under the percentage -- vanilla's Examine word, "Severely Wounded" = 107 px in font 101,
+// or the Awareness hit points -- so the canvas is widened here, at load time, instead of shipping a
+// modified FRM nobody's install would have. 140 also fits a translation's longer word (~118 px); one
+// longer still is cut at the canvas edge (the font stops drawing there), never drawn past it.
+//
+// The extra width goes on the RIGHT, and the rotation offset grows by half of it, which keeps the
+// crosshair exactly where the original file draws it: the flat cursor is centred on its position, so
+// the offset has to be width/2 - 10 -- the relation both vanilla files already obey (ACRSHAIR 21 px
+// with offset 0, ACTTOHIT 50 px with offset 15), and the reason the cursor can swap the two fids
+// without being moved. Keep the added width EVEN or the crosshair moves a pixel.
+#define ART_TO_HIT_FRM_NUM 284
+#define ART_TO_HIT_CANVAS_WIDTH 140
+
+static bool artIsToHitCanvas(int fid)
+{
+    return FID_TYPE(fid) == OBJ_TYPE_INTERFACE && (fid & 0xFFF) == ART_TO_HIT_FRM_NUM;
+}
+
+// ACTTOHIT.FRM's own layout: one frame that every direction shares. A file shaped otherwise (a mod's)
+// keeps its size, so widening the first frame can never run over another one.
+static bool artIsOnePicture(const Art* art)
+{
+    if (art->frameCount != 1) {
+        return false;
+    }
+
+    for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+        if (art->dataOffsets[rotation] != 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Widen a freshly read to-hit canvas in place. The cache allocated the block with the size
+// artCacheGetFileSizeImpl reported, which already includes the extra pixels, so there is room for them.
+static void artWidenToHitCanvas(Art* art)
+{
+    if (!artIsOnePicture(art)) {
+        return;
+    }
+
+    ArtFrame* frame = artGetFrame(art, 0, 0);
+    if (frame == nullptr || frame->width >= ART_TO_HIT_CANVAS_WIDTH) {
+        return;
+    }
+
+    int extraWidth = ART_TO_HIT_CANVAS_WIDTH - frame->width;
+    int extraSize = extraWidth * frame->height;
+
+    for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+        art->xOffsets[rotation] += extraWidth / 2;
+    }
+
+    frame->width = ART_TO_HIT_CANVAS_WIDTH;
+    frame->size += extraSize;
+    art->dataSize += extraSize;
+
+    memset((unsigned char*)frame + sizeof(*frame), 0, frame->size);
+}
+
 // 0x419A78
 static int artCacheGetFileSizeImpl(int fid, int* sizePtr)
 {
@@ -954,6 +1020,19 @@ static int artCacheGetFileSizeImpl(int fid, int* sizePtr)
             Art art;
             if (artReadHeader(&art, stream) == 0) {
                 *sizePtr = artGetDataSize(&art);
+
+                // Realtime build: room for the widened to-hit canvas (artWidenToHitCanvas). The stream
+                // sits on the first frame's header, which starts with its width and height.
+                if (artIsToHitCanvas(fid) && artIsOnePicture(&art)) {
+                    short width;
+                    short height;
+                    if (fileReadInt16(stream, &width) == 0
+                        && fileReadInt16(stream, &height) == 0
+                        && width < ART_TO_HIT_CANVAS_WIDTH) {
+                        *sizePtr += (ART_TO_HIT_CANVAS_WIDTH - width) * height;
+                    }
+                }
+
                 result = 0;
             }
             fileClose(stream);
@@ -992,6 +1071,10 @@ static int artCacheReadDataImpl(int fid, int* sizePtr, unsigned char* data)
         }
 
         if (loaded) {
+            // Realtime build: the to-hit cursor's canvas comes out wider than its file.
+            if (artIsToHitCanvas(fid)) {
+                artWidenToHitCanvas((Art*)data);
+            }
             *sizePtr = artGetDataSize((Art*)data);
             result = 0;
         }

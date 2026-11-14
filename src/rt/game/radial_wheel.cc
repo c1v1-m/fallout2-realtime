@@ -467,6 +467,68 @@ void radial_wheel_set_side_hints(const char* left, const char* right)
     }
 }
 
+// ⚠️ THE PLAIN LOOK MAKES ROOM FOR ITS LABELS (2026-11-10, the exit wheel). RADIAL_WHEEL_SIZE was sized
+// for "Head 95%"; the exit wheel's place names ("Temple: Inner Sanctum", "Trapping Grounds") run three
+// times that, and two of them on one row -- 3 and 9 o'clock, or the lower pair of three -- ran into each
+// other. So the ring is stretched sideways a step at a time until no two labels touch, and the panel
+// widens to hold the outermost one. Labels that already fit keep the 190 px square exactly as it was.
+static void wheel_fit_plain_labels()
+{
+    int widths[RADIAL_WHEEL_MAX];
+    float angles[RADIAL_WHEEL_MAX];
+    for (int i = 0; i < wheel_count; i++) {
+        // Measured as wheel_draw writes it: the name, or "Name NN%" with a value.
+        widths[i] = 0;
+        if (wheel_segs[i].label != NULL && wheel_segs[i].value >= 0) {
+            char line[40];
+            snprintf(line, sizeof(line), "%s %d%%", wheel_segs[i].label, wheel_segs[i].value);
+            widths[i] = text_width(line);
+        } else if (wheel_segs[i].label != NULL) {
+            widths[i] = text_width(wheel_segs[i].label);
+        }
+        angles[i] = -RADIAL_WHEEL_PI / 2.0f + i * (2.0f * RADIAL_WHEEL_PI / wheel_count);
+    }
+
+    int lineH = text_height();
+    int maxW = screenGetWidth() - 16;
+    for (; 2 * wheel_radius_x < maxW; wheel_radius_x += 4) {
+        bool clear = true;
+        for (int i = 0; i < wheel_count && clear; i++) {
+            for (int j = i + 1; j < wheel_count; j++) {
+                int dx = (int)(wheel_radius_x * cosf(angles[i])) - (int)(wheel_radius_x * cosf(angles[j]));
+                int dy = (int)(wheel_radius_y * sinf(angles[i])) - (int)(wheel_radius_y * sinf(angles[j]));
+                if (dx < 0) {
+                    dx = -dx;
+                }
+                if (dy < 0) {
+                    dy = -dy;
+                }
+                if (dy < lineH + 2 && dx < (widths[i] + widths[j]) / 2 + 8) {
+                    clear = false;
+                    break;
+                }
+            }
+        }
+        if (clear) {
+            break;
+        }
+    }
+
+    for (int i = 0; i < wheel_count; i++) {
+        int x = (int)(wheel_radius_x * cosf(angles[i]));
+        if (x < 0) {
+            x = -x;
+        }
+        int need = 2 * (x + widths[i] / 2 + 6);
+        if (need > maxW) {
+            need = maxW;
+        }
+        if (need > wheel_w) {
+            wheel_w = need;
+        }
+    }
+}
+
 void radial_wheel_open(const RadialSegment* segments, int count, const char* title,
     const RadialWheelArt* art, int atX, int atY, bool transparentBg)
 {
@@ -615,8 +677,12 @@ void radial_wheel_open(const RadialSegment* segments, int count, const char* tit
         wheel_cell_w = 0;
         wheel_cell_h = 0;
         wheel_has_icons = false;
+        // No description band in this look, and the last icon wheel's must not carry over: the ring
+        // is centred on (height - band) / 2, so a stale band lifted it by half the band's height.
+        wheel_desc_h = 0;
         wheel_w = wheel_h = RADIAL_WHEEL_SIZE;
         wheel_radius_x = wheel_radius_y = wheel_w / 2 - 36;
+        wheel_fit_plain_labels();
     }
 
     // Center on the requested screen point, or on the whole screen when none is given.
@@ -647,6 +713,11 @@ void radial_wheel_open(const RadialSegment* segments, int count, const char* tit
     }
 
     wheel_draw();
+}
+
+void radial_wheel_arm()
+{
+    wheel_aim_armed = true;
 }
 
 void radial_wheel_update(float aimX, float aimY)

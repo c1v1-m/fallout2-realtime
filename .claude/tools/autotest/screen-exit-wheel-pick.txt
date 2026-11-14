@@ -1,0 +1,36 @@
+# F2 exit wheel (2026-11-10, his „pokud není možné vybrat východ, tak to tlačítko docela ztrácí smysl“):
+# at Arroyo's bridge the exits lead to two places -- the village (Village, 13 hexes up-left, the nearest) and
+# the world map (World map, 74 hexes down). Holding BACK opens the wheel instead of running: Village on top,
+# World map at the bottom. B closes it with no run and BACK's release then opens nothing. The second hold aims
+# the right stick down at the world map and lets go of BACK: he heads there, not for the nearer village.
+# (Outside the Temple of Trials the village's grids lie behind the walls: no path, so the wheel leaves that
+# place out -- gpui_exit_reachable_grid.) Screenshots of the open wheel: build/Release/scr*.bmp.
+name screen-exit-wheel-pick
+map ARBRIDGE.MAP
+seed 1
+duration 20
+dude tile 16686 rot 2
+cleararea 40
+
+note 1500 hold-back-then-b
+pad 2000 BACK 1
+shot 2800
+tap 3000 B
+pad 3400 BACK 0
+
+note 4500 hold-back-aim-down
+pad 5000 BACK 1
+axis 5800 RY 32767
+shot 6200
+pad 6500 BACK 0
+axis 6600 RY 0
+
+expect-count 2 exit-wheel\] places=2 open=1 0:Village \| 1:World map
+expect exit-wheel-closed\] why=b
+expect-count 1 exit-pick\]
+expect exit-pick\] aimed=1 map=-2 elev=0 src=back
+expect exit-nav\] .*rc=0 map=-2 elev=0
+expect Heading for World map\.
+expect-not exit-nav\] .*map=4 elev
+expect-not exit-nav\] unreachable
+expect-not autotest\] modal .*inv=1

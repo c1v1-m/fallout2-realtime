@@ -21,12 +21,14 @@
 #include "kb.h"
 #include "mouse.h"
 #include "object.h"
+#include "perk.h"
 #include "proto.h"
 #include "proto_instance.h"
 #include "settings.h"
 #include "sfall_config.h"
 #include "skill.h"
 #include "skilldex.h"
+#include "stat.h"
 #include "svga.h"
 #include "text_font.h"
 #include "tile.h"
@@ -313,7 +315,7 @@ static Object* gGameMousePointedObject;
 
 static int _gmouse_get_click_to_scroll();
 static int gameMouseSetBouncingCursorFid(int fid);
-static int gameMouseRenderAccuracy(const char* string, int color);
+static int gameMouseRenderAccuracy(const char* string, int color, const char* line2 = nullptr);
 static int gameMouseRenderActionPoints(const char* string, int color);
 static int gameMouseObjectsInit();
 static int gameMouseObjectsReset();
@@ -2015,7 +2017,7 @@ int gameMouseHighlightActionMenuItemAtIndex(int menuItemIndex)
 }
 
 // 0x44D774
-int gameMouseRenderAccuracy(const char* string, int color)
+int gameMouseRenderAccuracy(const char* string, int color, const char* line2)
 {
     CacheEntry* crosshairFrmHandle;
     int fid = buildFid(OBJ_TYPE_INTERFACE, gGameMouseModeFrmIds[GAME_MOUSE_MODE_CROSSHAIR], 0, 0, 0);
@@ -2044,6 +2046,24 @@ int gameMouseRenderAccuracy(const char* string, int color)
         gGameMouseActionHitFrmWidth - crosshairFrmWidth,
         gGameMouseActionHitFrmWidth,
         color);
+
+    // Realtime build: an optional second line straight under the first, left-aligned with it, in the same
+    // font and colour, and outlined by the same pass below (the target's health, gameMouseToHitHealth). The
+    // canvas is 21 px tall; font 101's glyphs are 9 and its line height of 10 already carries the one-pixel
+    // spacing, so line 1 is rows 1..9, line 2 rows 11..19, and row 20 is left for the outline under it --
+    // an exact fit, which the guard checks. (fallout1-ce first put its second line one pixel lower, asking
+    // for 22 rows, and the guard dropped it on every frame without a word.) The width is art.cc's: the
+    // canvas is widened when it loads.
+    if (line2 != nullptr) {
+        int lineY = 1 + fontGetLineHeight();
+        if (lineY + fontGetLineHeight() <= gGameMouseActionHitFrmHeight) {
+            fontDrawText(gGameMouseActionHitFrmData + gGameMouseActionHitFrmWidth * lineY + crosshairFrmWidth + 1,
+                line2,
+                gGameMouseActionHitFrmWidth - crosshairFrmWidth,
+                gGameMouseActionHitFrmWidth,
+                color);
+        }
+    }
 
     bufferOutline(gGameMouseActionHitFrmData + crosshairFrmWidth,
         gGameMouseActionHitFrmWidth - crosshairFrmWidth,
@@ -2603,6 +2623,83 @@ static void customMouseModeFrmsInit()
     configGetInt(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_USE_REPAIR_FRM_KEY, &(gGameMouseModeFrmIds[GAME_MOUSE_MODE_USE_REPAIR]));
 }
 
+// HOW HURT THE TARGET IS, ON A SECOND LINE UNDER ITS TO-HIT CHANCE (2026-11-10, his pick because the words
+// are vanilla's: „to wounded nebo almost dead je taky ve vanille?“). It is the Examine's own word for the
+// target's health -- proto.msg 500-504: Dead, Almost Dead, Severely Wounded, Wounded, Unhurt -- banded by
+// the very function _obj_examine_func uses (objectExamineHealthBand), so an aim and a look never disagree.
+// With the Awareness perk it is what that perk's Examine gives instead, the hit points (proto.msg 535-537,
+// "He has %d/%d hps"), here only "cur/max". A critter only, never the dude; alive or dead, as the Examine
+// words it. False = no second line. It rides with the chance wherever the chance is drawn (the LT lock, a
+// held quick throw, the mouse crosshair), in the same font, colour and outline (gameMouseRenderAccuracy).
+//
+// ⚠️ THE WORD ONLY POPS WHEN IT GETS WORSE (2026-11-11, his „unhurt atd mi přijde takové nic moc, když to tam
+// bude furt pokaždé, když na někoho zamířím“, then „Jen při změně“). Not a standing label: it shows for
+// GAME_MOUSE_HEALTH_POP_MS when the aimed target drops into a worse band while aimed at -- his hit or anyone's
+// -- so it reads as the answer to a hit. "Unhurt" never shows, a new target starts silent, healing pops
+// nothing. With Awareness the hit points stay, always: short, and what that perk gives.
+#define GAME_MOUSE_HEALTH_POP_MS 2000
+static int gGameMouseHealthTargetId = -1;
+static int gGameMouseHealthBand = -1;
+static unsigned int gGameMouseHealthPopAt = 0;
+static bool gGameMouseHealthPopping = false;
+
+static bool gameMouseToHitHealth(Object* target, char* buf, size_t size)
+{
+    if (target == nullptr || target == gDude || PID_TYPE(target->pid) != OBJ_TYPE_CRITTER) {
+        return false;
+    }
+
+    if (perkGetRank(gDude, PERK_AWARENESS) != 0 && !critterIsDead(target)) {
+        snprintf(buf, size, "%d/%d",
+            critterGetStat(target, STAT_CURRENT_HIT_POINTS),
+            critterGetStat(target, STAT_MAXIMUM_HIT_POINTS));
+        return true;
+    }
+
+    // A maximum of 0 would divide by zero in the band (vanilla's own sum, asked here every frame it aims).
+    if (critterGetStat(target, STAT_MAXIMUM_HIT_POINTS) <= 0) {
+        return false;
+    }
+
+    // Out of range (a third more hit points than the maximum, or more) has no word in proto.msg.
+    int band = objectExamineHealthBand(target);
+    if (band < 0 || band > 4) {
+        return false;
+    }
+
+    // The band this target had last frame: lower now = worse (500 Dead .. 504 Unhurt), and that starts a pop.
+    unsigned int now = getTicks();
+    if (target->id != gGameMouseHealthTargetId) {
+        gGameMouseHealthTargetId = target->id;
+        gGameMouseHealthPopping = false;
+    } else if (band < gGameMouseHealthBand) {
+        gGameMouseHealthPopAt = now;
+        gGameMouseHealthPopping = true;
+    }
+    gGameMouseHealthBand = band;
+
+    if (gGameMouseHealthPopping && getTicksBetween(now, gGameMouseHealthPopAt) >= GAME_MOUSE_HEALTH_POP_MS) {
+        gGameMouseHealthPopping = false;
+    }
+    if (!gGameMouseHealthPopping || band == 4) {
+        return false;
+    }
+
+    MessageListItem messageListItem;
+    messageListItem.num = 500 + band;
+    if (!messageListGetItem(&gProtoMessageList, &messageListItem)) {
+        return false;
+    }
+
+    snprintf(buf, size, "%s", messageListItem.text);
+    return true;
+}
+
+// The health line last traced: the cursor is rebuilt every frame while it aims, so only a new target or
+// new words are written ([COMBAT/aim-health], read by the screen-aim-health scenarios).
+static int gGameMouseHealthTracedId = -1;
+static char gGameMouseHealthTraced[32];
+
 // The to-hit cursor for an explicit target (the percentage, or an X when the shot is impossible),
 // shared by the mouse crosshair hover and the controller lock-on.
 static void gameMousePutToHitFrame(Object* pointedObject)
@@ -2638,7 +2735,21 @@ static void gameMousePutToHitFrame(Object* pointedObject)
         }
     }
 
-    if (gameMouseRenderAccuracy(formattedAccuracy, color) == 0) {
+    char health[32];
+    bool showHealth = gameMouseToHitHealth(pointedObject, health, sizeof(health));
+    if (showHealth && (pointedObject->id != gGameMouseHealthTracedId || strcmp(health, gGameMouseHealthTraced) != 0)) {
+        trace_event(TRACE_COMBAT, "aim-health", "target=%d id=%d line=\"%s\" hp=%d/%d aware=%d",
+            pointedObject->pid, pointedObject->id, health,
+            critterGetStat(pointedObject, STAT_CURRENT_HIT_POINTS),
+            critterGetStat(pointedObject, STAT_MAXIMUM_HIT_POINTS),
+            perkGetRank(gDude, PERK_AWARENESS) != 0 ? 1 : 0);
+        gGameMouseHealthTracedId = pointedObject->id;
+        snprintf(gGameMouseHealthTraced, sizeof(gGameMouseHealthTraced), "%s", health);
+    } else if (!showHealth) {
+        gGameMouseHealthTraced[0] = '\0'; // gone (a pop ran out): the next one is traced again
+    }
+
+    if (gameMouseRenderAccuracy(formattedAccuracy, color, showHealth ? health : nullptr) == 0) {
         Rect tmp;
         int fid = buildFid(OBJ_TYPE_INTERFACE, 284, 0, 0, 0);
         // NOTE: Uninline.

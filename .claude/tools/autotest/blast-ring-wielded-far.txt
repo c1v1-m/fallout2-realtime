@@ -1,0 +1,24 @@
+# The blast ring under the LT lock with a grenade WIELDED in the hand (not the quick slot), the raider out of throw
+# reach (ported from the Fallout 1 review, 2026-11-10). RT throws only within reach -- the quick slot alone throws past it -- so nothing would
+# go off and no ring may show. Strength 3 throws 9 tiles; the raider stands 12 off, still (not hostile), inside the
+# lock's reach (Perception 8: 16 tiles). Before the fix the ring sat 9 tiles out on the line to him.
+name blast-ring-wielded-far-f2
+map DESERT1.MAP
+seed 1
+duration 6
+dude tile 20100 rot 2
+dude stat ST 3
+dude stat PE 8
+dude hp 300
+dude skill throwing 80
+dude wield 25
+blastring on
+
+spawn 16777455 22500 rot 5 hp 300
+
+axis 1500 LT 32767
+shot 2600
+axis 4000 LT -32768
+
+expect \[ACTION/lock-on\]
+expect-not \[COMBAT/blast-ring\] on

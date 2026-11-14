@@ -431,7 +431,9 @@ typedef struct PipboyControl {
 // then, when the first cut said "X Reload" and kept three more pages: "TY CONTROLS MAJÍ BÝT JEN JEDNY A
 // TO CONTROLS NIC VÍC ... LT+Y JE ZMĚNA MODU A LT+X JE RELOAD". So: one archive entry, his words,
 // LT + X for the reload (X's tap reloads with or without LT; he wants it written as the combo). BACK,
-// START and the quick save hold were his additions or the only way to those screens. No drawn pad, no
+// START and the quick save hold were his additions or the only way to those screens; BACK hold, the run
+// to an exit and its wheel, came with that wheel (2026-11-10) -- a pad action nobody can find is a
+// missing one. No drawn pad, no
 // SCREENS / MENUS / KEYBOARD pages (git history has them). On a Steam Deck the names are spelled the
 // Deck's way on the way out (ctrl_deck_names).
 static const PipboyControl ctrl_lines[] = {
@@ -459,6 +461,7 @@ static const PipboyControl ctrl_lines[] = {
     { "LT + Y", "Firing mode" },
     { NULL, NULL },
     { "BACK", "Inventory" },
+    { "BACK hold", "Run to exit" },
     { "START", "Pause" },
     { "START hold", "Quick save" },
 };
@@ -808,6 +811,57 @@ static void ShowControlsPage(const char* title, const PipboyControl* lines, int 
     pipboyDrawBackButton(_colorTable[992]);
 
     windowRefreshRect(gPipboyWindow, &gPipboyWindowContentRect);
+}
+
+// The same list for a window of its own: the pause menu's Y (options.cc, approved 2026-11-10), because a new
+// Fallout 2 character has no Pip-Boy until the Temple of Trials is behind him. Read from ctrl_lines and spelt
+// by ctrl_deck_names, so the two screens can never list different buttons.
+const char* pipboy_controls_title()
+{
+    return ctrl_entry;
+}
+
+int pipboy_controls_count()
+{
+    return (int)(sizeof(ctrl_lines) / sizeof(ctrl_lines[0]));
+}
+
+// Row `index` as the page above prints it (the Deck's names on a Deck). False for a blank spacer; a heading
+// comes back with `button` empty.
+bool pipboy_controls_row(int index, char* button, size_t buttonSize, char* action, size_t actionSize)
+{
+    if (buttonSize == 0 || actionSize == 0) {
+        return false;
+    }
+
+    button[0] = '\0';
+    action[0] = '\0';
+
+    if (index < 0 || index >= pipboy_controls_count()) {
+        return false;
+    }
+
+    const PipboyControl* entry = &(ctrl_lines[index]);
+    if (entry->button == nullptr && entry->action == nullptr) {
+        return false;
+    }
+
+    bool deck = ctrl_on_deck();
+    if (entry->button != nullptr) {
+        if (deck) {
+            ctrl_deck_names(entry->button, button, buttonSize);
+        } else {
+            snprintf(button, buttonSize, "%s", entry->button);
+        }
+    }
+    if (entry->action != nullptr) {
+        if (deck) {
+            ctrl_deck_names(entry->action, action, actionSize);
+        } else {
+            snprintf(action, actionSize, "%s", entry->action);
+        }
+    }
+    return true;
 }
 
 // Realtime build (fallout1-ce): an FNV-1a hash of every quest's global variable. The quest autosave in

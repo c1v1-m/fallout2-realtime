@@ -12,6 +12,7 @@ int _obj_look_at(Object* a1, Object* a2);
 int _obj_look_at_func(Object* a1, Object* a2, void (*a3)(char* string));
 int _obj_examine(Object* a1, Object* a2);
 int _obj_examine_func(Object* critter, Object* target, void (*fn)(char* string));
+int objectExamineHealthBand(Object* critter);
 int _obj_pickup(Object* critter, Object* item);
 int _obj_drop(Object* a1, Object* a2);
 int _obj_destroy(Object* obj);
