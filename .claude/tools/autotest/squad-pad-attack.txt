@@ -1,6 +1,6 @@
 # SQUAD COMMAND BY THE PAD: ATTACK to one companion (2026-11-12, his design "A"), with shots. A pistol raider 12 tiles
 # in front of the dude is LT-locked (PE 10), so LT + A opens the mode with the cursor on it: red ATTACK over it, red
-# corner brackets round it, green dotted lines from Vic and Sulik (who = All), the compass with Attack lit. The world
+# corner brackets round it, white outlines round Vic and Sulik (who = All), the compass with Attack lit. The world
 # slows for 1.5 s, then holds (shot 1). RB: who = Vic, the nearest (beside the dude; Sulik stands 5 tiles off) (shot 2).
 # A: ATTACK for Vic alone -- his own focus with the red chevron over the raider, "On it." over him, the mode gone
 # (shot 3); he shoots it. Sulik is not given it (he fights as he likes, on his own Distance).

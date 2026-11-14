@@ -3,7 +3,7 @@
 # „Y Heal me again“; GO came back on 2026-11-14 and Y stays: the mode opens on free ground, GO's now).
 # screen-squad-mode's setup: Vic (10mm pistol, stimpaks) 4 tiles left of the dude, Sulik (knife) right below him, the
 # dude hurt (200 of 400), no enemy. Shots (the screen's 853x480):
-#   1 LT + A, the cursor on the dude: HEAL ME green, the line from Vic, the legend his preview
+#   1 LT + A, the cursor on the dude: HEAL ME green, the legend his preview
 #     "LB RB All  A Heal me  X Hold fire  Y No healing  B Back"
 #   2 Y: NO HEALING to All -- given, so the mode closes, as X's order does; "Saving supplies." over Vic, the one with
 #     the stimpaks, though Sulik stands nearer

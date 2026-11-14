@@ -8533,17 +8533,16 @@ static void gpui_useon_arm(SDL_GameController* pad)
 //   B       back out, no order.
 // Every order closes the mode (combat_rt_squad_command: the nearest one who took it says so, "On it.", "Moving.",
 // "Holding fire."...); one refused buzzes and leaves it open. LB / RB and the cursor never close it. Its own marks --
-// the outlines round who, the dotted line from who to the target (to an enemy, a neutral or a GO tile from every one
-// chosen, to him from the one who would bring the stimpak), the brackets round the target -- are drawn by the tile
-// overlay (gpui_squad_overlay, after combat_rt's own), its words in small windows of their own over the world, each
-// with the world under it as its background (gpui_squad_text_window; the prompt word's way, interact_prompt.cc
-// ip_place_word).
+// the outlines round who and the brackets round the target -- are drawn by the tile overlay (gpui_squad_overlay, after
+// combat_rt's own), its words in small windows of their own over the world, each with the world under it as its
+// background (gpui_squad_text_window; the prompt word's way, interact_prompt.cc ip_place_word). No line runs from who
+// to the target any more: his „nelíbí se mi při rozkazech ty zelené přerušované čárky“ (2026-11-15), and of three
+// previews (that dotted line, none, a solid one) „Bez čar“ -- the outline says who, the brackets and the word where.
 #define GPUI_SQUAD_MAX 8 // companions it steps through: the party is a handful
 #define GPUI_SQUAD_WPN_AUTO_ID (-2) // the weapon wheel's "Auto" (never -1, radial_wheel_highlight_id's "none")
 // The cursor rests on a free tile this long before GO asks the pathfinder whether anyone chosen can get there
 // (combat_rt_squad_can_reach: up to 12000 nodes a companion) -- a stick sweeping the map asks nothing.
 #define GPUI_SQUAD_REACH_SETTLE_MS 120
-#define GPUI_SQUAD_DASH 3 // the dotted line: this many pixels on, as many off
 #define GPUI_SQUAD_BRACKET 6 // an arm of a corner bracket, in pixels
 #define GPUI_SQUAD_BRACKET_GAP 2 // brackets stand this far off the box they frame (a sprite's, a tile's hex)
 // The outline round every one chosen (his pick 2026-11-12, „Obrys postavy“, after „nelíbí se mi zelené kruhy“ about the
@@ -8554,7 +8553,6 @@ static void gpui_useon_arm(SDL_GameController* pad)
 // interact_prompt.cc ip_set_outline), and vanilla's ochre for a critter out of the line of fire (OUTLINE_TYPE_32,
 // palette 61 -- the badges' gold, palette 60, is next to it: that gold was the other candidate).
 #define GPUI_SQUAD_OUTLINE_RGB ((31 << 10) | (31 << 5) | 31)
-#define GPUI_SQUAD_LINE_CHUNK 48 // a line is repainted in pieces this long, not as one screen-wide box
 // The words' windows are taken down when the mode's tick has not run this long -- a screen came up over the world
 // (its own loop), and MOVE_ON_TOP windows would show through it (the prompt hand's lesson, ip_overlay_guard).
 #define GPUI_SQUAD_GUARD_MS 250
@@ -8632,9 +8630,6 @@ typedef struct GpuiSquadDraw {
     int outlineCount;
     GpuiSquadSprite outline[GPUI_SQUAD_MAX]; // every one chosen: the outline round his sprite
     int outlineColor;
-    int lineCount;
-    int line[GPUI_SQUAD_MAX][4]; // from x, y to x, y
-    int lineColor;
     int bracket; // corner brackets round bracketBox: the critter under the cursor, else its tile's hex
     int bracketBox[4]; // left, top, right, bottom
     int bracketColor;
@@ -9103,36 +9098,6 @@ static void gpui_squad_outline(Rect* clip, const GpuiSquadSprite* s, int color)
     art_ptr_unlock(handle);
 }
 
-static void gpui_squad_dashes(Rect* clip, const int* l, int color)
-{
-    int x0 = l[0];
-    int y0 = l[1];
-    int x1 = l[2];
-    int y1 = l[3];
-    int dx = abs(x1 - x0);
-    int dy = -abs(y1 - y0);
-    int sx = x0 < x1 ? 1 : -1;
-    int sy = y0 < y1 ? 1 : -1;
-    int err = dx + dy;
-    for (int step = 0; step < 4096; step++) {
-        if ((step / GPUI_SQUAD_DASH) % 2 == 0) {
-            tile_overlay_line(clip, x0, y0, x0, y0, color);
-        }
-        if (x0 == x1 && y0 == y1) {
-            break;
-        }
-        int e2 = 2 * err;
-        if (e2 >= dy) {
-            err += dy;
-            x0 += sx;
-        }
-        if (e2 <= dx) {
-            err += dx;
-            y0 += sy;
-        }
-    }
-}
-
 static void gpui_squad_brackets(Rect* clip, const int* b, int color)
 {
     int l = b[0];
@@ -9150,18 +9115,14 @@ static void gpui_squad_brackets(Rect* clip, const int* b, int color)
     tile_overlay_line(clip, r, bt, r, bt - a, color);
 }
 
-// combat_rt's world overlay calls this last (combat_rt_set_squad_mode_hooks), for every repainted rect: the lines
-// first, the outlines over them (a line starts at a chosen one's feet), the brackets on top. Reads no object -- only
-// what the tick measured, and the art it names.
+// combat_rt's world overlay calls this last (combat_rt_set_squad_mode_hooks), for every repainted rect: the outlines,
+// then the brackets on top. Reads no object -- only what the tick measured, and the art it names.
 static void gpui_squad_overlay(Rect* rect, int elevation)
 {
     if (!gpui_squad_draw_on || elevation != gpui_squad_draw.elevation) {
         return;
     }
     const GpuiSquadDraw* d = &gpui_squad_draw;
-    for (int i = 0; i < d->lineCount; i++) {
-        gpui_squad_dashes(rect, d->line[i], d->lineColor);
-    }
     for (int i = 0; i < d->outlineCount; i++) {
         gpui_squad_outline(rect, &(d->outline[i]), d->outlineColor);
     }
@@ -9181,26 +9142,12 @@ static void gpui_squad_refresh_box(int l, int t, int r, int b, int elevation)
 }
 
 // Repaints the world wherever `d` lies -- the overlay then draws what gpui_squad_draw holds now. An outline's box is
-// its frame and the 1 px ring round it. A line in pieces of GPUI_SQUAD_LINE_CHUNK, or a diagonal across the screen
-// would repaint the whole view.
+// its frame and the 1 px ring round it; a bracket's, each of its four corners.
 static void gpui_squad_refresh(const GpuiSquadDraw* d)
 {
     for (int i = 0; i < d->outlineCount; i++) {
         const GpuiSquadSprite* s = &(d->outline[i]);
         gpui_squad_refresh_box(s->left - 1, s->top - 1, s->left + s->width, s->top + s->height, d->elevation);
-    }
-    for (int i = 0; i < d->lineCount; i++) {
-        const int* l = d->line[i];
-        int len = abs(l[2] - l[0]) > abs(l[3] - l[1]) ? abs(l[2] - l[0]) : abs(l[3] - l[1]);
-        int chunks = len / GPUI_SQUAD_LINE_CHUNK + 1;
-        for (int c = 0; c < chunks; c++) {
-            int ax = l[0] + (l[2] - l[0]) * c / chunks;
-            int ay = l[1] + (l[3] - l[1]) * c / chunks;
-            int bx = l[0] + (l[2] - l[0]) * (c + 1) / chunks;
-            int by = l[1] + (l[3] - l[1]) * (c + 1) / chunks;
-            gpui_squad_refresh_box((ax < bx ? ax : bx) - 1, (ay < by ? ay : by) - 1, (ax > bx ? ax : bx) + 1,
-                (ay > by ? ay : by) + 1, d->elevation);
-        }
     }
     if (d->bracket) {
         const int* b = d->bracketBox;
@@ -9230,11 +9177,6 @@ static void gpui_squad_paint_marks(Object** chosen, int chosenCount)
         }
     }
 
-    // The target: the critter's tile, or the cursor's.
-    int tx = 0;
-    int ty = 0;
-    bool target = gpui_squad_on != NULL ? gpui_squad_tile_centre(gpui_squad_on->tile, &tx, &ty)
-                                        : gpui_squad_tile_centre(gpui_squad_tile, &tx, &ty);
     // ATTACK: red round an enemy, yellow round a neutral (gpui_squad_attack_color).
     int wordColor = gpui_squad_on_attackable() ? gpui_squad_attack_color() : (gpui_squad_ok ? green : grey);
 
@@ -9261,35 +9203,6 @@ static void gpui_squad_paint_marks(Object** chosen, int chosenCount)
             d.bracketBox[3] = y + 15 + GPUI_SQUAD_BRACKET_GAP;
             d.bracketColor = gpui_squad_kind == GPUI_SQUAD_ON_GROUND && gpui_squad_ok ? green : grey;
         }
-    }
-
-    // The dotted line from who to it: from every one chosen to an enemy or a neutral (ATTACK) or a GO tile; to him only
-    // from the one that would come with the stimpak (HEAL ME); none to a companion (WEAPON is about him) or to nothing.
-    if (target) {
-        Object* from[GPUI_SQUAD_MAX];
-        int fromCount = 0;
-        if (gpui_squad_on_attackable() || gpui_squad_kind == GPUI_SQUAD_ON_GROUND) {
-            for (int i = 0; i < chosenCount; i++) {
-                from[fromCount++] = chosen[i];
-            }
-        } else if (gpui_squad_kind == GPUI_SQUAD_ON_DUDE) {
-            Object* healer = combat_rt_squad_healer(gpui_squad_who, NULL);
-            if (healer != NULL) {
-                from[fromCount++] = healer;
-            }
-        }
-        for (int i = 0; i < fromCount && d.lineCount < GPUI_SQUAD_MAX; i++) {
-            int fx;
-            int fy;
-            if (from[i] != gpui_squad_on && gpui_squad_tile_centre(from[i]->tile, &fx, &fy) && (fx != tx || fy != ty)) {
-                int* l = d.line[d.lineCount++];
-                l[0] = fx;
-                l[1] = fy;
-                l[2] = tx;
-                l[3] = ty;
-            }
-        }
-        d.lineColor = gpui_squad_ok ? green : grey;
     }
 
     if (!gpui_squad_painted_on || memcmp(&d, &gpui_squad_painted, sizeof(d)) != 0) {

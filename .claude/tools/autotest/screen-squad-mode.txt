@@ -4,12 +4,12 @@
 # holds. Vic (10mm pistol, stimpaks) stands 4 tiles left of the dude, Sulik (knife, nothing to heal with) right below
 # him; the dude is hurt (200 of 400). No enemy: the cursor starts 3 tiles in front of the dude, on free ground. Shots
 # (the screen's 853x480):
-#   1 who = All on free ground: green GO, green corner brackets round the tile, green dotted lines from Vic and Sulik,
+#   1 who = All on free ground: green GO, green corner brackets round the tile,
 #     both names in green over their heads and a white outline round each (2026-11-12, his „Obrys postavy“: no more
 #     green hexes), the legend "LB RB All  A Go  X Hold fire  Y No healing  B Back", the compass
-#   2 RB: who = Sulik (the nearest) -- his name, outline and line only, Vic's all gone; the legend says Sulik
-#   3 the cursor on the dude: HEAL ME grey (Sulik carries nothing to heal with), no line
-#   4 LB: who = All -- HEAL ME green, the line from Vic (the one who would come), the legend his preview of 2026-11-13:
+#   2 RB: who = Sulik (the nearest) -- his name and outline only, Vic's all gone; the legend says Sulik
+#   3 the cursor on the dude: HEAL ME grey (Sulik carries nothing to heal with)
+#   4 LB: who = All -- HEAL ME green (Vic would come), the legend his preview of 2026-11-13:
 #     "A Heal me  X Hold fire  Y No healing  B Back"
 #   5 the cursor on Vic: WEAPON
 #   6 A: Vic's weapon wheel ("Auto" and his 10mm pistol), the legend "A Pick  B Back"

@@ -3,7 +3,7 @@
 # does, in the yellow the LT lock gives a neutral (red stays an enemy's). Vic (10mm pistol) 4 tiles left of the dude,
 # Sulik (knife) right below him; a ghoul (the pid of his Gecko ghoul), neutral, 8 tiles in front. LT locks it (nobody
 # fights him: the neutral in front), A opens the mode with the cursor on it. Shots (the screen's 853x480):
-#   1 after the hold: ATTACK in YELLOW over the ghoul, yellow corner brackets round it, the dotted lines from Vic and
+#   1 after the hold: ATTACK in YELLOW over the ghoul, yellow corner brackets round it, white outlines round Vic and
 #     Sulik (who = All), the compass's "Attack" white, the legend "LB RB All  A Attack  X Hold fire  Y No healing  B Back"
 #   2 A: ATTACK to All -- given, the mode closes; "On it." over the nearest, the red chevron over the ghoul (the focus)
 #   3 the fight their order started: the ghoul turned on them
