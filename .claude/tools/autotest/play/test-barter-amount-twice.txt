@@ -1,0 +1,34 @@
+# TESTER (2026-11-15): the MOVE ITEMS amount picker after inventory.cc's change to its ALL plate (the word is now drawn
+# into copies of FRM 307 / 308, not into the cached art). The trade with Maida opens on the dude's caps; RT opens the
+# picker, B cancels it -- three times. Every picker must look the same (shots 2, 3 and 4: the ALL plate with its word,
+# nothing printed over it twice), each B must cancel only the picker (the trade stays: modal back to the 640x480 one),
+# and nothing may move.
+name test-barter-amount-twice
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 24
+dude tile 22879 rot 0
+dude item 41 2000
+
+talk 2000 16777273
+tap 6000 Y
+shot 8500
+axis 9000 RT 32767
+axis 9150 RT -32768
+shot 10000
+tap 11000 B
+axis 12500 RT 32767
+axis 12650 RT -32768
+shot 13500
+tap 14500 B
+axis 16000 RT 32767
+axis 16150 RT -32768
+shot 17000
+tap 18000 B
+shot 19000
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect-count 3 autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+expect-not barter-a\]
+expect-not barter-auto\]

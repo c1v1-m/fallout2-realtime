@@ -1,0 +1,21 @@
+# MODS "Bonus Move" = fast (2026-11-17, his „Ano, udělej“): how fast the perk's 2 move points come back while the dude stands.
+# The dude (AG 9: 9 AP, 0.533 s a point; Bonus Move rank 1) walks away from a raider for 1.5 s -- the walk spends the
+# reserve first -- then stands. Half turn should refill it in ~2.4 s (9 x 0.533 / 2), Turn in ~4.8 s, Fast at the AP rate.
+name bm-refill-fast
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude stat AG 9
+dude hp 400
+dude perk 3
+cfg bonus_move_refill 0
+
+spawn 16777455 23100 rot 5 wield 4 hostile
+
+axis 1500 LX -32768
+axis 3000 LX 0
+note 11000 end
+
+expect bonus-move-spent\] max=2
+expect bonus-move-full\] max=2

@@ -1,0 +1,29 @@
+# TEST (2026-11-15, the barter badges): RT on an item in the trade. test-barter-reenter pulled RT with the pointer on
+# the dude's caps: the MOVE ITEMS picker opened (RT = "how many") AND the line "You see: Money." appeared with the
+# vanilla action menu's LOOK icon (binoculars) stuck beside the pointer for the rest of the trade -- RT is also the
+# screens' left mouse button. Same press here on purpose, on this build and on fallout2-ce-before-timer.exe.
+#   1 the trade      2 RT pulled and let go: the picker      3 B cancels the picker      4 DOWN (cursor moves)
+#   5 B leaves the trade
+name test-barter-rt
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 21
+dude tile 22879 rot 0
+dude item 41 2000
+
+talk 2000 16777273
+tap 6000 Y
+shot 8500
+axis 9000 RT 32767
+axis 9150 RT -32768
+shot 10500
+tap 11000 B
+shot 12500
+tap 13000 LB
+shot 14500
+tap 15000 B
+shot 18000
+note 19500 end
+
+expect autotest\] modal win=\d+ at=\d+,\d+ size=259x162

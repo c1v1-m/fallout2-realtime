@@ -1,0 +1,26 @@
+# TESTER (2026-11-15): m-temple-door-refused from a few steps away. The Temple's locked cave door (DoorL100, pid
+# 33555366, id 102, tile 11108): A from two rows off queues a walk to the door and the use after it, so the door's
+# answer comes back only when he gets there. The pick must not show before that answer (the use on its way is not a
+# refusal), the refusal must arm it, and walking off and back must keep it (the 120 s memory of the refusal).
+name test-door-refused-far
+map ARCAVES.MAP
+mapscript on
+seed 1
+duration 16
+
+dude tile 11507 rot 0
+
+shot 1500
+tap 2000 A
+shot 2400
+shot 5500
+walkto 6500 11713
+walkto 9500 11507
+shot 13000
+
+expect ip-show\] pid=33555366 kind=1 idx=0 of=3 locked=1 open=0
+expect interact-do\] kind=1 pid=33555366
+expect The door appears to be locked
+expect ip-door-refused\] pid=33555366 id=102
+expect ip-show\] pid=33555366 kind=6 idx=0 of=3 locked=1 open=0
+expect-not ip-door-opens\]

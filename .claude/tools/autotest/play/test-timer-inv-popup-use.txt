@@ -1,0 +1,67 @@
+# TESTER (2026-11-15, area b): the bomb's SET TIMER window opened from the INVENTORY by the other route -- A HELD on the
+# plastic explosive opens its action menu (look / use / drop / cancel), the D-pad steps to USE, A's release confirms.
+# The window must come up with its marks and the hidden pointer, and its X (PLACE) must work; afterwards the inventory's
+# own A must act on the row under the pointer as usual (the dynamite that moved up into the bomb's old row: its own
+# timer window, the second one), and B closes that one.
+name test-timer-inv-popup-use
+map DESERT1.MAP
+seed 1
+duration 20
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 stimpak, row 1 plastic explosive, row 2 dynamite
+dude item 51 1
+dude item 85 1
+dude item 40 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+shot +400
+# A held: the action menu; D-pad DOWN: USE; A let go: confirm
+pad +500 A 1
+shot +700
+tap +200 DOWN
+shot +400
+pad +300 A 0
+shot +900
+# X = PLACE
+tap +500 X
+shot +1200
+# the inventory's own A on the row under the pointer
+tap +700 A
+shot +900
+tap +600 B
+shot +800
+note +500 done
+
+# the checks (run.js)
+expect-count 2 \[FLOW/timer-window\] open pid=\d+ from=inventory pad=1
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=PLACE by=pad value=60
+expect \[FLOW/timer-window\] open pid=51 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=CANCEL by=pad value=60
+expect-count 2 \[INPUT/pad-owned\] off
+expect-count 2 \[FLOW/timer-marks\] shown=1

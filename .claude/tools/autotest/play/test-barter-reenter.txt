@@ -1,0 +1,57 @@
+# TEST (2026-11-15, the barter badges): out of the trade to the talk and back in, three times -- the badges must come
+# back every time (dialogue BARTER Y; trade OFFER Y, TALK B, LB / RB, X, the legend plate), nothing stale on the readout.
+# Maida (KLADWTWN, as m-barter-y).
+#   1 the talk                     2 trade #1, one of her items on her table: SHORT
+#   3 B: back in the talk          4 Y: trade #2 -- her item back in her stock, DEAL OK
+#   5 B: the talk again            6 Y: trade #3
+#   7 the right stick takes the pointer to TALK (bottom-right corner, then 155 px left and 22 up), RT clicks it: the
+#     trade's own TALK button ('t', _barter_end_to_talk_to)
+#   8 after TALK                   9 Y: trade #4 if the talk is still up
+#  10 B, then UP (wraps to "Goodbye") and A: the conversation ends
+name test-barter-reenter
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 52
+dude tile 22879 rot 0
+dude item 41 2000
+
+talk 2000 16777273
+shot 5000
+tap 6000 Y
+tap 9000 LB
+tap 10000 A
+shot 11500
+tap 12000 B
+shot 15000
+tap 16000 Y
+shot 19000
+tap 19500 B
+shot 22500
+tap 23500 Y
+shot 26500
+# the pointer: into the bottom-right corner (full tilt, 1.8 s), then 2 px a frame left for ~78 frames and up for 11
+axis 27000 RX 32767
+axis 27000 RY 32767
+axis 28800 RX 0
+axis 28800 RY 0
+axis 29000 RX -16463
+axis 30300 RX 0
+axis 30500 RY -16463
+axis 30683 RY 0
+shot 31000
+axis 31500 RT 32767
+axis 31650 RT -32768
+shot 34000
+tap 35000 Y
+shot 38000
+tap 39000 B
+shot 42000
+tap 43000 UP
+tap 44000 A
+shot 47000
+note 50000 end
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect barter-a\] list=3 row=0 .*amount=ONE
+expect \[FLOW/autotest\] end why=time .* modal=-1

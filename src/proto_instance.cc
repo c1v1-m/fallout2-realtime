@@ -35,6 +35,7 @@
 // Realtime (fallout1-ce protinst.cc).
 #include "rt/game/combat_rt.h"
 #include "rt/game/game_trace.h"
+#include "rt/game/interact_prompt.h"
 
 namespace fallout {
 
@@ -1769,6 +1770,15 @@ int _obj_use_door(Object* user, Object* door, bool animateOnly)
         }
 
         scriptOverrides = script->scriptOverrides;
+    }
+
+    // CE (Fallout 2 Realtime 2026-11-15, his Deck in Vault City: „já mluvím ale o dveřích, které šli otevřít a
+    // pak jsem je mohl lockpickovat“): the lock above only CLICKS. Whether a locked door opens is up to its
+    // script -- Vault City's guarded doors (viCsWch1 and kin) object only when a guard sees you, so unseen they
+    // swing open like any other. The pad's use prompt read the flag alone and offered a pick on a door that
+    // had just opened; it now hears the answer here, from the one place that knows it.
+    if (user == gDude && door->frame == 0 && objectIsLocked(door)) {
+        interact_prompt_note_locked_door(door, !scriptOverrides && (door->data.scenery.door.openFlags & 0x01) == 0);
     }
 
     if (!scriptOverrides) {

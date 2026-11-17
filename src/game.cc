@@ -69,6 +69,7 @@
 #include "worldmap.h"
 
 #include "rt/game/gamepad_ui.h"
+#include "rt/game/autotest.h"
 #include "rt/game/combat_rt.h"
 #include "rt/rt_hooks.h"
 
@@ -314,6 +315,9 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
     // test's virtual controller (if asked for) must exist before it picks one.
     // The virtual test pad must exist before anything opens a controller (combat_rt_init does).
     rt_padtest_init();
+
+    // A self-played run's `cfg` lines go over the loaded cfg first, so the levers below read them.
+    autotest_apply_cfg();
 
     // Realtime combat owns combat from here (rt/game/combat_rt.cc).
     combat_rt_init();

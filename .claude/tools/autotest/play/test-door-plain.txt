@@ -1,0 +1,22 @@
+# TESTER (2026-11-15, regression of the door-answer prompt): an UNLOCKED door must stay a plain door. The Den's
+# auto-closing door (diDoor, pid 33555386, id 20, tile 19506) beside the dude: A opens it, no lockpick is ever offered,
+# and since it carries no lock the new answer hook (_obj_use_door) must stay silent -- no ip-door-opens / -refused.
+name test-door-plain
+map DENBUS1.MAP
+mapscript on
+seed 1
+duration 9
+dude elevation 0
+dude tile 19706 rot 0
+
+shot 1800
+tap 2000 A
+shot 3500
+tap 5000 A
+shot 7000
+
+expect ip-show\] pid=33555386 kind=1 idx=0 of=2 locked=0 open=0
+expect interact-do\] kind=1 pid=33555386
+expect-not ip-show\] pid=33555386 kind=6
+expect-not ip-door-opens\]
+expect-not ip-door-refused\]

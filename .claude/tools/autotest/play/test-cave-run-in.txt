@@ -1,0 +1,29 @@
+# F2 (2026-11-16, „když uteču do jeskyně tak se moje postava zastaví a bugne se“): the raiders' encounter CAVE1 -- the
+# cave mouth on floor 0 leads to floor 1 of the same map. RUNNING in (X held) from a fight, the dude used to arrive
+# frozen mid-stride (RUNNING picture, the run of the old floor, its sub-tile offset) and the stick could not move him.
+# Now he arrives standing (dude-teleported) and walks on inside.
+name test-cave-run-in
+map CAVE1.MAP
+seed 1
+duration 14
+dude tile 22901 rot 5
+dude hp 300
+spawn 16777455 25108 rot 5 wield 4 hostile hp 400
+spawn 16777455 25312 rot 5 wield 4 hostile hp 400
+
+tap 1500 X 2600
+axis 1600 LX -17700
+axis 1600 LY -27500
+axis 4000 LX 0
+axis 4000 LY 0
+shot 4500
+note 5000 walk inside the cave, left
+axis 5500 LX -32767
+axis 7500 LX 0
+shot 8000
+note 8500 and down
+axis 9000 LY 32767
+axis 11000 LY 0
+shot 11500
+
+expect dude-teleported\]

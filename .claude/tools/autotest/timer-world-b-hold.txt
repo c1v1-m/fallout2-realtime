@@ -1,0 +1,29 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): the bomb's SET TIMER window opened from the WORLD (the RB quick slot), CANCEL
+# pressed with B and the B held on. The window closes on B's press; the B-hold drug wheel's tracker runs on the game's
+# tick, never saw the input epoch, took the still-held B as a fresh press -- and 220 ms later opened the drug wheel
+# (world-hold on). Now the B that closed the window is nobody's until it is let go.
+name timer-world-b-hold
+map DESERT1.MAP
+seed 1
+duration 9
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 1
+dude item 40 2
+dude quickslot rb 85
+
+tap 1500 RB
+shot 2400
+# B = CANCEL, held 0.8 s
+tap 3000 B 800
+shot +500
+note +1500 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-window\] close key=CANCEL by=pad value=60
+expect \[INPUT/pad-spent\] held=b
+expect \[INPUT/pad-spent\] let-go=b
+# the leak: no drug wheel from the B that pressed CANCEL
+expect-not \[FLOW/world-hold\] on

@@ -1,0 +1,21 @@
+# Harness check (2026-11-17): the `cfg` lines reach the game and combat_rt -- read back at the start, and the balance line at
+# the fight's end prints near=1.00 far=1.00.
+name cfg-check
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+dude hp 400
+dude stat ST 10
+dude wield 234
+cfg regen_near_mult 1.0
+cfg regen_far_mult 1.0
+
+spawn 16777455 20106 rot 5 team 50 hp 20
+hostile 1000 16777455
+at 1000 fight
+note 13000 end
+
+expect autotest\] cfg regen_near_mult=1.0 now=1.0
+expect autotest\] cfg regen_far_mult=1.0 now=1.0
+expect COMBAT/balance\] === fight .* near=1\.00 far=1\.00

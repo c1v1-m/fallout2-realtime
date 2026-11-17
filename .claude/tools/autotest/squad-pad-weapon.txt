@@ -1,9 +1,11 @@
 # SQUAD COMMAND BY THE PAD: WEAPON (2026-11-12, his design "A", „změň zbraň“). Vic holds a loaded 10mm pistol and
 # carries a knife. LT + A opens the mode (no enemy on the screen: the cursor 3 tiles in front of the dude), the right
 # stick takes the cursor onto Vic: WEAPON. A opens his wheel ("Vic": Auto, his pistol, the knife); the stick aims the
-# knife, A picks it: "Got it.", the mode closes, he takes it in hand at once. Then a knife raider, off the screen until
-# now and neutral, turns on the dude and comes: Vic fights with the knife -- the AI never trades it back for the pistol
-# he is better with.
+# knife, A picks it: "Got it.", the wheel goes back to the mode, which stays; B closes the mode and he takes the knife
+# in hand at once. Then a knife raider, off the screen until now and neutral, turns on the dude and comes: Vic fights
+# with the knife -- the AI never trades it back for the pistol he is better with.
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the pick (the stick let go first),
+# so the world runs again and he takes the knife.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-weapon.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-pad-weapon
 map DESERT1.MAP
@@ -31,9 +33,12 @@ axis 2093 RY 0
 tap 2600 A
 axis 3200 RX 28377
 axis 3200 RY 16384
+# A picks it: the wheel closes, the mode stays open (the world held still); the stick let go
 tap 3500 A
 axis 3800 RX 0
 axis 3800 RY 0
+# B: the mode closes, the world runs -- he takes the knife in hand
+tap 4000 B
 # the fight
 hostile 6000 16777455
 note 17500 end
@@ -45,7 +50,9 @@ expect \[INPUT/squad-weapon-wheel\] pick seg=\d wpn=4 ok=1
 expect \[ACTION/squad-order\] order=weapon target=4 companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=18062
 expect \[FLOW/squad-weapon\] pin id=18062 pid=16777278 wpn=4 was=-1 hand=8
 expect \[FLOW/squad-weapon\] take id=18062 pid=16777278 wpn=4 was=8 why=pin
-expect \[INPUT/squad-mode\] close why=weapon
+# the pick clicks and leaves the mode open; the B closes it
+expect \[INPUT/squad-mode\] stays after=weapon order=weapon speaker=18062
+expect-count 1 \[INPUT/squad-mode\] close why=b ms=
 expect \[FLOW/autotest\] hostile t=\d+ pid=16777455 id=\d+
 expect \[FLOW/squad-weapon\] keep id=18062 pid=16777278 wpn=4
 expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777455

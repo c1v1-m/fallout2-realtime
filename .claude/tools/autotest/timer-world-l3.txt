@@ -1,0 +1,29 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): the bomb's SET TIMER window opened from the WORLD (the RB quick slot), a stick
+# clicked in it and still held as DONE closes it. The skill wheel (L3) and the called-shot window (R3) open on their
+# press edge, read only on the game's tick -- which never saw the press, made inside the window: the still-held stick
+# came back as a fresh press and opened them. L3 here (the skill wheel holds the world: world-hold on); R3 has a test
+# of its own (timer-world-r3). Now the press is nobody's until it is let go.
+name timer-world-l3
+map DESERT1.MAP
+seed 1
+duration 9
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 1
+dude quickslot rb 85
+
+tap 1500 RB
+shot 2400
+# L3 down in the window, DONE with A, L3 let go after the window has gone
+pad 3000 L3 1
+tap +400 A
+pad +900 L3 0
+shot +500
+note +1500 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] close key=DONE by=pad value=60
+expect \[INPUT/pad-spent\] held=.*leftstick
+# the leak: no skill wheel from the L3 held through the window
+expect-not \[FLOW/world-hold\] on

@@ -1,0 +1,31 @@
+# TEST (2026-11-15, verifier of "readout cut at about 11 glyphs"): an ORDINARY sale, nothing inflated -- the real
+# Maida (KLADWTWN, as m-barter-y, her own purse), and the dude carries one rocket launcher and nothing else.
+#   1 the trade opens: empty tables, DEAL OK
+#   2 A: the launcher onto his table -> the readout should say OVERPAY <its full price> (4 digits)
+#   3 X: her own caps onto her table -> OVERPAY <price minus her purse> (barter-auto logs want/give/gap)
+#   4 B: back to the talk, nothing offered
+name test-barter-overpay-one-item
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 22
+dude tile 22879 rot 0
+dude item 13 1
+
+talk 2000 16777273
+tap 6000 Y
+shot 8000
+tap 9000 A
+shot 10500
+tap 11500 X
+shot 13000
+tap 14000 B
+shot 16000
+tap 17000 B
+tap 18500 B
+note 20500 end
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect barter-a\] list=0 row=0 pid=13 .*amount=ONE
+expect barter-auto\] want=0 give=\d{4,} gap=-\d{4,}
+expect-not barter-offer\]

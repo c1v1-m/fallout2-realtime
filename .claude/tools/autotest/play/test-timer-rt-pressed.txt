@@ -1,0 +1,44 @@
+# TESTER (2026-11-15, area b): the badged buttons PRESSED -- RT is the screen's click, so the window's own pressed art
+# shows while RT is held on a button: the PLACE plate with its X (window 1, from the RB quick slot) and DONE with its A
+# (window 2). Shots 2 and 5 are the pressed looks (the badge must stay whole, no red showing); RT's release fires the
+# button (by=input). The left stick's snap puts the pointer on the button: right (CANCEL), up (PLACE); then down
+# (DONE / CANCEL) and left (DONE).
+name test-timer-rt-pressed
+map DESERT1.MAP
+seed 1
+duration 22
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 2
+dude quickslot rb 85
+
+tap 1500 RB
+# right (CANCEL), up (PLACE)
+axis 3000 LX 32767
+axis +150 LX 0
+axis +350 LY -32767
+axis +150 LY 0
+shot +300
+axis +400 RT 32767
+shot +300
+axis +300 RT -32768
+shot +1500
+# the second bomb: down (DONE or CANCEL), left (DONE)
+tap +1500 RB
+axis +1500 LY 32767
+axis +150 LY 0
+axis +350 LX -32767
+axis +150 LX 0
+shot +300
+axis +400 RT 32767
+shot +300
+axis +300 RT -32768
+shot +1500
+note +500 done
+
+# the checks (run.js)
+expect-count 2 \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-window\] close key=PLACE by=input value=60
+expect \[FLOW/timer-window\] close key=DONE by=input value=60
+expect-count 2 \[ACTION/explosive-placed\] pid=209

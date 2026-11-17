@@ -1,0 +1,77 @@
+# TESTER (2026-11-15, area b): the bomb's SET TIMER window opened from the INVENTORY and closed with B (CANCEL), B held
+# 0.4 s past the close; then the inventory's own B and X must still work on the very next press: B puts the row under
+# the pointer into hand B, X the same row (now the next item) into hand A. A second window (the bomb, back on row 0)
+# closed with X (PLACE) the same way -- the bomb goes to the ground -- and X on the row under the pointer again: into
+# hand A. Nothing lost, nothing doubled.
+# Rows: start 0 stimpak, 1 plastic explosive, 2 knife, 3 club. After CANCEL the bomb is back on top (row 0) and the
+# stimpak on row 1 (timer-inv-b-cancel); B takes it (hand B), X then the knife (hand A); up to row 0, the bomb's window,
+# PLACE; X then takes the club (row 0) into hand A, the knife back to the list.
+name test-timer-inv-b-x-then
+map DESERT1.MAP
+seed 1
+duration 24
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 5 1
+dude item 4 1
+dude item 85 1
+dude item 40 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+shot +400
+# A on the plastic explosive: its timer window; B = CANCEL, held 0.4 s
+tap +500 A
+tap +900 B 400
+shot +900
+# B on the row under the pointer: into hand B
+tap +500 B
+shot +700
+# X on the row under the pointer: into hand A
+tap +600 X
+shot +700
+# up to row 0 (the bomb) and A: the timer window again; X = PLACE, held 0.4 s
+axis +500 LY -32767
+axis +120 LY 0
+shot +300
+tap +500 A
+tap +900 X 400
+shot +1200
+# X on the row under the pointer: into hand A
+tap +600 X
+shot +800
+note +800 done
+
+# the checks (run.js)
+expect-count 2 \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=CANCEL by=pad value=60
+expect \[FLOW/timer-window\] close key=PLACE by=pad value=60
+expect \[INPUT/pad-spent\] held=b
+expect \[INPUT/pad-spent\] held=x
+expect-count 2 \[INPUT/pad-owned\] off
+# the presses after the windows
+expect-count 1 \[INPUT/inv-equip\] in hand=B
+expect-count 2 \[INPUT/inv-equip\] in hand=A

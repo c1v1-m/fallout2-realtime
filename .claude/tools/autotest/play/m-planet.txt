@@ -1,11 +1,22 @@
 # F2 (2026-11-01, "logo při loadingu není veprostřed, když se dostanu do nové mapy v lokaci"): the loading planet
 # must sit in the middle of the screen on a map change inside a town (DENBUS1 -> DENBUS2 through a map exit).
+# 2026-11-17 („chci aby loading byl veprostřed … na obrazovce, teď je dvakrát“): ONE planet. Its first frame was drawn
+# where the pointer was parked and stayed there when the planet moved to the middle. Two loads, each with its first two
+# planet frames saved as presented (autotest_planet_frame):
+#   the run's own start = New Game / CONTINUE (a black window over the whole screen): the middle of the SCREEN (map=0)
+#   the map change in play (the bar stays up under the black map): the middle of the MAP (map=1), the pointer moved off
+#   the middle by the right stick first.
 name m-planet
 map DENBUS1.MAP
 seed 1
 duration 14
+planetshots on
 
 axis 1500 RX 32767
 axis 2500 RX 0
 mapgo 4000 DENBUS2.MAP -1 0
 note 12000 end
+
+expect planet\] was=0 pad=1 from=-?[0-9]+,-?[0-9]+ at=[0-9]+,[0-9]+ map=0
+expect planet\] was=[0-9]+ pad=1 from=-?[0-9]+,-?[0-9]+ at=[0-9]+,[0-9]+ map=1
+expect autotest\] planet-screen n=3

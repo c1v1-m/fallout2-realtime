@@ -1,0 +1,25 @@
+# F2 (2026-11-15, his Deck in Vault City: „já mluvím ale o dveřích, které šli otevřít a pak jsem je mohl lockpickovat“).
+# The courtyard's guarded doors (viCsWch1 and kin) are locked when the map is entered, but their use_p_proc
+# objects only while a guard is looking, and vanilla's _obj_use_door only clicks a lock -- so, unseen, this one
+# (pid 33555281, id 20, tile 17270) swings open. The prompt used to read the flag alone: the first A opened the
+# door and the next tick offered the pick (kind=6). Now the door's answer counts: it opened, so A stays the hand,
+# also after it is shut again.
+name m-vc-guarded-door
+map VCTYCTYD.MAP
+mapscript on
+seed 1
+duration 10
+dude tile 17471 rot 0
+
+shot 2000
+tap 2500 A
+shot 5000
+tap 6000 A
+shot 8500
+
+expect ip-show\] pid=33555281 kind=1 idx=0 of=3 locked=1 open=0
+expect interact-do\] kind=1 pid=33555281
+expect ip-door-opens\] pid=33555281 id=20
+expect ip-show\] pid=33555281 kind=1 idx=0 of=2 locked=1 open=1
+expect-not ip-show\] pid=33555281 kind=6
+expect-not ip-door-refused\]

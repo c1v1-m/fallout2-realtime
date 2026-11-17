@@ -1,0 +1,65 @@
+# AN LB HELD AS THE TIMER WINDOW CLOSES MUST NOT EAT THE NEXT QUICK SLOT (review 2026-11-15): the bomb's SET TIMER
+# window opened from the inventory, LB held down in it and DONE pressed with A while LB is still down. The window's close
+# marked the held LB spent (gpui_consumed_lb); LB came up while the inventory was still open, where nothing clears that
+# mark, and the first LB press back in the world -- the LB quick slot, a stimpak here -- did nothing. Now a fresh press
+# of LB starts clean: the dude, wounded, takes the stimpak (HP up in the last shot).
+# Before the fix (the implementer's exe): no quick-slot-press for the LB press in the world, the HP unchanged.
+name timer-inv-lb-slot
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude hp 300
+dude curhp 150
+dude skill traps 150
+# the list shows the newest first: row 0 dynamite, row 1 plastic explosive, row 2 stimpak
+dude item 40 1
+dude item 85 1
+dude item 51 1
+dude quickslot lb 40
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+# A on the plastic explosive: its timer window
+tap +500 A
+# LB down in the window, A = DONE with LB still held, LB let go in the inventory
+pad +900 LB 1
+tap +400 A
+shot +300
+pad +300 LB 0
+# BACK closes the inventory
+tap +600 BACK
+# LB in the world: the LB quick slot
+shot +1000
+tap +200 LB
+shot +1500
+note +1000 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=DONE by=pad value=60
+expect \[INPUT/pad-spent\] held=a,leftshoulder
+# the fix: the LB press in the world reaches its quick slot
+expect-count 1 \[INPUT/quick-slot-press\] src=lb

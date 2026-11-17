@@ -811,6 +811,19 @@ int aiGetChemUse(Object* obj)
     return ai->chem_use;
 }
 
+// REALTIME (2026-11-17): whether `pid` is one of the drugs its packet wants most (chem_primary_desire) -- the bucket
+// _ai_check_drugs reaches into first -- for the realtime chem beat (combat_rt.cc rt_try_chems).
+bool aiIsPrimaryChemDesire(Object* obj, int pid)
+{
+    AiPacket* ai = aiGetPacket(obj);
+    for (int index = 0; index < AI_PACKET_CHEM_PRIMARY_DESIRE_COUNT; index++) {
+        if (ai->chem_primary_desire[index] == pid) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x42822C
 int aiSetAreaAttackMode(Object* critter, int areaAttackMode)
 {
@@ -3683,6 +3696,10 @@ int combatai_float_line(Object* critter, const char* text)
     }
 
     AiPacket* ai = aiGetPacket(critter);
+    // His line before this one off AT ONCE, not just marked: while the world is held (the squad command mode, which
+    // stays open after an order since 2026-11-17) the ticker that takes marked lines off stands still and the renderer
+    // still draws them -- his second answer was printed over his first (screen-squad-y). textObjectsRemoveByOwnerNow.
+    textObjectsRemoveByOwnerNow(critter);
     Rect rect;
     if (textObjectAdd(critter, (char*)text, ai->font, ai->color, ai->outline_color, &rect) != 0) {
         return -1;

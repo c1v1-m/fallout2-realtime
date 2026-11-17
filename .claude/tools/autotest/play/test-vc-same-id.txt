@@ -1,0 +1,28 @@
+# TESTER (2026-11-15): the same-id case of m-vc-guarded-door. In VCTYCTYD Cassidy's watch door (viCsWch1, pid 33555281,
+# tile 17270) and the prison door (viCGWch1, pid 33555899, tile 23110) are BOTH object id 20, and both are locked by the
+# map's entry. Cassidy's swings open for the dude (unseen): ip-door-opens id=20. The prompt keeps that answer by TILE, so
+# the prison door -- never used -- must still offer the use first and the pick one tap away (of=3), not the plain hand of
+# a door that opened (of=2). The way out of the bar is its front door (scriptless, id 456, tile 19481), opened with A.
+name test-vc-same-id
+map VCTYCTYD.MAP
+mapscript on
+seed 1
+duration 45
+dude tile 17471 rot 0
+
+tap 2500 A
+shot 4500
+walkto 6000 19079
+shot 10200
+tap 10500 A
+shot 12500
+walkto 13500 19883
+walkto 17500 22910
+ipdump 30
+shot 30200
+walkto 31000 23310
+shot 41200
+
+expect ip-door-opens\] pid=33555281 id=20 tile=17270
+expect ip-show\] pid=33555899 kind=1 idx=0 of=3 locked=1 open=0
+expect-not ip-show\] pid=33555899 kind=1 idx=0 of=2 locked=1 open=0

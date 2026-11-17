@@ -1,0 +1,25 @@
+# F2 (2026-11-15): the other half of m-vc-guarded-door. The Temple of Trials' cave door (DoorL100, pid 33555366,
+# id 102, tile 11108) is locked when the map is entered and its script answers a use with "The door appears to be
+# locked." and keeps it shut. That refusal -- and only that -- turns the next A into the pick (his rule from
+# 2026-10-17: a locked door is used first, picked second). The pick must not show before the door has answered.
+name m-temple-door-refused
+map ARCAVES.MAP
+mapscript on
+seed 1
+duration 9
+
+dude tile 11307 rot 0
+
+shot 1800
+tap 2000 A
+shot 4500
+tap 5500 A
+shot 8000
+
+expect ip-show\] pid=33555366 kind=1 idx=0 of=3 locked=1 open=0
+expect interact-do\] kind=1 pid=33555366
+expect The door appears to be locked
+expect ip-door-refused\] pid=33555366 id=102
+expect ip-show\] pid=33555366 kind=6 idx=0 of=3 locked=1 open=0
+expect interact-do\] kind=6 pid=33555366
+expect-not ip-door-opens\]

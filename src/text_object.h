@@ -17,6 +17,7 @@ int textObjectAdd(Object* object, char* string, int font, int color, int outline
 void textObjectsRenderInRect(Rect* rect);
 int textObjectsGetCount();
 void textObjectsRemoveByOwner(Object* object);
+void textObjectsRemoveByOwnerNow(Object* object);
 
 } // namespace fallout
 

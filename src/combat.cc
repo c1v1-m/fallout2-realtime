@@ -7335,7 +7335,11 @@ static void damageModInit()
     gBonusHthDamageFix = true;
     configGetBool(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_BONUS_HTH_DAMAGE_FIX_KEY, &gBonusHthDamageFix);
 
-    gDisplayBonusDamage = false;
+    // REALTIME: ON unless ddraw.ini says otherwise (sfall's own default is off). Off, the inventory and the character
+    // sheet show a weapon's damage and Melee Damage WITHOUT Bonus HtH Damage / Bonus Ranged Damage, while every blow
+    // still gets them -- the perk reads as doing nothing („přijde mi že HTH perk mi nepřidává dmg“, 2026-11-16; his
+    // „Ano, ukazuj ho“). Simulated: Spiked Knuckles at ST 6 roll 4-11, 6-13 with one rank, 10-17 with three.
+    gDisplayBonusDamage = true;
     configGetBool(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_DISPLAY_BONUS_DAMAGE_KEY, &gDisplayBonusDamage);
 }
 

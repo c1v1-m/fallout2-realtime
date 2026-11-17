@@ -1,0 +1,24 @@
+# F2 (2026-11-16, „REEEEEEEEEEE, držím LB a nedostávám heal“): trace_2026-11-16_233112 s=96.3, a hit staggered him in
+# the third stimpak's jab before its frame, the chain was dropped and 2.1 s more of LB gave nothing. Here the heal
+# button is held from 1.0 s and a stagger lands in the first jab (before its frame): the cut jab must go again once
+# the stagger lets go (inject-cut retry=1, then heal-chain retry=1), and the chain go on from there.
+name test-heal-cut
+map DESERT1.MAP
+seed 4
+duration 9
+dude tile 20100 rot 2
+dude hp 71
+dude curhp 10
+dude stat AG 10
+dude item 40 6
+spawn 16777296 24100 rot 5 hostile
+
+stagger 1.25
+
+at 0 idle
+at 1.0 healhold
+at 7.0 idle
+
+expect inject-cut\] .*retry=1
+expect heal-chain\] next=1 .*retry=1
+expect heal-pool\] pid=40

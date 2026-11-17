@@ -1,0 +1,20 @@
+# The test dude's armour counts (2026-11-17). `dude armor <pid>` used to put on only the ART: _invenWieldFunc skips
+# _adjust_ac for the dude (the inventory screen and the script's wield_obj_critter run it themselves), so a sim dude in
+# Leather Armor fought at AC 9 / DR 0 where the player's own trace says ac=24. The sim dude's AG 9 and no enemy: the
+# harness's own line and the heartbeat's ac= must read AC 9 + 15 = 24, with Leather Armor's DT 2 / DR 25.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/armor-ac.txt 1 --exe build/Release/fallout2-ce.exe
+# Screen: the bar's AC counter reads 24.
+name armor-ac
+map DESERT1.MAP
+seed 1
+duration 5
+dude tile 20100 rot 2
+dude stat AG 9
+dude armor 1
+
+screen 2500
+note 4000 end
+
+expect \[FLOW/autotest\] dude armor pid=1 worn=1 ac=24 dt=2 dr=25
+expect \[STATE/hb\] .* ac=24 eap=
+expect-not \[STATE/hb\] .* ac=9 eap=

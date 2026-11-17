@@ -110,6 +110,20 @@ static int ip_opened_next = 0; // the slot the next body takes: past the last on
 #define IP_DOOR_TRIED_MS 120000
 static Object* ip_door_tried = NULL;
 static unsigned int ip_door_tried_at = 0;
+// ...and the pick waits for the door's ANSWER (Fallout 2 Realtime 2026-11-15, his Deck in Vault City: „já mluvím
+// ale o dveřích, které šli otevřít a pak jsem je mohl lockpickovat“). The lock flag is not the answer: vanilla's
+// _obj_use_door only clicks it, and a door opens unless its own script says no. Vault City's guarded doors
+// (viCsWch1, viHarWch, viCGWch1) say no only while a guard is looking, so he opened one, walked through -- and
+// the prompt, reading the flag alone, offered to pick it (trace_2026-11-15_120837: ip-show kind=6 on pid
+// 33555280 while the dude stood in its doorway). Now _obj_use_door reports (interact_prompt_note_locked_door):
+// a refusal arms the pick, an opening never does, and a door that opened for him is a plain door until the map
+// changes or the door refuses him after all (ip_door_opens_tile). An open door never offers the pick at all.
+static bool ip_door_refused = false; // ip_door_tried has answered: its script kept it shut
+#define IP_DOOR_OPENS_MAX 32
+static int ip_door_opens_tile[IP_DOOR_OPENS_MAX]; // -1 = a slot given back by a refusal
+static int ip_door_opens_elev[IP_DOOR_OPENS_MAX];
+static int ip_door_opens_count = 0;
+static int ip_door_opens_next = 0;
 static Object* ip_pending = NULL;  // queued by the A hook, performed from the tick
 static int ip_pending_kind = IP_NONE;
 
@@ -141,6 +155,11 @@ static int ip_action_index = 0;
 #define IP_MANUAL_HOLD_MS 4000
 static Object* ip_manual_target = NULL;
 static unsigned int ip_manual_since = 0;
+// ...but NOT by the clock while he stands where he picked it (2026-11-15, his „Skáče to jinam“: a pick held for four
+// seconds of reading, choosing or looking round jumped back to the automatic one). It lets go once he has walked
+// IP_MANUAL_WALK_TILES away from where he picked it -- the case the clock was for -- or the target leaves the picker.
+#define IP_MANUAL_WALK_TILES 2
+static int ip_manual_dude_tile = -1;
 
 // How far the right-stick picker reaches, as opposed to IP_RANGE_TILES (2) which is how close
 // something must be for the prompt to offer it on its own. Pointing at a thing says what you mean,
@@ -267,6 +286,66 @@ static bool ip_critter_can_converse(Object* obj)
     return critter_body_type(obj) == BODY_TYPE_BIPED;
 }
 
+// A locked door that has opened for the dude on this map (see ip_door_refused). Kept by TILE and elevation, not by
+// object id: ids repeat inside a map -- in VCTYCTYD, the very map of his report, Cassidy's watch door and the jail's
+// are both id 20, and the review of 2026-11-15 counted 24 of the 155 maps with such pairs -- while a door never moves.
+static int ip_door_opens_find(Object* door)
+{
+    for (int i = 0; i < ip_door_opens_count; i++) {
+        if (ip_door_opens_tile[i] == door->tile && ip_door_opens_elev[i] == door->elevation) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool ip_door_opens(Object* door)
+{
+    return ip_door_opens_find(door) != -1;
+}
+
+static void ip_door_opens_note(Object* door)
+{
+    if (door == ip_door_tried) {
+        ip_door_tried = NULL;
+        ip_door_refused = false;
+    }
+    if (ip_door_opens(door)) {
+        return;
+    }
+    ip_door_opens_tile[ip_door_opens_next] = door->tile;
+    ip_door_opens_elev[ip_door_opens_next] = door->elevation;
+    ip_door_opens_next = (ip_door_opens_next + 1) % IP_DOOR_OPENS_MAX;
+    if (ip_door_opens_count < IP_DOOR_OPENS_MAX) {
+        ip_door_opens_count++;
+    }
+    trace_event(TRACE_FLOW, "ip-door-opens", "pid=%d id=%d tile=%d elev=%d",
+        door->pid, door->id, door->tile, door->elevation);
+}
+
+void interact_prompt_note_locked_door(Object* door, bool opens)
+{
+    if (door == NULL) {
+        return;
+    }
+    if (opens) {
+        ip_door_opens_note(door);
+        return;
+    }
+    // Shut by its script: tried, however the use came (A or the mouse -- walking into a locked door never asks it,
+    // canUseDoor refuses), so the next A picks it. Its latest answer wins: a door that let him through before but
+    // refuses now (a guard is looking, a script locked it for good) is off the list and offers the pick again.
+    int known = ip_door_opens_find(door);
+    if (known != -1) {
+        ip_door_opens_tile[known] = -1;
+    }
+    ip_door_tried = door;
+    ip_door_tried_at = get_time();
+    ip_door_refused = true;
+    trace_event(TRACE_FLOW, "ip-door-refused", "pid=%d id=%d tile=%d elev=%d",
+        door->pid, door->id, door->tile, door->elevation);
+}
+
 // Classify an object into an interaction kind (0 = not interactable).
 static int ip_classify(Object* obj)
 {
@@ -377,7 +456,16 @@ static int ip_classify(Object* obj)
         if (hasProto && proto->scenery.type == SCENERY_TYPE_GENERIC && (obj->flags & OBJECT_FLAT) != 0) {
             return IP_NONE;
         }
-        return (isDoor && obj_is_locked(obj)) ? IP_LOCKPICK : IP_USE;
+        if (isDoor && obj_is_locked(obj)) {
+            // Open, the flag notwithstanding: A shuts it, and there is nothing to pick. Only _obj_use_door's own
+            // answer says whether it opened FOR HIM (ip_door_refused): a script that shuts and locks a door shows it
+            // open and locked through the whole closing animation (FSBroDor, FSFobDor, VIEntDor, WIBayDor).
+            if (obj->frame != 0) {
+                return IP_USE;
+            }
+            return ip_door_opens(obj) ? IP_USE : IP_LOCKPICK;
+        }
+        return IP_USE;
     }
     case OBJ_TYPE_CRITTER:
         if ((obj->data.critter.combat.results & DAM_DEAD) != 0) {
@@ -545,7 +633,8 @@ static int ip_build_actions(Object* obj, int* out)
     // rattling a locked door is at least honest feedback. Same for a locked chest.
     if (def == IP_LOCKPICK) {
         bool door = FID_TYPE(obj->fid) == OBJ_TYPE_SCENERY;
-        bool tried = obj == ip_door_tried && get_time() - ip_door_tried_at < IP_DOOR_TRIED_MS;
+        // Tried AND refused: until the door has answered, a USE on its way is not a refusal (ip_door_refused).
+        bool tried = obj == ip_door_tried && ip_door_refused && get_time() - ip_door_tried_at < IP_DOOR_TRIED_MS;
         if (door && !tried) {
             out[0] = IP_USE; // used first (ip_door_tried); the pick one tap away
             out[n++] = IP_LOCKPICK;
@@ -857,7 +946,8 @@ static Object* ip_find_nearest(int* kindOut)
         if (kind == IP_NONE && ip_look_only(ip_manual_target)) {
             kind = IP_LOOK;
         }
-        bool stale = get_time() - ip_manual_since > IP_MANUAL_HOLD_MS;
+        bool stale = get_time() - ip_manual_since > IP_MANUAL_HOLD_MS
+            && (ip_manual_dude_tile < 0 || tile_dist(ip_manual_dude_tile, obj_dude->tile) >= IP_MANUAL_WALK_TILES);
         // Validated against the PICKER's reach, not the automatic one -- a deliberately chosen
         // cabinet across the room would otherwise be discarded on the very next tick.
         if (kind != IP_NONE && !stale && obj_dist(obj_dude, ip_manual_target) <= ip_pick_range_tiles
@@ -1180,21 +1270,21 @@ static void ip_screen_pos(Object* obj, int* x, int* y)
     *y = (r.uly + r.lry) / 2;
 }
 
-// ABSOLUTE aim, not a step. The stick direction names WHERE the thing is relative to the dude, and
-// this is called every frame the stick is deflected -- so sweeping the stick round sweeps the
-// selection round with it, continuously, instead of ratcheting one object per flick.
+// ⚠️ ONE PUSH = ONE STEP, FROM WHAT IS SELECTED NOW (Fallout 2 Realtime 2026-11-15: „vybírání postav pravým joystickem
+// still fucking sucks“, „já myslím vybírání postav pravým joystickem, když chci s nimi třeba mluvit nebo se podívat na
+// item“, and of three complaints offered he named „Skáče to jinam“). It used to be ABSOLUTE aim, re-aimed every frame
+// the stick was out, measured from the dude: sweeping the stick swept the outline round with it, and letting go swept
+// it once more on the way back to the centre -- his Vault City session changed the target five times in 0.7 s
+// (trace_2026-11-15_214530, s=176.4..177.2). Now the caller asks only on a FRESH push past the threshold, and the
+// direction is measured from the CURRENT target (the dude when there is none): the nearest candidate that way, in a
+// 60-degree cone, distance weighed against how far off the line it lies. Holding or releasing the stick changes
+// nothing; another push walks on. (The stepping model was dropped once, in October, for pointing at a cabinet you can
+// see -- his pick now outranks that.)
 //
-// (The first version stepped to the nearest neighbour of the CURRENT target, edge-triggered with a
-// re-centre. That is the right model for cycling ENEMIES, where you rarely know where the next one
-// is and just want "the next one that way" -- but for pointing at furniture you already know where
-// it is, and having to flick-release-flick to walk the selection over there is the opposite of
-// seamless.)
-//
-// Returns true only when the selection actually CHANGED, so the caller can blip once per change
-// rather than once per frame.
+// Returns true only when the selection actually CHANGED, so the caller can blip once per change.
 bool interact_prompt_pick_direction(float dirX, float dirY, bool fresh)
 {
-    if (obj_dude == NULL) {
+    if (obj_dude == NULL || !fresh) {
         return false;
     }
 
@@ -1204,106 +1294,50 @@ bool interact_prompt_pick_direction(float dirX, float dirY, bool fresh)
         return false;
     }
 
+    // From the current target when it is still a candidate, else from the dude.
+    Object* from = obj_dude;
+    for (int i = 0; i < count; i++) {
+        if (cand[i] == ip_target) {
+            from = ip_target;
+            break;
+        }
+    }
     int fromX;
     int fromY;
-    ip_screen_pos(obj_dude, &fromX, &fromY);
+    ip_screen_pos(from, &fromX, &fromY);
 
     Object* best = NULL;
     float bestScore = 0.0f;
-    float currentScore = 0.0f;
-    bool haveCurrent = false;
-
     for (int i = 0; i < count; i++) {
+        if (cand[i] == from) {
+            continue;
+        }
         int tx;
         int ty;
         ip_screen_pos(cand[i], &tx, &ty);
-
         float vx = (float)(tx - fromX);
         float vy = (float)(ty - fromY);
         float len = sqrtf(vx * vx + vy * vy);
         if (len < 1.0f) {
-            continue; // standing on it
+            continue; // the same spot on the screen
         }
-
-        // Alignment with the push comes first; distance only breaks near-ties, so two things in the
-        // same direction resolve to the closer one instead of the selection leaping across the room.
         float dot = (vx * dirX + vy * dirY) / len;
         if (dot < IP_PICK_CONE_COS) {
             continue;
         }
-
-        float dist = (float)obj_dist(obj_dude, cand[i]);
-        float score = dot - IP_PICK_DIST_WEIGHT * (dist / (float)ip_pick_range_tiles);
-
-        if (cand[i] == ip_target) {
-            currentScore = score;
-            haveCurrent = true;
-        }
-
-        if (best == NULL || score > bestScore) {
+        float score = len * (2.0f - dot); // near and in line; lower is better
+        if (best == NULL || score < bestScore) {
             best = cand[i];
             bestScore = score;
         }
     }
 
-    // ⚠️ A SECOND FLICK THE SAME WAY STEPS ON (2026-10-17, the two raiders in a line: the farther one
-    // could never win, the nearer always scored higher in the same direction). On a FRESH flick whose
-    // best answer is what is already selected, take the next candidate that way instead -- ordered by
-    // score, wrapping round -- so pushing the stick twice reaches the second thing in a line.
-    if (fresh && best != NULL && best == ip_target) {
-        Object* next = NULL;
-        float nextScore = 0.0f;
-        Object* top = NULL;
-        float topScore = 0.0f;
-        for (int i = 0; i < count; i++) {
-            if (cand[i] == ip_target) {
-                continue;
-            }
-            int tx;
-            int ty;
-            ip_screen_pos(cand[i], &tx, &ty);
-            float vx = (float)(tx - fromX);
-            float vy = (float)(ty - fromY);
-            float len = sqrtf(vx * vx + vy * vy);
-            if (len < 1.0f) {
-                continue;
-            }
-            float dot = (vx * dirX + vy * dirY) / len;
-            if (dot < IP_PICK_CONE_COS) {
-                continue;
-            }
-            float score = dot - IP_PICK_DIST_WEIGHT * ((float)obj_dist(obj_dude, cand[i]) / (float)ip_pick_range_tiles);
-            if (score <= bestScore && (next == NULL || score > nextScore)) {
-                next = cand[i]; // the best one ranked below the current
-                nextScore = score;
-            }
-            if (top == NULL || score > topScore) {
-                top = cand[i];
-                topScore = score;
-            }
-        }
-        Object* chosen = next != NULL ? next : top;
-        if (chosen != NULL) {
-            ip_manual_target = chosen;
-            ip_manual_since = get_time();
-            return true;
-        }
-        return false;
-    }
-
     if (best == NULL || best == ip_target) {
         return false;
     }
-
-    // HYSTERESIS. Without it two objects at nearly the same angle swap back and forth every frame
-    // while the stick sits between them -- the outline flickers and the blip machine-guns. The
-    // newcomer has to clearly beat what is already selected before it takes over.
-    if (haveCurrent && bestScore - currentScore < IP_PICK_SWITCH_MARGIN) {
-        return false;
-    }
-
     ip_manual_target = best;
     ip_manual_since = get_time();
+    ip_manual_dude_tile = obj_dude->tile;
     return true;
 }
 
@@ -1864,6 +1898,13 @@ void interact_prompt_tick()
         int rc = -2;
         switch (kind) {
         case IP_USE:
+            // A shut locked door is being tried: its answer (interact_prompt_note_locked_door) decides whether the
+            // next A picks it. Marked BEFORE the use, which may answer at once when he stands at the door.
+            if (FID_TYPE(obj->fid) == OBJ_TYPE_SCENERY && ip_classify(obj) == IP_LOCKPICK) {
+                ip_door_tried = obj;
+                ip_door_tried_at = get_time();
+                ip_door_refused = false;
+            }
             rc = action_use_an_object(obj_dude, obj);
             break;
         case IP_GET:
@@ -1908,11 +1949,6 @@ void interact_prompt_tick()
         if (kind == IP_LOOT_CORPSE || kind == IP_LOOT_CONTAINER) {
             ip_recent_loot = obj;
             ip_recent_loot_at = get_time();
-        }
-        // A locked door has been tried with USE: if it stays locked, the next A picks it.
-        if (kind == IP_USE && FID_TYPE(obj->fid) == OBJ_TYPE_SCENERY && ip_classify(obj) == IP_LOCKPICK) {
-            ip_door_tried = obj;
-            ip_door_tried_at = get_time();
         }
         return;
     }
@@ -2057,9 +2093,10 @@ void interact_prompt_tick()
             lastObj = best;
             lastKind = kind;
             lastCount = ip_actions_count;
-            trace_event(TRACE_FLOW, "ip-show", "pid=%d kind=%d idx=%d of=%d locked=%d",
+            trace_event(TRACE_FLOW, "ip-show", "pid=%d kind=%d idx=%d of=%d locked=%d open=%d",
                 best->pid, kind, ip_action_index, ip_actions_count,
-                FID_TYPE(best->fid) == OBJ_TYPE_SCENERY && obj_is_locked(best) ? 1 : 0);
+                FID_TYPE(best->fid) == OBJ_TYPE_SCENERY && obj_is_locked(best) ? 1 : 0,
+                FID_TYPE(best->fid) == OBJ_TYPE_SCENERY && best->frame != 0 ? 1 : 0);
         }
     }
 
@@ -2342,6 +2379,10 @@ void interact_prompt_forget_hover()
     memset(ip_thrown, 0, sizeof(ip_thrown));
     ip_opened_count = 0;
     ip_opened_next = 0;
+    ip_door_opens_count = 0;
+    ip_door_opens_next = 0;
+    ip_door_tried = NULL;
+    ip_door_refused = false;
 }
 
 void interact_prompt_reset()

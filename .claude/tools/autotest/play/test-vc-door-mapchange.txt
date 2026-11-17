@@ -1,0 +1,25 @@
+# TESTER (2026-11-15): m-vc-guarded-door across a map change. Cassidy's watch door (viCsWch1, pid 33555281, tile 17270)
+# opens for the unseen dude and is remembered as a door that opened (ip-door-opens): the plain hand, of=2. He shuts it and
+# the map is entered again (mapgo, as a script's load_map does), where map_enter locks it again. The memory goes with the
+# old map (_obj_remove_all -> interact_prompt_forget_hover), so the door must be a never-tried locked door again: the use
+# first and the pick one tap away, of=3 -- and the stale door pointer must not trip anything.
+name test-vc-door-mapchange
+map VCTYCTYD.MAP
+mapscript on
+seed 1
+duration 20
+dude tile 17471 rot 0
+
+tap 2500 A
+shot 4500
+tap 5500 A
+shot 7000
+mapgo 8000 VCTYCTYD.MAP 17471 0
+shot 14000
+note 17000 end
+
+expect ip-door-opens\] pid=33555281 id=20 tile=17270
+expect ip-show\] pid=33555281 kind=1 idx=0 of=2 locked=1 open=1
+expect map-load-stage\] done name=(vctyctyd|VCTYCTYD)
+expect-count 2 ip-show\] pid=33555281 kind=1 idx=0 of=3 locked=1 open=0
+expect-not ip-door-refused\]

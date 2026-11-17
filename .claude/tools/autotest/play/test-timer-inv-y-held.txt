@@ -1,0 +1,60 @@
+# TESTER (2026-11-15, area b): Y HELD through the close of the bomb's SET TIMER window, opened from the INVENTORY: Y sets
+# 3:00 and A (DONE) comes while Y is still down (a quick Y-then-A roll of the thumb). In the inventory Y is a RAW LEFT
+# CLICK while it is held (gamepad_ui.cc gpui_action_buttons, `yNow && invOpen`), read straight from SDL -- not through
+# the spent buttons (gpui_button_down) -- so a Y still down when the inventory gets the pad back presses the mouse on
+# the list row under the pointer (the stimpak that moved up into the bomb's old row): the item's action menu, then LOOK
+# on the release (or a pick-up drag in the hand cursor). Shot 3: Y held in the inventory; shot 4: after its release.
+name test-timer-inv-y-held
+map DESERT1.MAP
+seed 1
+duration 18
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 stimpak, row 1 plastic explosive, row 2 dynamite
+dude item 51 1
+dude item 85 1
+dude item 40 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+shot +400
+# A on the plastic explosive: its timer window
+tap +500 A
+# Y down (3:00) and held; A = DONE while Y is down
+pad +900 Y 1
+shot +300
+tap +200 A
+# Y stays down 1.5 s in the inventory
+shot +900
+pad +600 Y 0
+shot +600
+note +1000 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=DONE by=pad value=180
+expect \[INPUT/pad-spent\] held=a,y
+expect \[INPUT/pad-spent\] let-go=y

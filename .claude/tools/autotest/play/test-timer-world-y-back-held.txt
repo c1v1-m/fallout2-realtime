@@ -1,0 +1,50 @@
+# TESTER (2026-11-15, area b): Y and BACK HELD through the close of the bomb's SET TIMER window, opened from the WORLD
+# (the RB quick slot). Y = 3:00 in the window; A = DONE while Y and BACK are both still down; both held 0.9 s into the
+# world. A Y hold is the weapon wheel (a wheel holds the world: world-hold on) and its release the hand swap; a BACK
+# release is the inventory, a BACK hold the run to the nearest exit. None of them may come of presses made in the
+# window. Then the right stick in a second window: the arrow comes back (shown), 2 s of rest hide it, and A is DONE.
+name test-timer-world-y-back-held
+map DESERT1.MAP
+seed 1
+duration 20
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 2
+dude quickslot rb 85
+
+tap 1500 RB
+shot 2600
+# Y (3:00) and BACK down, A = DONE while both are held
+pad +500 Y 1
+pad +300 BACK 1
+tap +300 A
+shot +400
+# both let go 0.9 s after the close
+pad +500 Y 0
+pad +0 BACK 0
+shot +800
+# the second window: the right stick moves the pointer (the arrow shows), 2.5 s of rest (hidden), A = DONE
+tap +1500 RB
+axis +1500 RX 20000
+axis +250 RX 0
+shot +200
+note +2600 rest
+shot +100
+tap +300 A
+shot +1500
+note +500 done
+
+# the checks (run.js)
+expect-count 2 \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-window\] close key=DONE by=pad value=180
+expect \[INPUT/pad-spent\] held=a,y,back
+expect \[INPUT/pad-spent\] let-go=y
+expect \[INPUT/pad-spent\] let-go=back
+expect-not \[FLOW/world-hold\] on
+expect-not \[INPUT/hand-swap\]
+expect-not \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=499x377
+expect \[FLOW/timer-cursor\] shown at=
+expect \[FLOW/timer-cursor\] hidden why=idle
+expect \[FLOW/timer-a\] arrow=hidden under=\w+ to=DONE
+expect-count 2 \[ACTION/explosive-placed\] pid=209

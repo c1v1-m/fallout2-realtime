@@ -1,0 +1,17 @@
+# F2 (2026-11-17, „healoval se vic?“): in his last two fights Vic died without one heal. Vic (party) carries STIMPAKS
+# here, two raiders shoot him: below half his HP the medic beat must dose him ([FLOW/medic]). The -powder copy gives him
+# only Healing Powder, which vanilla F2's ai_check_drugs counts as healing (gHealingItemPids) and the realtime medic did not.
+name test-vic-heal-powder
+map DESERT1.MAP
+seed 1
+duration 15
+dude tile 20100 rot 2
+dude hp 400
+spawn 16777278 19904 rot 5 wield 8 item 29 6 item 273 3 hp 20 party
+
+spawn 16777454 21292 rot 5 wield 8 item 29 6 hostile
+spawn 16777454 21300 rot 5 wield 8 item 29 6 hostile
+
+at 0 idle
+
+expect FLOW/medic\]

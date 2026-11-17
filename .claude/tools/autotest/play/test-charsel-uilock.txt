@@ -1,0 +1,29 @@
+# VERIFY (2026-11-15): is the arrow in screen-charsel's shots the harness's own? The harness opens the selector over a
+# live world, where the world's mouse handler (gameMouseRefresh, a ticker from _map_init on) puts the arrow back over
+# any window that is not the map; from the title menu that handler is not registered at all. Here the selector opens
+# twice at the same pointer spot (the screen centre, never moved): first while GAMMOVIE's scene holds the UI
+# (game_ui_disable -> _gmouse_disable: the handler does nothing), then after the scene has given it back (handler on).
+# Expected: no arrow in the first two shots, the arrow in the last two.
+name test-charsel-uilock
+map GAMMOVIE.MAP
+mapscript on
+seed 1
+duration 56
+dude tile 24916 rot 0
+
+open 1000 selector
+shot +1300
+shot +2500
+tap +500 B
+note +1500 first selector closed (scene lock still on)
+open 45000 selector
+shot +1300
+shot +2500
+tap +500 B
+note +1500 second selector closed
+
+expect \[FLOW/script-ui-lock\] on=1
+expect-count 2 \[FLOW/autotest\] opened screen=selector
+expect-count 2 \[FLOW/charsel-cursor\] hidden
+expect \[FLOW/script-ui-lock\] on=0
+expect-count 2 \[FLOW/charsel\] close rc=3

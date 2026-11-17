@@ -3241,6 +3241,35 @@ static void _op_inven_cmds(Program* program)
     programStackPushPointer(program, item);
 }
 
+// CE (Fallout 2 Realtime 2026-11-15, „některé konverzace s valerii byly useknuté rychle“): A SCENE'S LINE OVER A
+// CRITTER OUTLASTS THAT CRITTER'S OWN CHATTER. Vic meeting his daughter in Vault City is VCMainWk.int floating lines
+// over Valerie, Vic and the dude on 3-6 s timers, each step clearing the last; Vic's own script (DCVic.int) floats its
+// idle "Why is this place so clean?" whenever it likes, and a new float replaces the old one -- so his "Uh, heh-heh...
+// ignore her, Boss..." went after 2.7 s of its 6 (trace_2026-11-15_214530, s=876 / 878.7). Now a line some OTHER
+// script floats over a critter is a scene's: until that script clears it, or FLOAT_SCENE_MS pass, the critter's own
+// script does not float over it.
+#define FLOAT_SCENE_MAX 16
+#define FLOAT_SCENE_MS 8000
+static int gFloatSceneOwner[FLOAT_SCENE_MAX]; // object ids; 0 = free
+static Program* gFloatSceneProgram[FLOAT_SCENE_MAX];
+static unsigned int gFloatSceneAt[FLOAT_SCENE_MAX];
+
+static bool float_from_own_script(Program* program, Object* obj)
+{
+    Script* script;
+    return obj->sid != -1 && scriptGetScript(obj->sid, &script) != -1 && script->program == program;
+}
+
+static int float_scene_find(Object* obj)
+{
+    for (int i = 0; i < FLOAT_SCENE_MAX; i++) {
+        if (gFloatSceneOwner[i] == obj->id && obj->id != 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 // float_msg
 // 0x459280
 static void opFloatMessage(Program* program)
@@ -3270,7 +3299,13 @@ static void opFloatMessage(Program* program)
         combat_rt_note_scene_progress();
     }
 
+    bool ownScript = float_from_own_script(program, obj);
+    int scene = float_scene_find(obj);
+
     if (string == nullptr || *string == '\0') {
+        if (scene != -1 && gFloatSceneProgram[scene] == program) {
+            gFloatSceneOwner[scene] = 0; // the scene cleared its own line
+        }
         textObjectsRemoveByOwner(obj);
         tileWindowRefresh();
         return;
@@ -3278,6 +3313,28 @@ static void opFloatMessage(Program* program)
 
     if (obj->elevation != gElevation) {
         return;
+    }
+
+    if (ownScript) {
+        if (scene != -1 && getTicksSince(gFloatSceneAt[scene]) < FLOAT_SCENE_MS) {
+            trace_event(TRACE_STATE, "float-kept", "pid=%d id=%d scene=%s", obj->pid, obj->id,
+                gFloatSceneProgram[scene] != nullptr && gFloatSceneProgram[scene]->name != nullptr ? gFloatSceneProgram[scene]->name : "?");
+            return; // its own chatter waits for the scene's line
+        }
+    } else {
+        if (scene == -1) {
+            for (int i = 0; i < FLOAT_SCENE_MAX; i++) {
+                if (gFloatSceneOwner[i] == 0 || getTicksSince(gFloatSceneAt[i]) >= FLOAT_SCENE_MS) {
+                    scene = i;
+                    break;
+                }
+            }
+        }
+        if (scene != -1) {
+            gFloatSceneOwner[scene] = obj->id;
+            gFloatSceneProgram[scene] = program;
+            gFloatSceneAt[scene] = getTicks();
+        }
     }
 
     if (floatingMessageType == FLOATING_MESSAGE_TYPE_COLOR_SEQUENCE) {

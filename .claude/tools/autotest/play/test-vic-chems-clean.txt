@@ -1,0 +1,18 @@
+# F2 (2026-11-17, „ať berou fet“): NPCs take combat chems by COMBAT CONTROL's "Chem use" as vanilla's ai_check_drugs
+# (rt_try_chems). Vic (party, full HP, 2 Buffout + 1 Mentats) with Chem use 0; two unarmed raiders walk up, so
+# he fights. Always (5): drugs on his first turn, 2 AP each. Clean (0): none.
+name test-vic-chems-clean
+map DESERT1.MAP
+seed 1
+duration 6
+dude tile 20100 rot 2
+dude hp 400
+spawn 16777278 19904 rot 5 wield 8 item 29 6 item 87 2 item 53 1 chem 0 party
+
+spawn 16777454 21292 rot 5 hostile
+spawn 16777454 21300 rot 5 hostile
+
+at 0 idle
+
+expect autotest\] chem id=[0-9]+ pid=16777278 chem=0 rc=0
+expect-not FLOW/chem\]

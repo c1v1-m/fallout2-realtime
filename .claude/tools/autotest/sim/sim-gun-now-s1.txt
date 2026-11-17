@@ -1,0 +1,33 @@
+# Balance sim (2026-11-17), family GUN: standing AP regen by distance NOW (near 1.4 / far 0.6) vs FLAT (1.0 / 1.0).
+# The dude = his character (ST 10, PE 7, AG 9, EN 6) with a Combat Shotgun + 12 ga shells, small_guns 150, shooting from
+# where he stands, in Leather Armor art (pid 1 = his 0100000c; the default art cannot hold the shotgun; the harness puts on
+# the ART only -- inven_wield skips _adjust_ac for the dude -- so AC 9 and no DR here, not his AC 24).
+# Five raiders of his real fight (trace_2026-11-17_173949: 16777454 with an Assault Rifle or a Combat Shotgun, 16777455
+# with the Grease Gun), 10-13 tiles away, hostile. Only setup lines + "at 0 fight" (no timeline steps).
+# HP 600: with 250 he died at 22 s after one kill; with 999 (the cap) the NOW fight was still on at 90 s (4 kills,
+# one shot per 4.4 s at 12+ tiles), so 600 makes every run end inside 90 s -- by his death or by the last raider.
+name sim-gun-now-s1
+map DESERT1.MAP
+seed 1
+duration 90
+dude tile 20100 rot 2
+dude stat ST 10
+dude stat PE 7
+dude stat EN 6
+dude stat AG 9
+dude hp 600
+dude skill small_guns 150
+dude armor 1
+dude wield 242
+dude item 95 6
+
+spawn 16777454 22100 rot 5 wield 23 item 35 2 hostile
+spawn 16777454 21906 rot 5 wield 242 item 95 2 hostile
+spawn 16777454 21894 rot 5 wield 23 item 35 2 hostile
+spawn 16777455 21710 rot 5 wield 332 item 357 3 hostile
+spawn 16777455 21690 rot 5 wield 332 item 357 3 hostile
+
+at 0 fight
+
+expect COMBAT/balance\] === fight
+expect FLOW/autotest\] end why=

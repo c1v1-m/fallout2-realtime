@@ -1,0 +1,21 @@
+# F2 (2026-11-17, „i pro společníky … najednou 2 na mě a 2 na něho“): the six-raider ambush of test-ambush-six with
+# Vic (pid 16777278, a 10mm pistol, party) beside the dude. trace_2026-11-16_235421 s=884.4: all six opened on Vic and
+# he was dead in 1.3 s. Now at most two hold a turn at the dude and two at Vic: count turn-take lines per def=, never 3/2.
+name test-ambush-vic
+map DESERT1.MAP
+seed 1
+duration 20
+# Vic, a companion, beside the dude: since 2026-11-17 („2 na mě a 2 na něho“) he gets his own two turns.
+
+dude tile 20100 rot 2
+dude hp 400
+spawn 16777278 19904 rot 5 wield 8 item 29 6 party
+
+spawn 16777454 22492 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22496 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22500 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22504 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22508 rot 5 wield 8 item 29 4 hostile
+spawn 16777454 22512 rot 5 wield 8 item 29 4 hostile
+
+at 0 idle

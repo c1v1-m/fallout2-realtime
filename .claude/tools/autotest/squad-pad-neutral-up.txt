@@ -2,8 +2,10 @@
 # design B's four for who, and Up is ATTACK on what the cursor is on -- a neutral as an enemy, the same test as A's
 # (gpui_squad_on_attackable). Vic (10mm pistol) 4 tiles left of the dude, Sulik (knife) right below him; a ghoul (the pid
 # of his Gecko ghoul), neutral, 8 tiles in front. LT locks it (nobody fights him: the neutral in front), A opens the
-# mode with the cursor on it, LT up; D-pad Up gives ATTACK to All and closes the mode, and their blow turns the ghoul.
-# A second opening is no test of it: after the order the ghoul is hostile, an enemy.
+# mode with the cursor on it, LT up; D-pad Up gives ATTACK to All (the mode stays), B closes the mode, and their blow
+# turns the ghoul. A second opening is no test of it: after the order the ghoul is hostile, an enemy.
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the Up, so the world runs again and
+# they go for the ghoul.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-neutral-up.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-pad-neutral-up
 map DESERT1.MAP
@@ -22,8 +24,10 @@ spawn 16777375 21700 rot 5
 axis 600 LT 32767
 tap 800 A
 axis 1100 LT -32768
-# D-pad Up: ATTACK to All on the neutral under the cursor, and the mode closes
+# D-pad Up: ATTACK to All on the neutral under the cursor -- it clicks and the mode stays open (the world held still)
 tap 3000 UP
+# B: the mode closes, the world runs and they go for it
+tap 3400 B
 note 7000 end
 
 # the checks (run.js)
@@ -32,9 +36,11 @@ expect \[INPUT/squad-mode\] open members=2 start=lock x=\d+ y=\d+ tile=\d+ kind=
 expect \[INPUT/squad-dpad\] dir=up order=attack who=all ok=1
 expect \[ACTION/squad-order\] order=attack target=16777375 companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
 expect \[FLOW/squad-focus\] on id=\d+ pid=16777375 tile=\d+ hostile=0
-expect \[INPUT/squad-mode\] close why=dpad
-expect \[FLOW/squad-mode\] close why=dpad slowed=1\.5\d frozen=1
-# the order made it nobody's enemy; their blow did
+# the Up clicks and leaves the mode open (given while the world held); the B closes it
+expect \[INPUT/squad-mode\] stays after=dpad order=attack speaker=\d+
+expect-count 1 \[INPUT/squad-mode\] close why=b ms=
+expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1
+# the order made it nobody's enemy; their blow did, once B let the world run
 expect \[FLOW/newhostile\] pid=16777375 whoDude=0 whoParty=1
 # Up was the mode's: never refused on the neutral, no Pip-Boy, no attack of the dude's own
 expect-not \[INPUT/squad-dpad\] dir=up .*ok=0

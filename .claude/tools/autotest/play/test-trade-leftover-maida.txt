@@ -1,0 +1,35 @@
+# VERIFIER (2026-11-15, final pass): after a COMPANION's swap of four Miniguns (test-companion-trade-x-offer shot 3) the
+# stock of the Minigun stays painted on Vic's emptied table. Does an ordinary trade leave the same scrap? Maida
+# (KLADWTWN, as m-barter-y); the dude carries four Miniguns and nothing else, puts all four on his table (LT+A) and
+# offers them (Y) -- an overpay she accepts. Then his table is empty and must show only the wood.
+#   1 the trade opens            2 the four Miniguns on his table
+#   3 after Y (accepted): his table empty -- any scrap of a Minigun left on it?
+#   4 D-pad DOWN (a table repaint) -- does a scrap go away?     5 back in the talk
+name test-trade-leftover-maida
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 24
+dude tile 22879 rot 0
+dude item 12 4
+
+talk 2000 16777273
+tap 6000 Y
+shot 8000
+axis 9000 LT 32767
+tap 9300 A 150
+axis 9800 LT -32768
+shot 10800
+tap 11500 Y
+shot 13000
+tap 13800 DOWN
+shot 15000
+tap 16000 B
+shot 18500
+tap 19500 B
+tap 21000 B
+note 22500 end
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect barter-a\] list=0 row=0 pid=12 .*amount=ALL
+expect barter-offer\] rc=0 .*party=0

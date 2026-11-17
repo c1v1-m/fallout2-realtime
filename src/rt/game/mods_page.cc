@@ -85,6 +85,8 @@ enum {
     MODS_FORGIVE_STRAY,
     MODS_CROWD_ROOM,
     MODS_TACTICAL_AI,
+    MODS_BONUS_MOVE, // above "Attackers at once": the MODS screen tests count up to their rows from the top's wrap
+    MODS_MAX_ATTACKERS,
     MODS_PROJECTILES,
     MODS_PROMPT_WORD,
     MODS_BLAST_RING,
@@ -373,6 +375,38 @@ static constexpr ModsOption mods_options[MODS_COUNT] = {
         2,
     },
     {
+        "Bonus Move",
+        { "Fast", "Half turn", "Turn" },
+        {
+            "The perk's move points come back as fast as AP do.",
+            "The perk's move points come back in half a turn.",
+            "The perk's move points come back once a turn, as in the original.",
+        },
+        {
+            "About a second next to an enemy, even between two blows.",
+            "Half the time your whole AP pool takes to refill.",
+            "The time your whole AP pool takes to refill.",
+        },
+        3,
+    },
+    {
+        "Attackers at once",
+        { "1", "2", "3", "All" },
+        {
+            "At most one enemy attacks you at a time, and one each companion.",
+            "At most two enemies attack you at once, and two each companion.",
+            "At most three enemies attack you at once, and three each companion.",
+            "Every enemy attacks you the moment it is ready.",
+        },
+        {
+            "The rest wait their turn, which lasts until they could attack again.",
+            "The rest wait their turn, which lasts until they could attack again.",
+            "The rest wait their turn, which lasts until they could attack again.",
+            "An ambush can open with every gun at once.",
+        },
+        4,
+    },
+    {
         "Projectiles",
         { "Vanilla", "Flying" },
         {
@@ -495,6 +529,8 @@ static_assert(mods_label_is(MODS_MOUSE, "Mouse"), "MODS row order drifted");
 static_assert(mods_label_is(MODS_FORGIVE_STRAY, "Stray hits on allies"), "MODS row order drifted");
 static_assert(mods_label_is(MODS_CROWD_ROOM, "Crowds make room"), "MODS row order drifted");
 static_assert(mods_label_is(MODS_TACTICAL_AI, "Tactical AI"), "MODS row order drifted");
+static_assert(mods_label_is(MODS_BONUS_MOVE, "Bonus Move"), "MODS row order drifted");
+static_assert(mods_label_is(MODS_MAX_ATTACKERS, "Attackers at once"), "MODS row order drifted");
 static_assert(mods_label_is(MODS_PROJECTILES, "Projectiles"), "MODS row order drifted");
 static_assert(mods_label_is(MODS_PROMPT_WORD, "Name the action"), "MODS row order drifted");
 static_assert(mods_label_is(MODS_BLAST_RING, "Blast ring"), "MODS row order drifted");
@@ -807,6 +843,9 @@ static void mods_load()
     mods_value[MODS_FORGIVE_STRAY] = combat_rt_get_forgive_stray() ? 1 : 0;
     mods_value[MODS_CROWD_ROOM] = combat_rt_get_crowd_make_room() ? 1 : 0;
     mods_value[MODS_TACTICAL_AI] = combat_rt_get_tactical_ai() ? 1 : 0;
+    mods_value[MODS_BONUS_MOVE] = combat_rt_get_bonus_move_refill();
+    // 1, 2, 3 on the first three values, "All" (no limit, 0 in the cfg) on the last.
+    mods_value[MODS_MAX_ATTACKERS] = combat_rt_get_max_attackers() > 0 ? combat_rt_get_max_attackers() - 1 : 3;
     mods_value[MODS_PROJECTILES] = combat_rt_get_projectiles() ? 1 : 0;
     mods_value[MODS_PROMPT_WORD] = interact_prompt_get_action_word() ? 1 : 0;
     mods_value[MODS_BLAST_RING] = combat_rt_get_blast_ring();
@@ -1042,6 +1081,24 @@ static void mods_apply(int index)
         bool v = mods_value[index] != 0;
         combat_rt_set_tactical_ai(v);
         config_set_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_TACTICAL_AI_KEY, v ? 1 : 0);
+        break;
+    }
+    case MODS_BONUS_MOVE: {
+        // DEFAULT "Half turn" -- his „Ano, udělej“ (2026-11-17), after „ten perk teď busted“ (Fast, the AP rate: back in
+        // under a second next to an enemy) and „jednou za kolo mi přijde weak“ (Turn, vanilla). 0 Fast, 1 Half turn,
+        // 2 Turn. Live: the next frame refills by it.
+        int v = mods_value[index];
+        combat_rt_set_bonus_move_refill(v);
+        config_set_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_BONUS_MOVE_REFILL_KEY, v);
+        break;
+    }
+    case MODS_MAX_ATTACKERS: {
+        // DEFAULT 2 -- his call („Ano, max 2 naráz“, 2026-11-16, after six raiders killed him three seconds into an
+        // ambush), each companion counted apart since 2026-11-17 („2 na mě a 2 na něho“). Values 1, 2, 3, All; All is 0
+        // in the cfg = no limit. Live: the next frame counts the turns.
+        int v = mods_value[index] >= 3 ? 0 : mods_value[index] + 1;
+        combat_rt_set_max_attackers(v);
+        config_set_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_MAX_ATTACKERS_KEY, v);
         break;
     }
     case MODS_PROJECTILES: {

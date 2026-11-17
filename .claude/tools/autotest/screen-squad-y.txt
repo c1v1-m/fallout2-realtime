@@ -1,20 +1,22 @@
 # SCREEN: Y IN THE SQUAD COMMAND MODE (2026-11-13, his pick when GO went: the LT + A mode stays without GO, and Y in it
 # switches their healing of him -- his preview „A Heal me   X Hold fire   Y No healing   B Back“, after a press
 # „Y Heal me again“; GO came back on 2026-11-14 and Y stays: the mode opens on free ground, GO's now).
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the second Y. The HEAL AGAIN is
+# given in the same, still open mode -- no LT + A again (its A, with the cursor still on the dude, would be HEAL ME) --
+# so the legend's flip to "Y Heal me again" is seen in place, and its way back.
 # screen-squad-mode's setup: Vic (10mm pistol, stimpaks) 4 tiles left of the dude, Sulik (knife) right below him, the
 # dude hurt (200 of 400), no enemy. Shots (the screen's 853x480):
-#   1 LT + A, the cursor on the dude: HEAL ME green, the legend his preview
-#     "LB RB All  A Heal me  X Hold fire  Y No healing  B Back"
-#   2 Y: NO HEALING to All -- given, so the mode closes, as X's order does; "Saving supplies." over Vic, the one with
-#     the stimpaks, though Sulik stands nearer
-#   3 LT + A again, the cursor on the dude: every one of All keeps his supplies now, so the legend says
-#     "Y Heal me again"
-#   4 Y: HEAL AGAIN -- the mode closes; "I'll patch you up." over Vic again
+#   1 LT + A, the cursor on the dude: HEAL ME green, the legend
+#     "LB RB All  A Heal me  RS Next companion  X Hold fire  Y No healing  LS Keep distance  B Back"
+#   2 Y: NO HEALING to All -- given, a click, the mode stays; "Saving supplies." over Vic, the one with the stimpaks,
+#     though Sulik stands nearer; every one of All keeps his supplies now, so the legend says "Y Heal me again"
+#   3 Y: HEAL AGAIN -- the mode stays; "I'll patch you up." over Vic again, the legend back to "Y No healing"
+#   4 B: the mode closed
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-y.txt 1 --exe build/Release/fallout2-ce.exe
 name screen-squad-y
 map DESERT1.MAP
 seed 1
-duration 11
+duration 9
 dude tile 20100 rot 2
 dude hp 400
 dude curhp 200
@@ -33,26 +35,20 @@ axis 2800 RY -15146
 axis 3159 RX 0
 axis 3159 RY 0
 shot 3600
-# Y: NO HEALING to All, the mode closes
+# Y: NO HEALING to All -- it clicks, the mode stays
 tap 4000 Y
 shot 4400
-# LT + A again, the cursor onto the dude
-axis 5000 LT 32767
-tap 5200 A
-axis 5500 LT -32768
-axis 6900 RX -12535
-axis 6900 RY -15146
-axis 7259 RX 0
-axis 7259 RY 0
-shot 7700
-# Y: HEAL AGAIN, the mode closes
-tap 8100 Y
-shot 8500
-note 10000 end
+# Y again, in the same mode: HEAL AGAIN -- it clicks, the mode stays
+tap 5000 Y
+shot 5400
+# B: the mode closes
+tap 5500 B
+shot 6000
+note 7500 end
 
 # the checks (run.js)
-expect-count 2 \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=ground
-expect-count 2 \[INPUT/squad-cursor\] on kind=dude ok=1
+expect-count 1 \[INPUT/squad-mode\] open members=2 start=ahead x=474 y=226 tile=20700 kind=ground
+expect-count 1 \[INPUT/squad-cursor\] on kind=dude ok=1
 expect \[INPUT/squad-y\] order=no-healing who=all ok=1
 expect \[ACTION/squad-order\] order=no-healing target=- companions=2 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
 expect \[FLOW/medic-optout\] id=18062 treats=0
@@ -63,7 +59,12 @@ expect \[FLOW/medic-optout\] id=18062 treats=1
 expect \[FLOW/medic-optout\] id=18097 treats=1
 # ...and the list is empty again (nearest first: Sulik, then Vic)
 expect \[FLOW/medic-optout\] id=\d+ treats=1 count=0
-expect-count 2 \[INPUT/squad-mode\] close why=y
+# both Ys click and leave the mode open; B alone closes it
+expect \[INPUT/squad-mode\] stays after=y order=no-healing speaker=18062
+expect \[INPUT/squad-mode\] stays after=y order=heal-again speaker=18062
+expect-count 2 \[INPUT/squad-mode\] stays after=
+expect-count 1 \[INPUT/squad-mode\] close why=
+expect \[INPUT/squad-mode\] close why=b
 # the Y was the mode's both times: no LT + Y firing mode, no Y-hold weapon wheel, no interaction, no other order
 expect-not \[INPUT/fire-mode\]
 expect-not \[FLOW/world-hold\] on why=wheel

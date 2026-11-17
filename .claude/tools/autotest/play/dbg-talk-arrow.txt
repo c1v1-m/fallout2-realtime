@@ -1,0 +1,23 @@
+# DEBUG (2026-11-17, his Windows screenshot of a talk with Vic, trace_2026-11-17_153746): the yellow ARROW over COMBAT
+# CONTROL at (720,377) of 853x480, with no mouse motion in the whole session. The hidden world pointer is parked there
+# first (a real mouse move, then rest until the world hides it), then A talks; `screen` shoots the presented frame.
+name dbg-talk-arrow
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 20102 rot 5 wield 8 party script 50
+
+mouse 600 294 137
+screen 1200
+screen 4200
+tap 5000 A
+screen 5600
+screen 7000
+screen 9500
+note 12000 end
+
+expect mouse-real\] wake dx=294 dy=137

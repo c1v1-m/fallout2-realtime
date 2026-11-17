@@ -1,0 +1,24 @@
+# F2 (2026-11-16, „přijde mi že HTH perk mi nepřidává dmg ke spiked unarmed zbrani, ověř to … simulací“): the dude
+# with Spiked Knuckles (pid 234, 4-10 normal, unarmed) punches unarmed raiders. Run three times: no perk, Bonus HtH
+# Damage x1 (dude perk 2), x3. Compare the non-critical dmg of att=18000 in [COMBAT/hit] -- and that mode is the knuckles'
+# (2), not a punch (4) or a kick (15). ST 6 = melee damage 1.
+name test-hth-knuckles
+map DESERT1.MAP
+seed 1
+duration 50
+dude tile 20100 rot 2
+dude stat ST 6
+dude stat AG 8
+dude stat PE 8
+dude hp 999
+dude skill unarmed 200
+dude wield 234
+
+spawn 16777454 20500 rot 5 hostile
+spawn 16777454 20496 rot 5 hostile
+spawn 16777454 20504 rot 5 hostile
+spawn 16777454 20900 rot 5 hostile
+spawn 16777454 20896 rot 5 hostile
+spawn 16777454 20904 rot 5 hostile
+
+at 0 hunt

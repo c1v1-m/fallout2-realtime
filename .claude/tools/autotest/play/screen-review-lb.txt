@@ -1,0 +1,35 @@
+# SCREEN: REVIEW ON THE PAD (2026-11-17, his „where are the buttons?“ over his own F12 shot of a talk with Vic -> „REVIEW
+# nemá tlačítko“). The talk panel's REVIEW plate wears an "LB" pill; LB opens the review, the D-pad scrolls it, LB or B
+# closes it. Vic as in test-companion-a-talk; one reply is picked first, so the review has lines.
+#   1 the talk: LB on REVIEW            2 after a reply (A)            3 LB: the review window
+#   4 D-pad down: one line on           5 LB: back to the talk         6 LB, then B: back again
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/play/screen-review-lb.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-review-lb
+map DESERT1.MAP
+seed 1
+duration 19
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 20102 rot 5 wield 8 party script 50
+
+tap 1500 A
+shot 4500
+tap 5000 A
+shot 7000
+tap 7500 LB
+shot 9000
+tap 9500 DOWN
+shot 10500
+tap 11000 LB
+shot 12500
+tap 13000 LB
+tap 14500 B
+shot 16000
+note 17500 end
+
+expect gd-review\] open via=pad entries=[1-9]
+expect gd-review\] pad key=336
+expect gd-review\] pad key=27
+expect gd-review\] open via=pad .*

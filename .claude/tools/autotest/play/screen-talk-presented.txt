@@ -1,0 +1,34 @@
+# SCREEN: THE TALK PANEL AS THE MONITOR SHOWS IT (2026-11-17, his own Windows screenshot of a talk with Vic: the art's red
+# dots on TRADE / COMBAT CONTROL and a bare REVIEW plate, while every `shot` and his F12 showed the pad badges). `screen`
+# saves the presented screen surface (at_dump_presented), `shot` the redrawn windows -- the two must agree.
+# FIXED the same day: the talk and trade panels are refreshed after their buttons are made (_gdialog_window_create,
+# _gdialog_barter_create_win).
+#   1 screen: the talk as presented     2 shot: the same moment redrawn
+#   3 screen: the review (LB)           4 screen: back in the talk (B)
+#   5 screen: the trade (Y)             6 screen: back in the talk (B)
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/play/screen-talk-presented.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-talk-presented
+map DESERT1.MAP
+seed 1
+duration 19
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 20102 rot 5 wield 8 party script 50
+
+tap 1500 A
+screen 4500
+shot 4600
+tap 5500 LB
+screen 6800
+tap 7500 B
+screen 8800
+tap 9500 Y
+screen 12000
+tap 13000 B
+screen 16000
+note 17500 end
+
+expect gd-badges\] pad=1
+expect autotest\] screen t=

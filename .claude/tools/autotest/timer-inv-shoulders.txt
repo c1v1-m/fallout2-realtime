@@ -1,0 +1,64 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): the bomb's SET TIMER window opened from the INVENTORY, then LB, RB and BACK
+# pressed in it -- buttons the window does not use. The inventory's own shortcuts ran under it (the mouse hook runs in
+# the window's loop): LB / RB bound the list row under the pointer (the dynamite, while the window is up) to a quick
+# slot, and BACK closed the window as Esc -- a CANCEL nobody pressed. Now the three do nothing there, and A then
+# presses DONE.
+name timer-inv-shoulders
+map DESERT1.MAP
+seed 1
+duration 15
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 stimpak, row 1 plastic explosive, row 2 dynamite
+dude item 51 1
+dude item 85 1
+dude item 40 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+# A on the plastic explosive: its timer window
+tap +500 A
+shot +900
+tap +500 LB
+tap +500 RB
+tap +500 BACK
+# the window is still up: BACK closed nothing
+shot +700
+tap +500 A
+shot +1200
+note +1000 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+# the leak: no quick slot bound, and the window closed by A's DONE, not by BACK's Esc
+expect-not \[INPUT/quick-slot-bind\]
+expect \[FLOW/timer-window\] close key=DONE by=pad value=60
+expect-not \[FLOW/timer-window\] close key=CANCEL
+expect-count 1 \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+# ...the game's own words for it: the timer set by DONE (BACK's Esc cancelled it, and the A then tapped the stimpak
+# the window's close left under the pointer: "Nothing happens.")
+expect \[STATE/msg\] You set the timer
+expect-not \[STATE/msg\] Nothing happens

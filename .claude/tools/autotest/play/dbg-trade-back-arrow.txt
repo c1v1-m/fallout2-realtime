@@ -1,0 +1,26 @@
+# DEBUG (2026-11-17, his F12 shot scr00002): back from the companion trade to the talk, the mouse ARROW stood over the
+# first reply 0.3 s later -- with no mouse motion at all (no [INPUT/mouse-real] line in trace_2026-11-17_151709). His
+# path: talk with Vic, Y (trade), B (back to the talk), F12. Shots 0.3 s, 1 s and 2.6 s after the B.
+name dbg-trade-back-arrow
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+dude item 41 500
+dude item 40 3
+
+spawn 16777278 20102 rot 5 wield 8 item 29 3 item 13 2 party script 50
+
+tap 1500 A
+shot 4500
+tap 5500 Y
+shot 8000
+tap 9000 B
+shot 9300
+shot 10000
+shot 11600
+note 13000 end
+
+expect barter-auto-refused\]|gd-badges\] pad=1

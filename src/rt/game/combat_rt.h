@@ -87,6 +87,7 @@ enum {
     COMBAT_RT_ORDER_HEAL_ME, // design A: come and dose the dude
     COMBAT_RT_ORDER_NO_HEALING, // design A: Y, the medic opt-out -- they keep their supplies from him
     COMBAT_RT_ORDER_HEAL_AGAIN, // design A: Y, the opt-out lifted
+    COMBAT_RT_ORDER_KEEP_DISTANCE, // design A: R3, Distance "Snipe" -- back off from what comes near (2026-11-17)
     COMBAT_RT_ORDER_COUNT,
 };
 bool combat_rt_squad_order(int order);
@@ -202,6 +203,17 @@ bool combat_rt_squad_set_weapon(Object* c, Object* item);
 // The pick forgotten without a word -- COMBAT CONTROL's "Use best weapon" (game_dialog.cc) chooses for it instead.
 void combat_rt_squad_forget_weapon(Object* c, const char* why);
 
+// ARMOR (2026-11-17): COMBAT CONTROL's "Use best armor" from the companion's wheel. Can `c` wear armour at all (a party
+// member, a biped, not the one vanilla's button leaves out)? The armour it would put on -- the best in its pack, better
+// than what it wears -- or NULL. And the putting on: says "Suiting up." (or "Nothing better." and false).
+bool combat_rt_squad_can_wear_armor(Object* c);
+Object* combat_rt_squad_best_armor(Object* c);
+bool combat_rt_squad_wear_best_armor(Object* c);
+
+// Who said the last order's line ("Keeping my distance.", "Got it.", "No meds." ...), or NULL: the mode, open after an
+// order since 2026-11-17, moves his name aside for it.
+Object* combat_rt_squad_last_speaker();
+
 // Its post's tile (GO), or -1 -- for drawing the posts while the mode is up.
 int combat_rt_squad_post_of(Object* c);
 // Its focus now -- its own (ATTACK to it alone), else the squad's -- or NULL; `c` NULL = the squad's. Every live focus
@@ -306,6 +318,13 @@ void combat_rt_set_crowd_make_room(bool enabled);
 bool combat_rt_get_crowd_make_room();
 void combat_rt_set_tactical_ai(bool enabled);
 bool combat_rt_get_tactical_ai();
+// MODS "Attackers at once": how many enemies attack the dude at one time, the rest wait their turn. 0 = no limit.
+void combat_rt_set_max_attackers(int count);
+int combat_rt_get_max_attackers();
+// MODS "Bonus Move": how fast the perk's movement reserve comes back while the dude stands. 0 Fast (the AP regen
+// itself), 1 Half turn (default), 2 Turn (vanilla's once per turn: the time the whole AP pool takes at the base rate).
+void combat_rt_set_bonus_move_refill(int mode);
+int combat_rt_get_bonus_move_refill();
 void combat_rt_set_projectiles(bool enabled);
 bool combat_rt_get_projectiles();
 int combat_rt_tracers_in_air();
@@ -491,6 +510,8 @@ void combat_rt_validate_who_hit_me(Object* a, Object* b);
 // isInCombat() becomes false and the map transition proceeds) instead of the vanilla
 // "in combat -> game_user_wants_to_quit = 1" path, which boots the player to the main menu.
 void combat_rt_end_for_map_exit();
+// The dude was just put down elsewhere on the map (map.cc mapHandleTransition): he stands, free movement starts afresh.
+void combat_rt_dude_teleported();
 
 // op_terminate_combat in realtime: end the engagement unconditionally (the script decided), instead
 // of vanilla's game_user_wants_to_quit = 1, which only the dormant turn-based loop ever consumed --
@@ -572,7 +593,8 @@ bool combat_rt_in_heavy_reaction(Object* critter);
 
 // Self-played tests only (autotest `sethp ... knock`): knock `critter` down the way a knockdown hit's commit
 // does -- the reaction layer's FALLING, DAM_KNOCKED_DOWN, the fall in its own sequence -- with no damage.
-void combat_rt_test_knockdown(Object* critter);
+void combat_rt_test_knockdown(Object* critter, bool knockout);
+void combat_rt_test_stagger(Object* critter);
 
 // Empty a critter's realtime pool. The realtime stand-in for vanilla's "lose your turn" critical
 // failure: there are no turns, so the cost is paid as points plus the wait for them to come back.

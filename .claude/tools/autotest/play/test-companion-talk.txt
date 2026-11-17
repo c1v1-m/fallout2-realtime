@@ -1,0 +1,26 @@
+# TESTER (2026-11-15): a companion's conversation after game_dialog.cc's badge work. Vic, in the party and on his own
+# script (DCVic.int, scripts.lst line 50), beside the dude: talk to him (the dialogue's BARTER wears Y and COMBAT CONTROL
+# wears X, 16x16 badges over the 14x14 red buttons), X opens his combat control panel (Fallout 2's own, through the pad's
+# X), B leaves it, Y opens the trade with him, B leaves it.
+# Shots: the dialogue (badges), the combat control panel, the dialogue again, the trade, the dialogue again.
+name test-companion-talk
+map DESERT1.MAP
+seed 1
+duration 22
+dude tile 20100 rot 2
+
+spawn 16777278 20302 rot 4 wield 8 item 29 3 party script 50
+
+talk 1500 16777278
+shot 4000
+tap 5000 X
+shot 7000
+tap 8000 B
+shot 10000
+tap 11000 Y
+shot 13500
+tap 14500 B
+shot 17000
+
+expect \[FLOW/autotest\] talk .*rc=0
+expect dialog-start\] pid=16777278

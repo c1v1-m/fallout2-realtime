@@ -14,6 +14,17 @@ namespace fallout {
 bool autotest_init(int argc, char** argv);
 bool autotest_active();
 
+// The scenario's `mouse` steps, added to a real mouse's delta in the pad's mouse hook.
+void autotest_take_mouse(int* dx, int* dy);
+
+// The scenario's `cfg <key> <value>` lines into [preferences], for this run only: called once the cfg is loaded and
+// before combat_rt and the pad read their levers (game.cc).
+void autotest_apply_cfg();
+
+// A frame of the loading planet is on the screen (`first`: it has just come up): a self-played run saves the
+// first two of each load as presented.
+void autotest_planet_frame(bool first);
+
 char* autotest_map();
 int autotest_seed();
 

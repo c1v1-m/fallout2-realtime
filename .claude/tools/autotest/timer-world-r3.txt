@@ -1,0 +1,31 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): timer-world-l3 with R3 -- clicked in the bomb's SET TIMER window (opened
+# from the RB quick slot) and still held as DONE closes it. R3's called-shot window opens on its press edge, read only on
+# the game's tick, which never saw the press made inside the window: the still-held R3 came back as a fresh press and
+# the called-shot window opened over the world (or, with nothing to aim, buzzed: aim-refused). Now the press is nobody's
+# until it is let go. The called-shot window reuses the timer window's id, so no new `modal` line marks it; the run's
+# end line says which modal is still up (-1 = none).
+name timer-world-r3
+map DESERT1.MAP
+seed 1
+duration 9
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 1
+dude quickslot rb 85
+
+tap 1500 RB
+shot 2400
+# R3 down in the window, DONE with A, R3 let go after the window has gone
+pad 3000 R3 1
+tap +400 A
+pad +900 R3 0
+shot +500
+note +1500 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] close key=DONE by=pad value=60
+expect \[INPUT/pad-spent\] held=.*rightstick
+# the leak: no called-shot window (nor its refusal) from the R3 held through the window
+expect-not \[INPUT/aim-(picker|refused)\]
+expect \[FLOW/autotest\] end why=time .* modal=-1

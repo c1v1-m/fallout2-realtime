@@ -345,6 +345,100 @@ bool gamepad_ui_set_suppress_a_click(bool suppress)
     return previous;
 }
 
+// ⚠️ THE BOMB'S SET TIMER WINDOW ANSWERS THE PAD ITSELF, AND NOTHING ELSE MAY (Fallout 2 Realtime 2026-11-15). His ask
+// that day: „dáme tlačítka k pokládání bomby, ať nemusí hráč left joystickem vybírat příkazy“ -- the window already had
+// a button for each command (inventory.cc, move_timer_gamepad_keycode), so it got their marks on screen; and with the
+// marks inviting exactly those presses, the leaks under it had to go. The window runs its own loop, but this hook runs
+// inside it all the same, so each press it answered was ALSO taken by whatever lay under it:
+//   - opened from the INVENTORY screen, that screen's pad shortcuts -- X and B put the list row under the pointer into
+//     a hand, LB / RB bound it to a quick slot, BACK closed the window as Esc, and A's tap / hold router took the A
+//     that pressed DONE and fired on its release: the quick action on the row under the pointer, which after DONE is
+//     the item that sat above the bomb (another bomb reopened the window), or the armour off when the pointer had
+//     been snapped onto DONE (it lies over the armour slot);
+//   - opened from the WORLD (a quick slot, the Y wheel), A's press with a drug or a use-on item in hand armed the
+//     deferred interaction, and once the window had gone its release opened whatever the prompt offered (after CANCEL;
+//     DONE's bend makes the prompt refuse) and its hold armed the item's crosshair; a B held after CANCEL opened the
+//     drug wheel, an L3 / R3 held through the window the skill wheel / the called-shot window.
+// ONE RULE instead of a patch on each of them: while the window is up the hook's button shortcuts and its A router
+// stand aside -- they still track their edges, so nothing they hold goes stale -- and when it closes, every button
+// still down is spent until it is let go (gamepad_ui_spend_held_buttons): the trackers that see the input epoch take
+// the held state over, and the ones on the tick that never see it -- the use-on hold, the B drug wheel, L3's skills,
+// R3's called shot, the wheels' A -- read such a button as up (gpui_button_down). The pointer is not touched: the left
+// stick still snaps between the window's buttons, the right stick moves it and RT clicks.
+static bool gpui_buttons_owned = false;
+
+bool gamepad_ui_set_buttons_owned(bool owned)
+{
+    bool previous = gpui_buttons_owned;
+    gpui_buttons_owned = owned;
+    if (owned != previous) {
+        trace_event(TRACE_INPUT, "pad-owned", "%s", owned ? "on" : "off");
+    }
+    return previous;
+}
+
+// The buttons spent by such a window's close, a bit per SDL_GameControllerButton; a bit goes when its button is up.
+static unsigned int gpui_spent_buttons = 0;
+
+static const char* gpui_button_trace_name(int button)
+{
+    const char* name = SDL_GameControllerGetStringForButton((SDL_GameControllerButton)button);
+    return name != NULL ? name : "?";
+}
+
+void gamepad_ui_spend_held_buttons()
+{
+    gpui_spent_buttons = 0;
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == NULL) {
+        return;
+    }
+    char held[128];
+    held[0] = '\0';
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX && b < 32; b++) {
+        if (SDL_GameControllerGetButton(pad, (SDL_GameControllerButton)b) != 0) {
+            gpui_spent_buttons |= 1u << b;
+            if (held[0] != '\0') {
+                SDL_strlcat(held, ",", sizeof(held));
+            }
+            SDL_strlcat(held, gpui_button_trace_name(b), sizeof(held));
+        }
+    }
+    if (gpui_spent_buttons != 0) {
+        trace_event(TRACE_INPUT, "pad-spent", "held=%s", held);
+    }
+}
+
+// A spent button let go is an ordinary button again. Once a frame from the hook (every loop) and the tick, so a bit
+// never outlives its press because no reader of that button happened to run.
+static void gpui_spent_refresh(SDL_GameController* pad)
+{
+    if (gpui_spent_buttons == 0) {
+        return;
+    }
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX && b < 32; b++) {
+        unsigned int bit = 1u << b;
+        if ((gpui_spent_buttons & bit) != 0 && SDL_GameControllerGetButton(pad, (SDL_GameControllerButton)b) == 0) {
+            gpui_spent_buttons &= ~bit;
+            trace_event(TRACE_INPUT, "pad-spent", "let-go=%s", gpui_button_trace_name(b));
+        }
+    }
+}
+
+// The live state of a button for a tracker that never sees the input epoch: a spent one reads as up until let go.
+static bool gpui_button_down(SDL_GameController* pad, SDL_GameControllerButton button)
+{
+    bool down = SDL_GameControllerGetButton(pad, button) != 0;
+    if ((gpui_spent_buttons & (1u << button)) == 0) {
+        return down;
+    }
+    if (!down) {
+        gpui_spent_buttons &= ~(1u << button);
+        trace_event(TRACE_INPUT, "pad-spent", "let-go=%s", gpui_button_trace_name(button));
+    }
+    return false;
+}
+
 // Aim-picker cancel handshake. Declared up here rather than beside gpui_aim_body_on because the
 // B-button shortcut handler further down the file has to see it: the press that cancels an aim
 // must not ALSO switch the weapon's firing mode.
@@ -766,8 +860,18 @@ static void gpui_inventory_a(SDL_GameController* pad, int* buttons)
     // approach walk to release the button) rose-edged instantly and tapped Done -- "pressed
     // loot and it immediately clicked Done." Tracking the real state means the carried-over
     // hold is a no-edge; a genuine release + re-press inside the window still taps normally.
-    bool aHeld = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
-    bool yHeld = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    //
+    // ⚠️ A SPENT PRESS READS AS UP HERE TOO (gpui_button_down, review 2026-11-15). The bomb's SET TIMER window reads the
+    // pad in its own loop AFTER this hook has read it for the same frame (inputGetInput runs the hook, then the window
+    // polls SDL again), so on a real pad an A that lands between the two polls is DONE for the window and nothing for
+    // this router: the window closes, the first hook frame back is the input epoch's, which returns before this is
+    // called (gpui_action_buttons), and on the next one the router saw A down over a prevA of up -- a fresh tap -- and
+    // on its release ran the quick action on the list row under the pointer, the very leak gpui_buttons_owned closes. The
+    // window's close spends every held button (gamepad_ui_spend_held_buttons), so read through that, the A is up here
+    // until it has been let go, whichever poll saw it first. The self-played runs cannot land a press between the two
+    // (the bot's pad changes before the hook reads it); this is the code path, not a test.
+    bool aHeld = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_A);
+    bool yHeld = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_Y);
 
     if (!inven_any_open()) {
         phase = 0;
@@ -775,6 +879,16 @@ static void gpui_inventory_a(SDL_GameController* pad, int* buttons)
         prevY = yHeld;
         gpui_loot_quick = 0;
         gpui_quick_normal = false;
+        return;
+    }
+
+    // ⚠️ NOT UNDER THE BOMB'S SET TIMER WINDOW (2026-11-15, see gpui_buttons_owned): the A that presses its DONE is the
+    // window's. Read here it began a tap, and the tap fired on its release once the window had gone -- the quick
+    // action on the list row under the pointer. Tracked, so that A is already down when the screen gets A back.
+    if (gpui_buttons_owned) {
+        phase = 0;
+        prevA = aHeld;
+        prevY = yHeld;
         return;
     }
 
@@ -976,6 +1090,15 @@ static void gpui_action_buttons(SDL_GameController* pad, int* dx, int* dy, int* 
     // Ian" bug: the click landed on whoever the cursor happened to be over.
     if (gpui_self_nav) {
         gpui_a_interacting = false;
+        return;
+    }
+
+    // ...and nothing at all under the bomb's SET TIMER window (gpui_buttons_owned): A, Y, LB and RB are the window's
+    // there -- no interaction deferred for the release, no quick slot bound, no click. The inventory's A router is
+    // still called, to keep its own edges current (it stands aside itself).
+    if (gpui_buttons_owned) {
+        gpui_a_interacting = false;
+        gpui_inventory_a(pad, buttons);
         return;
     }
 
@@ -1734,6 +1857,19 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
     if (bPressed) {
         gpui_consumed_b = false;
     }
+    // ...and X and LB the same (review 2026-11-15). The X that pressed PLACE in the bomb's SET TIMER window -- marked
+    // on the plate since that day -- is still down when the epoch block below marks it spent; opened from the
+    // inventory, the window leaves the inventory up, and the inventory returns before any X release reaches the clear
+    // in the gameplay branch, so the next X tap in the world (the reload) did nothing at all. An LB held as such a
+    // window closed and let go in the inventory ate the next LB quick-slot press the same way. A fresh press is never
+    // a spent one; what spends a press in its own frame does so after this (the epoch block below; the weapon wheel's
+    // LB page turn on the tick, which runs after this hook).
+    if (xPressed) {
+        gpui_consumed_x = false;
+    }
+    if (lbPressed) {
+        gpui_consumed_lb = false;
+    }
 
     // ⚠️ A SCREEN JUST RAN ITS OWN INPUT LOOP (inventory, pause menu, Pip-Boy, a confirmation
     // box, load/save). Same counter and the same reasoning as gpui_action_buttons: these statics
@@ -1802,6 +1938,14 @@ static void gpui_button_shortcuts(SDL_GameController* pad)
             && (inven_any_open() || options_is_open() || gamepad_ui_menu_active()
                 || dialog_active() || !intface_is_enabled() || gpui_action_popup_active))) {
         gpui_dpad_forget();
+    }
+
+    // The bomb's SET TIMER window answers these buttons itself (gpui_buttons_owned), so none of the shortcuts below may:
+    // opened from the inventory, X / B used to put the list row under the pointer into a hand and BACK closed the
+    // window as Esc. Edges are stamped above, and the window's close spends what is still held.
+    if (gpui_buttons_owned) {
+        gpui_dpad_forget();
+        return;
     }
 
     // The title menu drives its OWN D-pad highlight nav and has no game session, so the gameplay
@@ -3051,10 +3195,11 @@ static void gpui_skill_wheel(SDL_GameController* pad)
     static bool prevB = false;
     static int releasedOn = -1;                // skill highlighted when the stick went to centre
     static unsigned int releasedSince = 0;
-    bool l3Now = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) != 0;
+    // A spent press reads as up (gpui_button_down): an L3 still held as the bomb's timer window closes opens nothing.
+    bool l3Now = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK);
     bool l3Edge = l3Now && !prevL3;
     prevL3 = l3Now;
-    bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    bool bNow = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_B);
     bool bEdge = bNow && !prevB;
     prevB = bNow;
 
@@ -3574,6 +3719,13 @@ static int gpui_quick_use_slot = -1;     // the quick slot gpui_quick_use is bei
 static int gpui_chain_slot = -1;         // the slot whose held button drives the chain; -1 = none
 static unsigned int gpui_chain_due_at = 0; // when the next one is asked for; 0 = not now
 static int gpui_chain_count = 0;          // follow-ups in this chain
+// ⚠️ A CUT JAB GOES AGAIN WHILE THE BUTTON IS HELD (Fallout 2 Realtime 2026-11-16, „REEEEEEEEEEE, držím LB a nedostávám
+// heal“). trace_2026-11-16_233112 s=96.3: two stimpaks went in, a hit staggered him in the third jab before its frame,
+// gpui_inject_tick gave the (zero) AP back and DROPPED THE CHAIN -- LB stayed down another 2.1 s and nothing came.
+// Now the cut one is asked for again (gpui_heal_chain_tick, once the stagger has let go of the body) and pays what
+// was given back: 4 AP when it was the first, nothing when it was a follow-up.
+static bool gpui_chain_retry = false;
+static int gpui_chain_retry_ap = 0;
 // The explosive put-down (gpui_place_explosive).
 static bool gpui_place_pending = false;
 static Object* gpui_place_item = NULL; // compared against the pack's pointers only, until dropped
@@ -3715,12 +3867,26 @@ static bool gpui_inject_start(Object* item, int apCost, bool followUp = false, b
         gpui_chain_slot = gpui_quick_use_slot; // a slot's own press may chain; anything else may not
         gpui_chain_count = 0;
         gpui_chain_last_instant = false;
+        gpui_chain_retry = false;
     }
     gpui_chain_due_at = 0;
 
     trace_event(TRACE_ACTION, "inject-start", "pid=%d frame=%d from=%d lock=%ums ap=%d", item->pid, actionFrame,
         startFrame, ms, combat_rt_player_ap());
     return true;
+}
+
+// The held button of the chain's quick slot (gpui_chain_slot).
+static bool gpui_chain_button_held()
+{
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == NULL || gpui_chain_slot == -1) {
+        return false;
+    }
+    SDL_GameControllerButton button = gpui_chain_slot == GPUI_QS_LB
+        ? SDL_CONTROLLER_BUTTON_LEFTSHOULDER
+        : SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+    return SDL_GameControllerGetButton(pad, button) != 0;
 }
 
 // From the safe tick: a jab that left its pose before its frame (a stagger, a knockdown, anim_stop
@@ -3737,10 +3903,19 @@ static void gpui_inject_tick()
     gpui_inject_pending = false;
     combat_rt_refund_ap(gpui_inject_ap);
     gpui_injection_ms = 0;
-    gpui_chain_slot = -1;
-    gpui_chain_due_at = 0;
-    trace_event(TRACE_ACTION, "inject-cut", "pid=%d refund=%d ap=%d anim=%d after=%ums", gpui_inject_pid,
-        gpui_inject_ap, combat_rt_player_ap(), FID_ANIM_TYPE(obj_dude->fid), elapsed_time(gpui_inject_at));
+    // Still held: the same one again once the body is free (gpui_chain_retry). Let go: over, as before.
+    bool retry = gpui_chain_slot != -1 && gpui_chain_button_held();
+    if (retry) {
+        gpui_chain_retry = true;
+        gpui_chain_retry_ap = gpui_inject_ap;
+        gpui_chain_due_at = get_time() + 1;
+    } else {
+        gpui_chain_slot = -1;
+        gpui_chain_due_at = 0;
+        gpui_chain_retry = false;
+    }
+    trace_event(TRACE_ACTION, "inject-cut", "pid=%d refund=%d ap=%d anim=%d after=%ums retry=%d", gpui_inject_pid,
+        gpui_inject_ap, combat_rt_player_ap(), FID_ANIM_TYPE(obj_dude->fid), elapsed_time(gpui_inject_at), retry ? 1 : 0);
 }
 
 static Object* gpui_quick_slot_item(int slot, int* count);
@@ -3782,6 +3957,13 @@ static void gpui_ap_wait_tick()
     }
 }
 
+// A hit's stagger or a dodge on the body -- what a heal chain waits out instead of ending.
+static bool gpui_body_staggered()
+{
+    int anim = FID_ANIM_TYPE(obj_dude->fid);
+    return anim == ANIM_HIT_FROM_FRONT || anim == ANIM_HIT_FROM_BACK || anim == ANIM_DODGE_ANIM;
+}
+
 static void gpui_heal_chain_end(const char* why)
 {
     if (gpui_chain_slot != -1) {
@@ -3790,6 +3972,7 @@ static void gpui_heal_chain_end(const char* why)
     }
     gpui_chain_slot = -1;
     gpui_chain_due_at = 0;
+    gpui_chain_retry = false;
 }
 
 // From the safe tick: the next jab of a held slot (gpui_chain_slot), once its moment has come.
@@ -3829,9 +4012,17 @@ static void gpui_heal_chain_tick()
     // Down or getting up: no jab can register (see GPUI_CHAIN_INSTANT_MS) -- the next one goes in now.
     int bodyAnim = FID_ANIM_TYPE(obj_dude->fid);
     if (critter_is_prone(obj_dude) || bodyAnim == ANIM_PRONE_TO_STANDING || bodyAnim == ANIM_BACK_TO_STANDING) {
+        if (gpui_chain_retry && combat_rt_player_ap() < gpui_chain_retry_ap) {
+            gpui_chain_due_at = get_time() + 1; // the cut first one waits for its AP, as a press does
+            return;
+        }
         if (!gpui_take_drug_now(item)) {
             gpui_heal_chain_end("refused");
             return;
+        }
+        if (gpui_chain_retry) {
+            combat_rt_spend_ap(gpui_chain_retry_ap);
+            gpui_chain_retry = false;
         }
         gpui_chain_count++;
         gpui_chain_last_instant = true;
@@ -3846,23 +4037,31 @@ static void gpui_heal_chain_tick()
 
     // The jab before is still playing: the next one waits for it to end (asked again next frame).
     // Anything else holding the body (a step, a swing) ends the chain instead.
+    // A STAGGER only waits (2026-11-16): it is a hit, not something he chose, and the chain goes on once it lets go.
     if (anim_busy(obj_dude) != 0) {
-        if (FID_ANIM_TYPE(obj_dude->fid) != ANIM_MAGIC_HANDS_MIDDLE) {
+        if (FID_ANIM_TYPE(obj_dude->fid) != ANIM_MAGIC_HANDS_MIDDLE && !gpui_body_staggered()) {
             gpui_heal_chain_end("busy");
             return;
         }
         gpui_chain_due_at = get_time() + 1;
         return;
     }
+    int apCost = gpui_chain_retry ? gpui_chain_retry_ap : 0;
+    if (combat_rt_player_ap() < apCost) {
+        gpui_chain_due_at = get_time() + 1; // the cut first one waits for its AP, as a press does
+        return;
+    }
     // A whole jab every time (see gpui_chain_floor_ms).
-    if (!gpui_inject_start(item, 0, true, true)) {
+    if (!gpui_inject_start(item, apCost, true, true)) {
         gpui_heal_chain_end("refused");
         return;
     }
+    bool retried = gpui_chain_retry;
+    gpui_chain_retry = false;
     gpui_chain_last_instant = false;
     gpui_chain_count++;
-    trace_event(TRACE_ACTION, "heal-chain", "next=%d pid=%d hp=%d pool=%d left=%d", gpui_chain_count, item->pid,
-        critter_get_hits(obj_dude), combat_rt_heal_left(), count - 1);
+    trace_event(TRACE_ACTION, "heal-chain", "next=%d pid=%d hp=%d pool=%d left=%d retry=%d", gpui_chain_count, item->pid,
+        critter_get_hits(obj_dude), combat_rt_heal_left(), count - 1, retried ? 1 : 0);
 }
 
 // Use one of `pid` on the dude: the jab, and the drug at its frame (see gpui_inject_pending).
@@ -3975,6 +4174,7 @@ static void gpui_quick_use(int pid)
     gpui_chain_slot = gpui_quick_use_slot;
     gpui_chain_count = 0;
     gpui_chain_last_instant = true;
+    gpui_chain_retry = false;
     gpui_chain_due_at = 0;
     if (gpui_chain_slot != -1) {
         gpui_chain_due_at = get_time() + gpui_chain_floor_ms();
@@ -5038,7 +5238,9 @@ static void gpui_quick_wheel(SDL_GameController* pad)
     static unsigned int qbDownTime = 0;
     static bool qbHandled = false; // this hold already tried to open; don't retry every frame
 
-    bool qbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
+    // ⚠️ A SPENT B READS AS UP (gpui_button_down, 2026-11-15): the B that pressed CANCEL in the bomb's timer window
+    // came back here as a fresh press -- this tracker never sees the input epoch -- and, held on, opened the wheel.
+    bool qbNow = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_B);
     bool qbEdge = qbNow && !prevQb;
     bool qbReleased = !qbNow && prevQb;
     prevQb = qbNow;
@@ -5951,7 +6153,7 @@ static void gpui_weapon_wheel(SDL_GameController* pad)
     static bool prevRB = false;
     static bool prevLB = false;
 
-    bool wyNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    bool wyNow = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_Y); // a spent Y reads as up (gpui_button_down)
     bool wyEdge = wyNow && !prevWy;
     bool wyReleased = !wyNow && prevWy;
     prevWy = wyNow;
@@ -8390,7 +8592,12 @@ static void gpui_useon_arm(SDL_GameController* pad)
     // back on at the release. See the note at the release.
     static bool aSuppressing = false;
 
-    bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+    // ⚠️ A SPENT A READS AS UP (gpui_button_down, 2026-11-15). The A that closed the bomb's timer window -- opened from the
+    // world, so by this very tick -- is still down when the tick goes on, and this tracker never sees the input epoch:
+    // with a drug or a use-on item in hand it took that A as a fresh press. Its release ran the deferred interaction
+    // (the body the prompt offered opened its loot, after CANCEL: autotest timer-world-a-drug), a hold armed the item's
+    // crosshair (after DONE: timer-world-a-hold).
+    bool aNow = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_A);
     bool aEdge = aNow && !prevA;
     bool aReleased = !aNow && prevA;
     prevA = aNow;
@@ -8425,7 +8632,8 @@ static void gpui_useon_arm(SDL_GameController* pad)
         if (gpui_a_interact_deferred) {
             gpui_a_interact_deferred = false;
             if (!aHandled && !gamepad_ui_menu_active() && !dialog_active() && !inven_any_open()) {
-                interact_prompt_request();
+                bool queued = interact_prompt_request();
+                trace_event(TRACE_INPUT, "a-deferred-interact", "queued=%d", queued ? 1 : 0);
             }
         }
 
@@ -8479,6 +8687,7 @@ static void gpui_useon_arm(SDL_GameController* pad)
     gamepad_ui_set_suppress_a_click(true);
     gsound_play_sfx_file("ib1p1xx1");
     intface_use_item();
+    trace_event(TRACE_INPUT, "useon-arm", "mode=%d", gmouse_3d_get_mode());
 
     // ...and put it in front of his eyes rather than wherever the pointer was abandoned. Only once
     // the mode is really up: intface_use_item() is the authority on whether this item arms anything.
@@ -8540,6 +8749,7 @@ static void gpui_useon_arm(SDL_GameController* pad)
 // previews (that dotted line, none, a solid one) „Bez čar“ -- the outline says who, the brackets and the word where.
 #define GPUI_SQUAD_MAX 8 // companions it steps through: the party is a handful
 #define GPUI_SQUAD_WPN_AUTO_ID (-2) // the weapon wheel's "Auto" (never -1, radial_wheel_highlight_id's "none")
+#define GPUI_SQUAD_WPN_ARMOR_ID (-3) // its "Use best armor" (2026-11-17)
 // The cursor rests on a free tile this long before GO asks the pathfinder whether anyone chosen can get there
 // (combat_rt_squad_can_reach: up to 12000 nodes a companion) -- a stick sweeping the map asks nothing.
 #define GPUI_SQUAD_REACH_SETTLE_MS 120
@@ -8607,6 +8817,7 @@ static void gpui_squad_anchor_set();
 // WEAPON: the wheel of a companion's weapons, while it is up (owner GPUI_WHEEL_SQUAD_WEAPON).
 static Object* gpui_squad_wpn_who = NULL;
 static Object* gpui_squad_wpn_slot[RADIAL_WHEEL_MAX];
+static int gpui_squad_wpn_armor_seg = -1; // the wheel's armour segment, -1 = none (he cannot wear any)
 static int gpui_squad_wpn_count = 0;
 
 // The marks on the world, in window coordinates, built on the tick (gpui_squad_paint) and drawn by the tile overlay
@@ -9248,7 +9459,7 @@ static void gpui_squad_paint_legend(bool wheel)
             aWord = "Heal me";
             break;
         case GPUI_SQUAD_ON_COMPANION:
-            aWord = "Weapon";
+            aWord = "Equip"; // weapon or armour (the wheel, 2026-11-17)
             break;
         default:
             aWord = "Order";
@@ -9268,10 +9479,14 @@ static void gpui_squad_paint_legend(bool wheel)
     }
     w += badge + 3 + text_width(aWord) + gap;
     if (!wheel) {
+        w += badge + 3 + text_width("Next companion") + gap;
         w += badge + 3 + text_width(xWord) + gap;
     }
     if (yShown) {
         w += badge + 3 + text_width(yWord) + gap;
+    }
+    if (!wheel) {
+        w += badge + 3 + text_width("Keep distance") + gap;
     }
     w += badge + 3 + text_width("Back") + 1;
     int h = badge;
@@ -9301,6 +9516,14 @@ static void gpui_squad_paint_legend(bool wheel)
     x += badge + 3;
     gpui_squad_put_text(buf, w, h, x, ty, aWord, aOk ? white : gpui_squad_grey());
     x += text_width(aWord) + gap;
+    // R3, the right stick's click: "RS", the way the bar's Skilldex badge spells the left one (interface.cc "LS"). The
+    // jump to the next companion sits by A, whose target it picks.
+    if (!wheel) {
+        intface_pad_pill(buf, w, w, h, x + badge / 2, cy, "RS");
+        x += badge + 3;
+        gpui_squad_put_text(buf, w, h, x, ty, "Next companion", white);
+        x += text_width("Next companion") + gap;
+    }
     if (!wheel) {
         intface_pad_face(buf, w, w, h, x + badge / 2, cy, 'X');
         x += badge + 3;
@@ -9312,6 +9535,13 @@ static void gpui_squad_paint_legend(bool wheel)
         x += badge + 3;
         gpui_squad_put_text(buf, w, h, x, ty, yWord, white);
         x += text_width(yWord) + gap;
+    }
+    // L3, the left stick's click: "LS", as on the bar's Skilldex badge.
+    if (!wheel) {
+        intface_pad_pill(buf, w, w, h, x + badge / 2, cy, "LS");
+        x += badge + 3;
+        gpui_squad_put_text(buf, w, h, x, ty, "Keep distance", white);
+        x += text_width("Keep distance") + gap;
     }
     intface_pad_face(buf, w, w, h, x + badge / 2, cy, 'B');
     x += badge + 3;
@@ -9462,7 +9692,7 @@ static void gpui_squad_paint_words(Object** chosen, int chosenCount)
         word = "HEAL ME";
         break;
     case GPUI_SQUAD_ON_COMPANION:
-        word = "WEAPON";
+        word = "EQUIP"; // the legend's "A Equip": weapon or armour (his „Ano, přepiš“, 2026-11-17; was WEAPON)
         break;
     }
     if (word != NULL && haveBox && !wheel) {
@@ -9704,14 +9934,27 @@ static void gpui_squad_open_mode()
 
 // --- the orders ---
 
-// An order given: a click, and the mode closes; refused: the buzz, and it stays open. A refusal with words to it
-// (HEAL ME's "No meds.", "You're fine.", GO's "Can't get there.") floats over the nearest one asked -- where his name
-// is, so the name stands aside for it. X's and Y's refusals have no words: the buzz alone.
+// An order given: a click, and the mode STAYS OPEN for the next one (2026-11-17, his „když dávám rozkazy tak se ukončí
+// režim a musím zase LT+A jak při vybírání equip, tak při L3, atd. je to docela annoying“): only B closes it now -- a
+// companion's wheel goes back to the mode, as its B does. The line the order got ("Keeping my distance.", "Got it.")
+// floats where the speaker's name is, so his name stands aside for it. Refused: the buzz, and it stays open as before;
+// a refusal with words to it (HEAL ME's "No meds.", "You're fine.", GO's "Can't get there.") floats over the nearest
+// one asked, the name aside the same way. X's and Y's refusals have no words: the buzz alone.
+static const char* gpui_squad_order_name(int order);
+
 static bool gpui_squad_given(bool ok, int order, const char* src)
 {
     if (ok) {
         gsound_play_sfx_file("ib1p1xx1");
-        gpui_squad_close(src);
+        if (gpui_squad_wpn_who != NULL) {
+            gpui_squad_weapon_close();
+        }
+        Object* speaker = combat_rt_squad_last_speaker();
+        if (speaker != NULL) {
+            gpui_squad_mute = speaker;
+        }
+        trace_event(TRACE_INPUT, "squad-mode", "stays after=%s order=%s speaker=%d", src,
+            order >= 0 ? gpui_squad_order_name(order) : src, speaker != NULL ? speaker->id : -1);
         return true;
     }
     gsound_play_sfx_file("iisxxxx1");
@@ -9730,7 +9973,7 @@ static bool gpui_squad_given(bool ok, int order, const char* src)
 static const char* gpui_squad_order_name(int order)
 {
     static const char* const names[] = { "attack", "follow", "hold", "charge", "go", "hold-fire", "open-fire",
-        "heal-me", "no-healing", "heal-again" };
+        "heal-me", "no-healing", "heal-again", "keep-distance" };
     static_assert((int)(sizeof(names) / sizeof(names[0])) == COMBAT_RT_ORDER_COUNT, "one name per COMBAT_RT_ORDER_*");
     return order >= 0 && order < (int)(sizeof(names) / sizeof(names[0])) ? names[order] : "?";
 }
@@ -9746,16 +9989,21 @@ static void gpui_squad_weapon_close()
     }
     gpui_squad_wpn_who = NULL;
     gpui_squad_wpn_count = 0;
+    gpui_squad_wpn_armor_seg = -1;
 }
 
 // The wheel of what `c` can hold (combat_rt_squad_weapons: his art has the frames for it), titled with his name, with
 // "Auto" -- the AI chooses again -- at the top. A gun with no rounds in it or for it is red; A on it still asks, so he
 // says why ("Out of ammo."). False when he can hold nothing at all (a dog, a robot): the caller buzzes.
+// ARMOR (2026-11-17, his „ať je možné si vzít i armour“ → „Přidej do LT+A“): after the weapons, COMBAT CONTROL's "Use
+// best armor" -- the best armour in his pack, named, with its icon; grey "Armor / Nothing better" when he carries none
+// better than what he wears (A asks all the same and he says so). Only for one who can wear armour at all.
 static bool gpui_squad_weapon_open(Object* c)
 {
-    Object* list[RADIAL_WHEEL_MAX - 1];
-    int n = c != NULL ? combat_rt_squad_weapons(c, list, RADIAL_WHEEL_MAX - 1) : 0;
-    if (n <= 0 || radial_wheel_is_open()) {
+    Object* list[RADIAL_WHEEL_MAX - 2];
+    int n = c != NULL ? combat_rt_squad_weapons(c, list, RADIAL_WHEEL_MAX - 2) : 0;
+    bool armorSeg = combat_rt_squad_can_wear_armor(c);
+    if ((n <= 0 && !armorSeg) || radial_wheel_is_open()) {
         return false;
     }
 
@@ -9785,8 +10033,30 @@ static bool gpui_squad_weapon_open(Object* c)
     }
     gpui_squad_wpn_count = n;
 
+    int segCount = n + 1;
+    gpui_squad_wpn_armor_seg = -1;
+    Object* bestArmor = armorSeg ? combat_rt_squad_best_armor(c) : NULL;
+    if (armorSeg) {
+        RadialSegment* seg = &segs[segCount];
+        seg->id = GPUI_SQUAD_WPN_ARMOR_ID;
+        seg->value = -1;
+        if (bestArmor != NULL) {
+            seg->label = object_name(bestArmor);
+            seg->detail = "Put on";
+            seg->description = object_description(bestArmor);
+            seg->enabled = true;
+            gpui_icon_from_pid(segs, segCount, bestArmor->pid);
+        } else {
+            seg->label = "Armor";
+            seg->detail = "Nothing better";
+            seg->enabled = false;
+        }
+        gpui_squad_wpn_armor_seg = segCount;
+        segCount++;
+    }
+
     RadialWheelArt art;
-    radial_wheel_open(segs, n + 1, object_name(c), gpui_wheel_art_for_icons(&art, gpui_icons_held), -1, -1, false);
+    radial_wheel_open(segs, segCount, object_name(c), gpui_wheel_art_for_icons(&art, gpui_icons_held), -1, -1, false);
     if (!radial_wheel_is_open()) {
         gpui_icons_release();
         gpui_squad_wpn_count = 0;
@@ -9802,8 +10072,9 @@ static bool gpui_squad_weapon_open(Object* c)
             segs[1 + i].enabled ? "" : "(dry)");
         len = w > 0 ? len + (size_t)w : sizeof(layout);
     }
-    trace_event(TRACE_INPUT, "squad-weapon-wheel", "open id=%d pid=%d weapons=%d pick=%d hand=%d seg0=auto %s", c->id,
-        c->pid, n, pick, inven_right_hand(c) != NULL ? inven_right_hand(c)->pid : -1, layout);
+    trace_event(TRACE_INPUT, "squad-weapon-wheel", "open id=%d pid=%d weapons=%d pick=%d hand=%d seg0=auto %s armor=%d best=%d", c->id,
+        c->pid, n, pick, inven_right_hand(c) != NULL ? inven_right_hand(c)->pid : -1, layout, gpui_squad_wpn_armor_seg,
+        bestArmor != NULL ? bestArmor->pid : -1);
     return true;
 }
 
@@ -9819,6 +10090,16 @@ static void gpui_squad_weapon_tick(SDL_GameController* pad, bool aEdge, bool bEd
     if (aEdge) {
         Object* c = gpui_squad_wpn_who;
         int index = radial_wheel_highlight(); // 0 = Auto, 1.. = the weapons; red ones too (they get their refusal)
+        if (c != NULL && index >= 0 && index == gpui_squad_wpn_armor_seg) {
+            bool ok = combat_rt_squad_wear_best_armor(c);
+            trace_event(TRACE_INPUT, "squad-weapon-wheel", "pick seg=%d armor ok=%d", index, ok ? 1 : 0);
+            if (ok) {
+                gpui_squad_given(true, -1, "armor");
+            } else {
+                gsound_play_sfx_file("iisxxxx1"); // the wheel stays: another pick, or B
+            }
+            return;
+        }
         Object* item = index >= 1 && index - 1 < gpui_squad_wpn_count ? gpui_squad_wpn_slot[index - 1] : NULL;
         if (c == NULL || index < 0 || (index >= 1 && item == NULL)) {
             gsound_play_sfx_file("iisxxxx1");
@@ -9956,6 +10237,46 @@ static bool gpui_squad_move_cursor(SDL_GameController* pad)
     return (int)ox != (int)gpui_squad_cx || (int)oy != (int)gpui_squad_cy;
 }
 
+// R3: THE CURSOR ONTO THE NEXT COMPANION (2026-11-17, his „držím LB+A a zmáčknout R3 tak to bude switchnovat mezi
+// companions, ať na ně nemusím furt ručně najíždět“ → „R3 skáče, Keep distance na L3“). Nearest first, the members'
+// own order (LB / RB's), and round again; the one the cursor is on counts as where it stands, so the first press from
+// anywhere else takes the nearest. Only one the view shows (the cursor stays on the world): the middle of his sprite
+// box, the box the stick's pick measures (gpui_squad_critter_at), and he is what it is on even where a nearer critter's
+// box overlaps his -- A on him is Equip, as if the stick had brought it there. False when none of them is on the screen.
+static bool gpui_squad_jump_next()
+{
+    Rect world;
+    bool haveWorld = display_win != -1 && win_get_rect(display_win, &world) == 0;
+    int at = -1;
+    for (int i = 0; i < gpui_squad_member_count; i++) {
+        if (gpui_squad_members[i] == gpui_squad_on) {
+            at = i;
+        }
+    }
+    for (int step = 1; step <= gpui_squad_member_count; step++) {
+        int index = (at + step) % gpui_squad_member_count;
+        Object* c = gpui_squad_members[index];
+        if (c == NULL || c->tile == -1 || c->elevation != map_elevation || (c->flags & OBJECT_HIDDEN) != 0) {
+            continue;
+        }
+        Rect b;
+        obj_bound(c, &b);
+        int x = (b.ulx + b.lrx) / 2;
+        int y = (b.uly + b.lry) / 2;
+        if (haveWorld && (x < world.ulx + 2 || x > world.lrx - 2 || y < world.uly + 2 || y > world.lry - 2)) {
+            continue;
+        }
+        gpui_squad_cx = (float)x;
+        gpui_squad_cy = (float)y;
+        gpui_squad_on = c;
+        trace_event(TRACE_INPUT, "squad-next", "on=%s id=%d index=%d of=%d x=%d y=%d", object_name(c), c->id, index,
+            gpui_squad_member_count, x, y);
+        return true;
+    }
+    trace_event(TRACE_INPUT, "squad-next", "none on screen of=%d", gpui_squad_member_count);
+    return false;
+}
+
 // --- the driver ---
 
 // Every tick from gamepad_ui_tick, after the other wheels (their guards see this tick's B and Y while the mode is still
@@ -9966,12 +10287,16 @@ static void gpui_squad_mode(SDL_GameController* pad)
     static bool prevB = false;
     static bool prevX = false;
     static bool prevY = false;
+    static bool prevR3 = false;
+    static bool prevL3 = false;
     static bool prevLb = false;
     static bool prevRb = false;
     static bool prevDir[4] = { false, false, false, false };
     bool bNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) != 0;
     bool xNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
     bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
+    bool r3Now = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0;
+    bool l3Now = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) != 0;
     bool lbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
     bool rbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
     static const SDL_GameControllerButton dirButtons[4] = {
@@ -9990,11 +10315,15 @@ static void gpui_squad_mode(SDL_GameController* pad)
     bool bEdge = bNow && !prevB;
     bool xEdge = xNow && !prevX;
     bool yEdge = yNow && !prevY;
+    bool r3Edge = r3Now && !prevR3;
+    bool l3Edge = l3Now && !prevL3;
     bool lbEdge = lbNow && !prevLb;
     bool rbEdge = rbNow && !prevRb;
     prevB = bNow;
     prevX = xNow;
     prevY = yNow;
+    prevR3 = r3Now;
+    prevL3 = l3Now;
     prevLb = lbNow;
     prevRb = rbNow;
 
@@ -10014,7 +10343,7 @@ static void gpui_squad_mode(SDL_GameController* pad)
     if (gpui_squad_just_opened) {
         // The open's own tick: whatever is down now was down before the mode -- nothing of it is an order.
         gpui_squad_just_opened = false;
-        bEdge = xEdge = yEdge = lbEdge = rbEdge = aEdge = false;
+        bEdge = xEdge = yEdge = lbEdge = rbEdge = aEdge = r3Edge = l3Edge = false;
         for (int i = 0; i < 4; i++) {
             dirEdge[i] = false;
         }
@@ -10083,7 +10412,17 @@ static void gpui_squad_mode(SDL_GameController* pad)
 
     gpui_squad_follow_world();
     bool moved = gpui_squad_move_cursor(pad);
-    gpui_squad_classify(moved || lbEdge || rbEdge);
+    bool jumped = false;
+    if (r3Edge) {
+        // ⚠️ SPENT HERE: R3 is the called-shot window in the world, and the aim picker reads it later this same tick
+        // (screen-squad-r3's first run, when R3 was an order that closed the mode). A spent press reads as up until
+        // let go (gpui_button_down).
+        gpui_spent_buttons |= 1u << SDL_CONTROLLER_BUTTON_RIGHTSTICK;
+        jumped = gpui_squad_jump_next();
+        gsound_play_sfx_file(jumped ? "ib1p1xx1" : "iisxxxx1");
+    }
+    // After a jump the cursor is on him whatever box lies in front of his (gpui_squad_jump_next).
+    gpui_squad_classify((moved || lbEdge || rbEdge) && !jumped);
     gpui_squad_anchor_set();
 
     char whoText[16];
@@ -10111,6 +10450,22 @@ static void gpui_squad_mode(SDL_GameController* pad)
         bool ok = combat_rt_squad_command(gpui_squad_who, order, NULL, -1);
         trace_event(TRACE_INPUT, "squad-y", "order=%s who=%s ok=%d", gpui_squad_order_name(order), whoText, ok ? 1 : 0);
         if (gpui_squad_given(ok, order, "y")) {
+            return;
+        }
+    }
+
+    // L3: KEEP DISTANCE for who (2026-11-17, his „můžu vicovi říct pomocí LT+A at se drží daleko?“ → „Ano, přidej“; on
+    // R3 first, moved to L3 the same day when R3 became the jump to the next companion) -- the dialogue panel's
+    // Distance "Snipe": they back off from whatever comes nearer than 10 tiles and shoot from there. Not a switch:
+    // FOLLOW / HOLD / CHARGE on the D-pad set the other Distances. X's way otherwise: a fresh press, given -> the click
+    // and the mode closes, refused (a companion whose party.txt has no Snipe) -> the buzz.
+    if (l3Edge) {
+        // Spent as R3 is: L3 is the Skilldex in the world, which a press the order's close leaves down must not open.
+        gpui_spent_buttons |= 1u << SDL_CONTROLLER_BUTTON_LEFTSTICK;
+        bool ok = combat_rt_squad_command(gpui_squad_who, COMBAT_RT_ORDER_KEEP_DISTANCE, NULL, -1);
+        trace_event(TRACE_INPUT, "squad-l3", "order=%s who=%s ok=%d", gpui_squad_order_name(COMBAT_RT_ORDER_KEEP_DISTANCE),
+            whoText, ok ? 1 : 0);
+        if (gpui_squad_given(ok, COMBAT_RT_ORDER_KEEP_DISTANCE, "l3")) {
             return;
         }
     }
@@ -10220,7 +10575,8 @@ static void gpui_aim_wheel(SDL_GameController* pad)
     // R3 = THE CALLED-SHOT WINDOW (2026-10-09). Edge-detected here, above every early return, for
     // the same reason the flag above is: a click read on only some paths is a click from the past.
     static bool prevR3 = false;
-    bool r3Now = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0;
+    // A spent press reads as up (gpui_button_down): an R3 still held as the bomb's timer window closes opens nothing.
+    bool r3Now = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
     bool r3Edge = r3Now && !prevR3;
     prevR3 = r3Now;
 
@@ -10359,8 +10715,109 @@ static void gpui_aim_wheel(SDL_GameController* pad)
 // the engine input pipeline every frame, so movement and clicks pass through the
 // same mouse_simulate_input edge detection and win_check_all_buttons cycle as
 // the real mouse.
+// ⚠️ A MOUSE NOBODY TOUCHES MUST NOT SUMMON THE ARROW (2026-11-17, his „STÁLE VIDÍM KURZOR MYŠI“ -- in the trade, the
+// talk, the world and the inventory, on his PC, never in a self-played test, which has no mouse at all). With a pad in,
+// every screen hides the pointer and brings the arrow back for two seconds the moment the mouse moves it (the stamp in
+// gpui_mouse_hook_impl, gdialog_tick_cursor, the inventory's and the character selection's own) -- by a SINGLE count,
+// so a mouse that twitches by itself (a sensor on a glossy desk, the table nudged) kept the arrow up everywhere. Now,
+// with a pad connected, the mouse must first travel GPUI_MOUSE_WAKE_PX within GPUI_MOUSE_WAKE_MS: until then its motion
+// is held back (the pointer stays put, no screen sees a move); once it gets there the held-back bit goes through at once,
+// so a real move loses nothing; after GPUI_MOUSE_SLEEP_MS at rest it has to wake again. A twitch back and forth sums to
+// nothing. Without a pad nothing is filtered. [INPUT/mouse-real] sums up what the real mouse did (twice a second at
+// most, with the right stick beside it), so the next trace shows where an arrow came from if one still does.
+#define GPUI_MOUSE_WAKE_PX 8
+#define GPUI_MOUSE_WAKE_MS 300
+#define GPUI_MOUSE_SLEEP_MS 1500
+#define GPUI_MOUSE_LOG_MS 500
+
+static void gpui_mouse_twitch_filter(int* dx, int* dy)
+{
+    static bool awake = false;
+    static int heldX = 0;
+    static int heldY = 0;
+    static unsigned int heldSince = 0;
+    static unsigned int lastMove = 0;
+    static int logFrames = 0;
+    static int logHeld = 0;
+    static int logDx = 0;
+    static int logDy = 0;
+    static int logMax = 0;
+    static unsigned int logSince = 0;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == NULL) {
+        awake = false;
+        heldX = 0;
+        heldY = 0;
+        return;
+    }
+
+    unsigned int now = get_time();
+    if (*dx != 0 || *dy != 0) {
+        if (logFrames == 0) {
+            logSince = now;
+        }
+        logFrames++;
+        logDx += *dx;
+        logDy += *dy;
+        int step = abs(*dx) > abs(*dy) ? abs(*dx) : abs(*dy);
+        if (step > logMax) {
+            logMax = step;
+        }
+
+        if (awake) {
+            lastMove = now;
+        } else {
+            if ((heldX == 0 && heldY == 0) || now - heldSince > GPUI_MOUSE_WAKE_MS) {
+                heldX = 0;
+                heldY = 0;
+                heldSince = now;
+            }
+            heldX += *dx;
+            heldY += *dy;
+            if (abs(heldX) + abs(heldY) >= GPUI_MOUSE_WAKE_PX) {
+                awake = true;
+                lastMove = now;
+                *dx = heldX;
+                *dy = heldY;
+                heldX = 0;
+                heldY = 0;
+                trace_event(TRACE_INPUT, "mouse-real", "wake dx=%d dy=%d", *dx, *dy);
+            } else {
+                *dx = 0;
+                *dy = 0;
+                logHeld++;
+            }
+        }
+    } else {
+        if (awake && now - lastMove >= GPUI_MOUSE_SLEEP_MS) {
+            awake = false;
+        }
+        if (!awake && (heldX != 0 || heldY != 0) && now - heldSince > GPUI_MOUSE_WAKE_MS) {
+            heldX = 0;
+            heldY = 0;
+        }
+    }
+
+    if (logFrames > 0 && now - logSince >= GPUI_MOUSE_LOG_MS) {
+        trace_event(TRACE_INPUT, "mouse-real", "frames=%d held=%d sum=%d,%d max=%d awake=%d rs=%d,%d", logFrames, logHeld,
+            logDx, logDy, logMax, awake ? 1 : 0, SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX),
+            SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY));
+        logFrames = 0;
+        logHeld = 0;
+        logDx = 0;
+        logDy = 0;
+        logMax = 0;
+    }
+}
+
 static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
 {
+    if (autotest_active()) {
+        autotest_take_mouse(dx, dy);
+    }
+    gpui_mouse_twitch_filter(dx, dy);
+
     // WHAT THE REAL MOUSE ALREADY SAID THIS FRAME, captured before any emitter below adds to it.
     // Two things need to tell the player's own mouse apart from something we synthesised, and both
     // of them are the STEAM DECK'S RIGHT TRACKPAD: in mouse mode Steam Input feeds it to the game
@@ -10391,6 +10848,7 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
     }
 
     SDL_GameControllerUpdate();
+    gpui_spent_refresh(pad); // every loop runs this hook: a spent press let go anywhere is free again
 
     // While a lock-on is held during gameplay, the right stick belongs to the
     // lock (cycle targets) and the cursor is glued to the target by combat_rt, so
@@ -10458,7 +10916,9 @@ static void gpui_mouse_hook_impl(int* dx, int* dy, int* buttons)
         // something is selected, the right stick selects, full stop.
         ipPickTook = mag > gpui_stick_deadzone;
 
-        // CONTINUOUS, not edge-triggered: re-aimed every frame the stick is out, so circling the
+        // ⚠️ SINCE 2026-11-15 ONLY A FRESH PUSH PICKS, one step from the current target (interact_prompt_pick_direction,
+        // his „Skáče to jinam“); what follows is the history it replaced. CONTINUOUS, not edge-triggered: re-aimed every
+        // frame the stick is out, so circling the
         // stick sweeps the selection round with it. The arm/re-centre ratchet this replaced made
         // you flick-release-flick to walk the outline across a room -- fine for cycling enemies you
         // cannot see, wrong for pointing at a cabinet you can.
@@ -11279,6 +11739,7 @@ void gamepad_ui_tick()
 
     SDL_GameControllerUpdate();
     gpui_trace_buttons(pad);
+    gpui_spent_refresh(pad); // a press spent by the bomb's timer window, let go since (gpui_button_down)
 
     // Sample the hostile-in-range answer HERE (safe main-loop context), not in the mouse hook --
     // the query reads protos off disk and the hook can run from inside the engine's file I/O.
@@ -11299,7 +11760,7 @@ void gamepad_ui_tick()
     // it is the one the panel advertises (radial_wheel.cc, wheel_draw_hint).
     {
         static bool prevA = false;
-        bool aNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) != 0;
+        bool aNow = gpui_button_down(pad, SDL_CONTROLLER_BUTTON_A); // a spent A reads as up (gpui_button_down)
         gpui_wheel_a_edge = aNow && !prevA;
         prevA = aNow;
     }

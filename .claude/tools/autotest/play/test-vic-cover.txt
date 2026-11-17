@@ -1,0 +1,17 @@
+# F2 (2026-11-17, „vic jenom přišel ke mně a nic nedělal“ -> his pick „Utéct do krytu“): Vic (Keep distance, 9 HP of
+# ~70, 2 stimpaks) 12 tiles from the dude, a raider with a pistol near him. Before: flee-done on the spot (far enough
+# from the DUDE) and he stood in the fire. Now he runs AWAY FROM THE RAIDER (flee legs), sits where it cannot see him
+# (party-cover in), doses himself there (medic) and comes back past his Run Away line (party-cover back).
+name test-vic-cover
+map DESERT1.MAP
+seed 1
+duration 24
+dude tile 20100 rot 2
+dude hp 400
+spawn 16777278 22500 rot 5 wield 8 item 29 6 item 40 2 hp 12 dist 2 party
+spawn 16777454 24496 rot 5 wield 8 item 29 6 hostile
+at 0 idle
+
+expect FLOW/flee\] id=[0-9]+ pid=16777278
+expect-not FLOW/flee-done\] id=[0-9]+ pid=16777278
+expect FLOW/medic] id=[0-9]+ pid=16777278 patient=[0-9]+ self=1

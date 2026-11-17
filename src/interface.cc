@@ -1350,12 +1350,98 @@ void intface_pad_face(unsigned char* buf, int pitch, int w, int h, int cx, int c
     pad_badge_face(buf, pitch, w, h, cx, cy, key);
 }
 
-// The static ones: 0 View (inventory), 1 Menu (pause), 2-4 the D-pad left / down / up.
-static void pad_badge_icon(unsigned char* buf, int pitch, int w, int h, int kind, int cx, int cy)
+// The badge FILLING a whole small button picture of w x h (the dialogue's and the trade screen's 14x14 red buttons),
+// centred on the picture's own middle -- which for an even size lies BETWEEN two pixels. pad_badge_face's whole-pixel
+// centre sat half a pixel right and low there, its rim cut off at the right and bottom edges and the red showing top
+// left: „Offer a talk tlačítka nejsou vycentrované a nahnuté“ (Fallout 2 Realtime 2026-11-15). Outside the disc the
+// picture goes transparent (index 0), so no scrap of the red dot's rim is left around it.
+//
+// ⚠️ THE BAR'S DARK DISC AND GOLD LETTER, NOT A BRIGHTER ONE (2026-11-17): after his „Vidím, je moc tmavý“ it got a
+// yellow ring, a lighter disc and a brighter letter for a few hours -- his „proč je to žluté? změň to zpátky“, and of the
+// three looks drawn on his own trade screenshot (dark, light grey, yellow) he picked „Jako dřív (tmavá)“.
+void intface_pad_face_fill(unsigned char* buf, int w, int h, char key)
+{
+    int fill = pad_badge_grey(44);
+    int edge = pad_badge_grey(12);
+    float cx = (w - 1) / 2.0f;
+    float cy = (h - 1) / 2.0f;
+    float r = (w < h ? w : h) / 2.0f;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float dx = x - cx;
+            float dy = y - cy;
+            float d = sqrtf(dx * dx + dy * dy);
+            buf[y * w + x] = (unsigned char)(d <= r - 1.0f ? fill : (d <= r ? edge : 0));
+        }
+    }
+    // A 5x7 letter cannot share an even box's middle: half a pixel right (a B's stem weighs left) and half up.
+    char text[2] = { key, '\0' };
+    pad_badge_text(buf, w, w, h, text, w / 2, h / 2 - 1);
+}
+
+// A dark plate in the badges' greys, rounded like a pill, for a line of text that belongs to the pad marks (the trade
+// screen's legend and its SHORT / DEAL readout). The corner pixels are left as they are, so it sits on the art.
+void intface_pad_plate(unsigned char* buf, int pitch, int w, int h, int x0, int y0, int pw, int ph)
+{
+    int fill = pad_badge_grey(44);
+    int edge = pad_badge_grey(12);
+    for (int y = 0; y < ph; y++) {
+        for (int x = 0; x < pw; x++) {
+            bool cornerX = x < 2 || x >= pw - 2;
+            bool cornerY = y < 2 || y >= ph - 2;
+            bool outer = (x == 0 || x == pw - 1) && (y == 0 || y == ph - 1);
+            if (outer || (cornerX && cornerY && (x == 0 || x == pw - 1 || y == 0 || y == ph - 1))) {
+                continue;
+            }
+            bool border = x == 0 || y == 0 || x == pw - 1 || y == ph - 1 || (cornerX && cornerY);
+            pad_badge_put(buf, pitch, w, h, x0 + x, y0 + y, border ? edge : fill);
+        }
+    }
+}
+
+// The gold every pad mark's letters use, for text drawn on an intface_pad_plate.
+int intface_pad_gold()
+{
+    return pad_badge_gold();
+}
+
+// The D-pad: the disc and a cross of four arms, those in `lit` (INTFACE_DPAD_* bits) gold, the others dim. Drawn in the
+// order left, down, up, right, so an arm drawn later keeps the pixel two arms share beside the centre -- the bar's
+// one-arm marks always looked so, and the SET TIMER window's mock-up (up and down lit) was made from them.
+static void pad_badge_dpad(unsigned char* buf, int pitch, int w, int h, int cx, int cy, int lit)
 {
     pad_badge_disc(buf, pitch, w, h, cx, cy, PAD_BADGE_R);
     int light = pad_badge_gold();
     int dim = pad_badge_grey(110);
+    static const int arms[4][2] = { { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 0 } }; // left, down, up, right
+    pad_badge_put(buf, pitch, w, h, cx, cy, dim);
+    for (int a = 0; a < 4; a++) {
+        int color = (lit & (1 << a)) != 0 ? light : dim;
+        for (int t = 1; t <= 4; t++) {
+            for (int s = -1; s <= 1; s++) {
+                int dx = arms[a][0];
+                int dy = arms[a][1];
+                pad_badge_put(buf, pitch, w, h, cx + dx * t + (dy != 0 ? s : 0), cy + dy * t + (dx != 0 ? s : 0), color);
+            }
+        }
+    }
+}
+
+// For the bomb's SET TIMER window (inventory.cc, his „Varianta 1“ of 2026-11-15): up and down lit, for its +10 s / -10 s.
+void intface_pad_dpad(unsigned char* buf, int pitch, int w, int h, int cx, int cy, int lit)
+{
+    pad_badge_dpad(buf, pitch, w, h, cx, cy, lit);
+}
+
+// The static ones: 0 View (inventory), 1 Menu (pause), 2-4 the D-pad left / down / up.
+static void pad_badge_icon(unsigned char* buf, int pitch, int w, int h, int kind, int cx, int cy)
+{
+    if (kind >= 2) {
+        pad_badge_dpad(buf, pitch, w, h, cx, cy, 1 << (kind - 2)); // INTFACE_DPAD_LEFT / _DOWN / _UP
+        return;
+    }
+    pad_badge_disc(buf, pitch, w, h, cx, cy, PAD_BADGE_R);
+    int light = pad_badge_gold();
     if (kind == 0) {
         for (int i = 0; i < 5; i++) {
             pad_badge_put(buf, pitch, w, h, cx - 3 + i, cy - 3, light);
@@ -1365,24 +1451,11 @@ static void pad_badge_icon(unsigned char* buf, int pitch, int w, int h, int kind
             pad_badge_put(buf, pitch, w, h, cx - 1 + i, cy + 3, light);
             pad_badge_put(buf, pitch, w, h, cx + 3, cy - 1 + i, light);
         }
-    } else if (kind == 1) {
+    } else {
         for (int i = -3; i <= 3; i++) {
             pad_badge_put(buf, pitch, w, h, cx + i, cy - 3, light);
             pad_badge_put(buf, pitch, w, h, cx + i, cy, light);
             pad_badge_put(buf, pitch, w, h, cx + i, cy + 3, light);
-        }
-    } else {
-        static const int arms[4][2] = { { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 0 } }; // left, down, up, right
-        pad_badge_put(buf, pitch, w, h, cx, cy, dim);
-        for (int a = 0; a < 4; a++) {
-            int color = a == kind - 2 ? light : dim;
-            for (int t = 1; t <= 4; t++) {
-                for (int s = -1; s <= 1; s++) {
-                    int dx = arms[a][0];
-                    int dy = arms[a][1];
-                    pad_badge_put(buf, pitch, w, h, cx + dx * t + (dy != 0 ? s : 0), cy + dy * t + (dx != 0 ? s : 0), color);
-                }
-            }
         }
     }
 }

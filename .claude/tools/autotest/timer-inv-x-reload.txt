@@ -1,0 +1,60 @@
+# THE X THAT PRESSED PLACE MUST NOT EAT THE NEXT RELOAD (review 2026-11-15): the bomb's SET TIMER window opened from the
+# inventory, PLACE pressed with X -- the X marked on the plate. X is still down when the window has gone, so the hook
+# marked it spent (gpui_consumed_x); it came up while the inventory was still open, where nothing clears that mark,
+# and the first X tap back in the world -- the reload -- did nothing at all. Now a fresh press of X starts clean, as B
+# and Y always did. No weapon in hand here: the reload says so (reload-refused), which is the tap reaching it.
+# Before the fix (the implementer's exe): no reload line after the X tap.
+name timer-inv-x-reload
+map DESERT1.MAP
+seed 1
+duration 15
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 dynamite, row 1 plastic explosive
+dude item 85 1
+dude item 51 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+# A on the plastic explosive: its timer window
+tap +500 A
+shot +900
+# X = PLACE, let go in the inventory
+tap +600 X
+shot +900
+# BACK closes the inventory
+tap +600 BACK
+# X tapped in the world: the reload
+tap +1200 X
+shot +600
+note +1000 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=PLACE by=pad value=60
+expect \[INPUT/pad-spent\] held=x
+# the fix: the X tap in the world reaches the reload
+expect-count 1 \[INPUT/reload-refused\]|\[ACTION/reload\]

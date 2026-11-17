@@ -41,6 +41,12 @@ void interact_prompt_note_thrown(Object* item);
 // after everything else.
 void interact_prompt_note_opened(Object* obj);
 
+// The dude has just used a SHUT door that carries the lock flag (proto_instance.cc, _obj_use_door), and this
+// is its answer: opens = it swings open all the same (vanilla's engine only clicks the lock -- the door's own
+// script alone can stop it), false = its script kept it shut. The prompt offers the lockpick only after a
+// refusal, and never again on a door that has opened for him on this map.
+void interact_prompt_note_locked_door(Object* door, bool opens);
+
 // The right stick is pointing (every frame it is out): the prompt's target wears the yellow
 // outline until a moment after it comes home. See interact_prompt.cc.
 void interact_prompt_note_stick();

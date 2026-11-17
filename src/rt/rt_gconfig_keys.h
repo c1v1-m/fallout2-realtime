@@ -52,6 +52,13 @@
 // reloading in cover, searching the last known position, taking a much nearer foe, minding allies in
 // the line of fire (combat_rt.cc, rt_tactical_ai). 1 = on (his call, 2026-10-17), 0 = vanilla rules only.
 #define GAME_CONFIG_TACTICAL_AI_KEY "tactical_ai"
+// MODS "Attackers at once" (combat_rt.cc, rt_max_attackers): at most this many enemies attack the dude at one time, and as
+// many each companion, the rest wait their turn. 2 = his call (2026-11-16, after a six-raider ambush killed him in three
+// seconds; companions 2026-11-17), 0 = no limit.
+#define GAME_CONFIG_MAX_ATTACKERS_KEY "max_attackers"
+// MODS "Bonus Move" (combat_rt.cc, rt_bonus_move_refill): how fast the perk's movement reserve comes back while the dude
+// stands. 0 = Fast (the AP regen, as it was), 1 = Half turn (default, his „Ano, udělej“ 2026-11-17), 2 = Turn (vanilla).
+#define GAME_CONFIG_BONUS_MOVE_REFILL_KEY "bonus_move_refill"
 // Bullets, bolts and balls FLY and a sidestep makes them miss (combat_rt.cc, rt_projectiles; his design,
 // 2026-10-18). 1 = on (his pick), 0 = vanilla: a shot hits or misses the moment it is fired.
 #define GAME_CONFIG_PROJECTILES_KEY "projectiles"

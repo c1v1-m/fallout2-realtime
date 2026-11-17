@@ -1,0 +1,28 @@
+# Balance sim 2026-11-17, family MELEE: the dude with Spiked Knuckles (pid 234, unarmed 150) closes 10-14 tiles under
+# fire from 5 raiders with their guns from his real fight (trace_2026-11-17_173949: 2x Assault Rifle 23, 1x Combat
+# Shotgun 242 on pid 16777454; 2x Grease Gun SMG 332 on pid 16777455), then punches. NOW = the cfg's standing regen
+# curve (near 1.4 -> far 0.6); FLAT = no distance in the standing regen (near 1.0, far 1.0). Identical files except
+# the seed and the two cfg lines. Bot plan "hunt": the "fight" plan never walks (a fist would wait for gunners forever).
+name sim-melee-flat-s1
+map DESERT1.MAP
+seed 1
+duration 90
+dude tile 20100 rot 2
+dude stat ST 10
+dude stat PE 7
+dude stat AG 9
+dude stat EN 6
+dude hp 250
+dude skill unarmed 150
+dude armor 1
+dude wield 234
+cfg regen_near_mult 1.0
+cfg regen_far_mult 1.0
+
+spawn 16777454 22100 rot 5 wield 23 item 35 2 hostile
+spawn 16777455 22104 rot 5 wield 332 item 357 3 hostile
+spawn 16777455 22096 rot 5 wield 332 item 357 3 hostile
+spawn 16777454 22502 rot 5 wield 242 item 95 2 hostile
+spawn 16777454 22496 rot 5 wield 23 item 35 2 hostile
+
+at 0 hunt

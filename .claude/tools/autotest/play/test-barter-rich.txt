@@ -1,0 +1,48 @@
+# TEST (2026-11-15, the barter badges): THOUSANDS OF CAPS ON THE TRADER'S TABLE beside the X badge. Maida's own purse
+# is about 200 caps, so her place at the bar goes to a copy of her with 30000 caps and her own script (KCMaida.int =
+# scripts.lst line 80; her proto has none) -- cleararea takes the real one (1 tile from the dude) off first.
+# The dude sells: 40 stimpaks (row 1) and 5 rocket launchers (row 0).
+#   1 the trade opens
+#   2 DOWN, LT+A: all the stimpaks onto his table -> OVERPAY
+#   3 X: her caps go onto her table to even it -> "$7000"-ish on her side, next to the X badge, DEAL OK
+#   4 LT+A: all the launchers onto his table -> OVERPAY
+#   5 X: more of her caps onto her table -> a five-digit total next to the X badge
+#   6 Y: offer (accepted)          7 B: the talk
+name test-barter-rich
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 29
+dude tile 22879 rot 0
+dude item 40 40
+dude item 13 5
+cleararea 2
+
+spawn 16777273 22678 rot 2 item 41 30000 script 80
+
+talk 2000 16777273
+tap 6000 Y
+shot 8500
+tap 9000 DOWN
+axis 10000 LT 32767
+tap 10400 A 150
+axis 11000 LT -32768
+shot 12000
+tap 12500 X
+shot 14000
+axis 15000 LT 32767
+tap 15400 A 150
+axis 16000 LT -32768
+shot 17000
+tap 17500 X
+shot 19000
+tap 20000 Y
+shot 22000
+tap 23000 B
+shot 26000
+note 27500 end
+
+expect \[FLOW/autotest\] script pid=16777273 line=80 rc=0
+expect autotest\] talk t=\d+ pid=16777273 id=\d+ dist=1 rc=0
+expect-count 2 barter-auto-moved\]
+expect barter-offer\] rc=0

@@ -1,0 +1,56 @@
+# THE A MARK TELLS THE TRUTH (review 2026-11-15): the bomb's SET TIMER window, opened from the WORLD (the RB quick slot),
+# marks A on DONE and hides the pointer after two seconds of rest. A pressed the button under a pointer that had
+# moved since the open -- hidden or not -- so one push of the left stick left the pointer on CANCEL, two seconds hid
+# it, and the A the window marks on DONE pressed an invisible CANCEL: the bomb not armed, the quick slot's AP spent
+# all the same. Now A follows the pointer only while its arrow is on the screen; with no arrow showing, A is DONE.
+# 1st window: one push right (the arrow on CANCEL), two seconds of rest (hidden), the D-pad to 1:30, A -- DONE, and
+# the armed bomb goes down (in Fallout 2 the world's DONE puts it down, gamepad_ui.cc gpui_quick_use_item).
+# 2nd window: up and down (the arrow onto PLACE, then CANCEL) and A at once -- the arrow is showing, so A presses
+# CANCEL, the button it is on: the snap + A route is kept.
+# Before the fix (the implementer's exe): the 1st window closed as CANCEL (value 90), nothing went down.
+name timer-world-a-hidden
+map DESERT1.MAP
+seed 1
+duration 18
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 2
+dude quickslot rb 85
+
+tap 1500 RB
+# the left stick: one snap onto CANCEL
+axis 3000 LX 32767
+axis +150 LX 0
+shot +400
+note +2600 two seconds of rest
+shot +100
+tap +400 UP
+tap +400 UP
+tap +400 UP
+shot +500
+# A, with the arrow hidden on CANCEL
+tap +500 A
+shot +1500
+# the second window
+tap +1500 RB
+axis +1500 LY -32767
+axis +150 LY 0
+axis +350 LY 32767
+axis +150 LY 0
+shot +300
+# A at once: the arrow is on CANCEL
+tap +300 A
+shot +1200
+
+# the checks (run.js)
+expect-count 2 \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-cursor\] hidden why=idle
+# the fix: the hidden pointer rests on CANCEL, and A is DONE as its badge says
+expect \[FLOW/timer-a\] arrow=hidden under=CANCEL to=DONE
+expect \[FLOW/timer-window\] close key=DONE by=pad value=90
+expect-count 1 \[ACTION/explosive-placed\] pid=209
+# the route kept: with the arrow showing, A presses the button it is on
+expect \[FLOW/timer-a\] arrow=shown under=CANCEL to=CANCEL
+expect \[FLOW/timer-window\] close key=CANCEL by=pad value=60
+expect-count 1 \[FLOW/timer-window\] close key=CANCEL

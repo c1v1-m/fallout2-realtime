@@ -1,0 +1,47 @@
+# SCREEN TEST (Fallout 2 Realtime 2026-11-15, his „dáme tlačítka k pokládání bomby, ať nemusí hráč left joystickem
+# vybírat příkazy“, his pick „Varianta 1“): the bomb's SET TIMER window names its pad buttons. Opened from the RB quick
+# slot (plastic explosive bound to it), as he opens it. The first shot is the window at rest: A on DONE, B on CANCEL,
+# X on PLACE, the D-pad (up and down lit) right of the clock, the pointer hidden. The left stick snaps the pointer onto
+# a button -- the arrow comes back (second shot) -- and 2 s of rest hide it again (third shot). Then the D-pad takes
+# the clock down to 0:10 and X places it: the window's own buttons, unchanged.
+name screen-timer-marks
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 10
+dude item 85 2
+dude quickslot rb 85
+
+tap 1500 RB
+shot 2600
+# the left stick: one snap onto a button
+axis 3000 LX 32767
+axis +600 LX 0
+shot +400
+note +2600 two seconds of rest
+shot +100
+tap +400 DOWN
+tap +400 DOWN
+tap +400 DOWN
+tap +400 DOWN
+tap +400 DOWN
+shot +500
+tap +500 X
+shot +1200
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[INPUT/pad-owned\] on
+expect-count 1 \[FLOW/timer-marks\] shown=1
+expect-not \[FLOW/timer-marks\] shown=0
+expect \[FLOW/timer-cursor\] hidden$
+expect \[FLOW/timer-cursor\] shown at=
+expect \[FLOW/timer-cursor\] hidden why=idle
+expect \[FLOW/timer-window\] close key=PLACE by=pad value=10
+expect \[INPUT/pad-owned\] off
+expect \[ACTION/quick-use-item\] pid=85 rc=2
+expect \[ACTION/explosive-place-start\] pid=209
+expect \[ACTION/explosive-placed\] pid=209
+expect \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=259x162

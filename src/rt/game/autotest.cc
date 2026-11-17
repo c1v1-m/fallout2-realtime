@@ -18,11 +18,13 @@
 #include <SDL.h>
 
 #include "game/combat_rt.h"
+#include "game/combatai.h" // aiSetChemUse, the spawn option `chem`
 #include "game/interact_prompt.h"
 #include "game/critter.h"
 #include "game/editor.h"
 #include "game/game.h"
 #include "game/game_trace.h"
+#include "game/gconfig.h" // game_config, for the `cfg` lines (autotest_apply_cfg)
 #include "game/gamepad_ui.h"
 #include "game/gdialog.h"
 #include "game/intface.h"
@@ -65,9 +67,11 @@ namespace fallout {
 //                                      master_patches folder: copy the player's save there), map scripts on; `map` still names
 //                                      a map to boot into first. The dude is the save's: no HP reset
 //   cleararea <tiles>                  every other critter within that many tiles of the dude is removed
-//   sethp <pid> <percent> <seconds> [knock]  at that time the first living critter of that pid on the dude's floor
+//   sethp <pid> <percent> <seconds> [knock|ko]  at that time the first living critter of that pid on the dude's floor
 //                                      drops to that percent of its maximum HP (a boss's phases); `knock`
-//                                      also knocks it down where it stands, as a knockdown hit does
+//                                      also knocks it down where it stands, as a knockdown hit does; `ko`
+//                                      knocks it OUT (unconscious) for the rest of the test
+//   stagger <seconds>                  at that time the dude staggers as a hit makes him (combat_rt_test_stagger)
 //   duration <seconds>                 hard stop (default 60)
 //   dude tile <t> [rot <0-5>]
 //   dude elevation <0-2>               the floor of the map (default: the map's entrance floor); the
@@ -78,7 +82,7 @@ namespace fallout {
 //              traps|science|repair|speech|doctor> <level>
 //   dude item <pid> [qty]
 //   dude wield <pid>                   added and put in the active hand, loaded
-//   dude armor <pid>
+//   dude armor <pid>                   worn, with its AC / DT / DR as the inventory screen gives them
 //   dude quickslot <lb|rb> <pid>       bind that item to the quick slot (a tool, a drug, a grenade)
 //   dude curhp <n>                     start with n hit points (after the maximum is set)
 //   dude sneak                         start sneaking (the Sneak toggle; the skill roll is the game's)
@@ -238,6 +242,8 @@ typedef struct AtSpawn {
     bool empty; // "empty": the wielded gun starts with no rounds in it
     bool dead; // "dead": killed where it stands, a body to loot
     bool party; // "party": joins the dude's party (partyMemberAdd) -- a real follower, not just his team
+    int dist; // "dist <n>": its COMBAT CONTROL "Distance" (DISTANCE_*, Fallout 2), -1 = its packet's own
+    int chem; // "chem <n>": its COMBAT CONTROL "Chem use" (CHEM_USE_*, Fallout 2), -1 = its packet's own
     // "script <n>" (Fallout 2): the critter runs the script on line n of scripts.lst (1-based, as an encounter table's
     // Script= names it), its proto's own replaced -- a companion's party script (DCVic.int is line 50), heartbeat and
     // all, so its own follow and its other habits are part of the test.
@@ -262,6 +268,21 @@ static char at_map_name[64] = "";
 static char at_file[260] = "";
 static int at_seed = 1;
 static bool at_map_script = false;
+static bool at_planet_shots = false; // "planetshots on": the loading planet's frames as presented (autotest_planet_frame)
+
+// "cfg <key> <value>": a [preferences] value of THIS run only, set over the folder's fallout2.cfg before combat_rt and the
+// pad read their levers (autotest_apply_cfg, game.cc) -- the same fight under another balance without touching the file
+// (2026-11-17, his „ano nasimuluj“: the AP regen with and without distance). A self-played run never saves the cfg.
+#define AT_MAX_CFG 16
+static char at_cfg_key[AT_MAX_CFG][48];
+static char at_cfg_value[AT_MAX_CFG][32];
+static int at_cfg_count = 0;
+
+// "record <ms>": a presented frame every <ms> (autotest_tick), the frames of a video. 0 = off.
+#define AT_RECORD_MAX 900
+static int at_record_ms = 0;
+static int at_record_count = 0;
+static unsigned int at_record_last = 0;
 static int at_load_slot = 0;
 static char at_party_export[128] = ""; // F2: scenario "partyexport" -- the companions out to this file
 static char at_party_import[128] = ""; // F2: scenario "partyimport" -- the companions in this file back in
@@ -313,8 +334,14 @@ typedef struct AtSetHp {
     float at;
     bool done;
     bool knock; // and knocked down where it stands (combat_rt_test_knockdown)
+    bool ko; // knocked OUT instead: unconscious, as a critical can leave it
 } AtSetHp;
 static AtSetHp at_sethp[AT_MAX_SETHP];
+// "stagger <seconds>": the dude staggers then, as a hit makes him -- a heal jab cut on cue (2026-11-16).
+#define AT_MAX_STAGGERS 4
+static float at_stagger_at[AT_MAX_STAGGERS];
+static bool at_stagger_done[AT_MAX_STAGGERS];
+static int at_stagger_count = 0;
 static int at_sethp_count = 0;
 static int at_dude_stats[7] = { -1, -1, -1, -1, -1, -1, -1 };
 static int at_dude_skills[SKILL_COUNT];
@@ -355,6 +382,8 @@ enum {
     AT_STEP_WMAT, // index = world map area the party is put on
     AT_STEP_SQUAD, // text = order, index = who (a companion's pid, -1 = all), value = its argument
     AT_STEP_HOSTILE, // index = pid: the nearest critter of it turns on the dude, as a script's attack() does
+    AT_STEP_MOUSE, // index = dx, value = dy: what a real mouse says on the next frame (autotest_take_mouse)
+    AT_STEP_SCREEN, // a screenshot of the PRESENTED frame -- the screen surface itself, not a recomposition (at_dump_presented)
 };
 
 enum {
@@ -436,6 +465,8 @@ static Uint32 at_tl_t0 = 0; // SDL_GetTicks() at the start line
 static int at_tl_shift = 0; // ms the timeline waited for a game-loop open
 static int at_tl_next = 0;
 static int at_tl_open = -1; // the AT_STEP_OPEN step waiting for autotest_tick, or -1
+static int at_mouse_dx = 0; // AT_STEP_MOUSE motion not yet taken by the mouse hook (autotest_take_mouse)
+static int at_mouse_dy = 0;
 static int at_tl_modal = -2; // the topmost modal window last traced (-2 = none traced yet)
 
 static void at_trim(char* s)
@@ -644,9 +675,27 @@ static bool at_parse_step(char** tok, int n)
     bool wmat = strcmp(tok[0], "wmat") == 0;
     bool squad = strcmp(tok[0], "squad") == 0;
     bool hostile = strcmp(tok[0], "hostile") == 0;
+    bool mouse = strcmp(tok[0], "mouse") == 0;
+    bool screen = strcmp(tok[0], "screen") == 0;
     if (!button && !tap && !axis && !open && !note && !walkto && !talk && !shot && !mapgo && !clock && !area && !wmat
-        && !squad && !hostile) {
+        && !squad && !hostile && !mouse && !screen) {
         return false;
+    }
+    // screen <ms>: what the monitor shows (at_dump_presented) -- `shot` cannot see a picture that never reached it.
+    if (screen && n >= 2) {
+        at_add_step(at_step_time(tok[1]), AT_STEP_SCREEN, 0, 0);
+        return true;
+    }
+    // mouse <ms> <dx> <dy> [<count> <every ms>]: a REAL mouse's motion, as the pad's mouse hook gets it (for the
+    // twitch filter, gpui_mouse_twitch_filter); count/every repeat it, e.g. a 1-count jitter.
+    if (mouse && n >= 4) {
+        int count = n >= 6 ? atoi(tok[4]) : 1;
+        int every = n >= 6 ? atoi(tok[5]) : 0;
+        int ms = at_step_time(tok[1]);
+        for (int i = 0; i < (count > 0 ? count : 1); i++) {
+            at_add_step(ms + i * every, AT_STEP_MOUSE, atoi(tok[2]), atoi(tok[3]));
+        }
+        return true;
     }
     if (shot && n >= 2) {
         at_add_step(at_step_time(tok[1]), AT_STEP_SHOT, 0, 0);
@@ -804,6 +853,14 @@ static bool at_parse(const char* path)
             at_projectile_speedup = (float)atof(tok[1]);
         } else if (strcmp(tok[0], "mapscript") == 0 && n >= 2) {
             at_map_script = strcmp(tok[1], "on") == 0;
+        } else if (strcmp(tok[0], "planetshots") == 0 && n >= 2) {
+            at_planet_shots = strcmp(tok[1], "on") == 0;
+        } else if (strcmp(tok[0], "record") == 0 && n >= 2) {
+            at_record_ms = atoi(tok[1]) < 0 ? 0 : atoi(tok[1]);
+        } else if (strcmp(tok[0], "cfg") == 0 && n >= 3 && at_cfg_count < AT_MAX_CFG) {
+            SDL_strlcpy(at_cfg_key[at_cfg_count], tok[1], sizeof(at_cfg_key[0]));
+            SDL_strlcpy(at_cfg_value[at_cfg_count], tok[2], sizeof(at_cfg_value[0]));
+            at_cfg_count++;
         } else if (strcmp(tok[0], "reload") == 0) {
             at_reload = true;
         } else if (strcmp(tok[0], "partyexport") == 0 && n >= 2) {
@@ -815,12 +872,17 @@ static bool at_parse(const char* path)
             at_map_script = true;
         } else if (strcmp(tok[0], "cleararea") == 0 && n >= 2) {
             at_clear_radius = atoi(tok[1]);
+        } else if (strcmp(tok[0], "stagger") == 0 && n >= 2 && at_stagger_count < AT_MAX_STAGGERS) {
+            at_stagger_at[at_stagger_count] = (float)atof(tok[1]);
+            at_stagger_done[at_stagger_count] = false;
+            at_stagger_count++;
         } else if (strcmp(tok[0], "sethp") == 0 && n >= 4 && at_sethp_count < AT_MAX_SETHP) {
             at_sethp[at_sethp_count].pid = atoi(tok[1]);
             at_sethp[at_sethp_count].pct = atoi(tok[2]);
             at_sethp[at_sethp_count].at = (float)atof(tok[3]);
             at_sethp[at_sethp_count].done = false;
             at_sethp[at_sethp_count].knock = n >= 5 && strcmp(tok[4], "knock") == 0;
+            at_sethp[at_sethp_count].ko = n >= 5 && strcmp(tok[4], "ko") == 0;
             at_sethp_count++;
         } else if (strcmp(tok[0], "mapvar") == 0 && n >= 3 && at_mvar_count < AT_MAX_GVARS) {
             at_mvar_index[at_mvar_count] = atoi(tok[1]);
@@ -879,6 +941,8 @@ static bool at_parse(const char* path)
             sp->rotation = -1;
             sp->wield = -1;
             sp->team = -1;
+            sp->chem = -1;
+            sp->dist = -1;
             for (int i = 3; i < n; i++) {
                 if (strcmp(tok[i], "rot") == 0 && i + 1 < n) {
                     sp->rotation = atoi(tok[++i]);
@@ -897,6 +961,10 @@ static bool at_parse(const char* path)
                     sp->curhp = atoi(tok[++i]);
                 } else if (strcmp(tok[i], "dead") == 0) {
                     sp->dead = true;
+                } else if (strcmp(tok[i], "dist") == 0 && i + 1 < n) {
+                    sp->dist = atoi(tok[++i]);
+                } else if (strcmp(tok[i], "chem") == 0 && i + 1 < n) {
+                    sp->chem = atoi(tok[++i]);
                 } else if (strcmp(tok[i], "party") == 0) {
                     sp->party = true;
                 } else if (strcmp(tok[i], "empty") == 0) {
@@ -949,6 +1017,74 @@ bool autotest_init(int argc, char** argv)
         SDL_setenv("SDL_AUDIODRIVER", "dummy", 1);
     }
     return at_active;
+}
+
+// The pad's mouse hook, first thing: adds what the scenario's `mouse` steps said since the last frame to the real
+// mouse's delta, as if a mouse had moved.
+// ⚠️ THE `shot` STEP CANNOT SEE WHAT THE PLAYER SEES (2026-11-17). dump_screen = takeScreenshot, which REDRAWS every
+// window into its own buffer (windowRefreshAll through screenshotBlitter) -- the game's F12 the same. A picture drawn into
+// a window's buffer but never refreshed onto the screen (buttonCreate draws with draw=false) is in every such shot and on
+// no monitor: the talk panel's pad badges for three days -- his own Windows screenshot showed the art's red dots where
+// every self-played shot and his F12 showed Y and X. This saves the 8-bit screen surface the frame is presented from
+// (gSdlSurface; _GNW95_ShowRect copies each refreshed rect from it to the texture), mouse cursor included, under the next
+// free scrNNNNN.bmp like a shot.
+static void at_dump_presented()
+{
+    if (gSdlSurface == nullptr) {
+        return;
+    }
+    int w = gSdlSurface->w;
+    int h = gSdlSurface->h;
+    unsigned char* buf = (unsigned char*)malloc(w * h);
+    if (buf == nullptr) {
+        return;
+    }
+    if (SDL_LockSurface(gSdlSurface) == 0) {
+        for (int y = 0; y < h; y++) {
+            memcpy(buf + y * w, (unsigned char*)gSdlSurface->pixels + y * gSdlSurface->pitch, w);
+        }
+        SDL_UnlockSurface(gSdlSurface);
+        screenshotHandlerDefaultImpl(w, h, buf, _getSystemPalette());
+    }
+    free(buf);
+}
+
+void autotest_apply_cfg()
+{
+    if (!at_active) {
+        return;
+    }
+    for (int i = 0; i < at_cfg_count; i++) {
+        bool ok = config_set_string(&game_config, GAME_CONFIG_PREFERENCES_KEY, at_cfg_key[i], at_cfg_value[i]);
+        trace_event(ok ? TRACE_FLOW : TRACE_ERR, "autotest", "cfg %s=%s ok=%d", at_cfg_key[i], at_cfg_value[i], ok ? 1 : 0);
+    }
+}
+
+// A frame of the loading planet is up (game_mouse.cc). A load runs no game loop, so no `screen` step can
+// shoot it: in a scenario that says `planetshots on`, the first two frames of each load (`first` = the planet
+// has just come up) are saved as presented, each as the next scrNNNNN.bmp, at most eight in a run.
+void autotest_planet_frame(bool first)
+{
+    static int shots = 0;
+    static int thisLoad = 0;
+    if (first) {
+        thisLoad = 0;
+    }
+    if (!at_active || !at_planet_shots || shots >= 8 || thisLoad >= 2) {
+        return;
+    }
+    shots++;
+    thisLoad++;
+    at_dump_presented();
+    trace_event(TRACE_FLOW, "autotest", "planet-screen n=%d", shots);
+}
+
+void autotest_take_mouse(int* dx, int* dy)
+{
+    *dx += at_mouse_dx;
+    *dy += at_mouse_dy;
+    at_mouse_dx = 0;
+    at_mouse_dy = 0;
 }
 
 bool autotest_active()
@@ -1149,7 +1285,20 @@ void autotest_setup_world()
     if (at_dude_armor >= 0) {
         Object* armor = at_give(obj_dude, at_dude_armor, 1);
         if (armor != NULL) {
+            // inven_wield only DRESSES the dude: for him vanilla leaves the armour's numbers to the
+            // caller -- the inventory screen and the script's wield_obj_critter both run _adjust_ac
+            // themselves. Without this the test dude fought in the armour's art at his bare AC and
+            // 0 DR (Leather Armor: AC 9 where the player's own trace says 24, 2026-11-17).
+            Object* oldArmor = inven_worn(obj_dude);
             inven_wield(obj_dude, armor, 0);
+            if (inven_worn(obj_dude) == armor) {
+                adjust_ac(obj_dude, oldArmor, armor);
+                intface_update_ac(false);
+            }
+            trace_event(TRACE_FLOW, "autotest", "dude armor pid=%d worn=%d ac=%d dt=%d dr=%d",
+                at_dude_armor, inven_worn(obj_dude) == armor ? 1 : 0,
+                stat_level(obj_dude, STAT_ARMOR_CLASS),
+                stat_level(obj_dude, STAT_DAMAGE_THRESHOLD), stat_level(obj_dude, STAT_DAMAGE_RESISTANCE));
         }
     }
     if (at_dude_wield >= 0) {
@@ -1270,6 +1419,16 @@ void autotest_setup_world()
             trace_event(TRACE_FLOW, "autotest", "party-add id=%d pid=%d rc=%d team=%d", critter->id, critter->pid, rc,
                 critter->data.critter.combat.team);
         }
+#if FALLOUT_RT_GAME == 2
+        if (sp->dist >= 0) {
+            int rc = aiSetDistance(critter, sp->dist);
+            trace_event(TRACE_FLOW, "autotest", "dist id=%d pid=%d dist=%d rc=%d", critter->id, critter->pid, sp->dist, rc);
+        }
+        if (sp->chem >= 0) {
+            int rc = aiSetChemUse(critter, sp->chem);
+            trace_event(TRACE_FLOW, "autotest", "chem id=%d pid=%d chem=%d rc=%d", critter->id, critter->pid, sp->chem, rc);
+        }
+#endif
         if (sp->dead) {
             critter_kill(critter, -1, true);
         }
@@ -1368,6 +1527,12 @@ void autotest_setup_world()
 
     trace_event(TRACE_FLOW, "autotest", "start scenario=%s file=%s map=%s seed=%d duration=%.0f dude=%d spawns=%d pad=%d steps=%d",
         at_name, at_file, at_map_name, at_seed, at_duration, obj_dude->tile, at_spawn_count, at_joy_index, at_step_count);
+    // The `cfg` lines went in before the trace was open (autotest_apply_cfg): what the game holds now, read back.
+    for (int i = 0; i < at_cfg_count; i++) {
+        char* now = NULL;
+        config_get_string(&game_config, GAME_CONFIG_PREFERENCES_KEY, at_cfg_key[i], &now);
+        trace_event(TRACE_FLOW, "autotest", "cfg %s=%s now=%s", at_cfg_key[i], at_cfg_value[i], now != NULL ? now : "-");
+    }
 
     if (at_step_count > 0) {
         at_tl_start();
@@ -1719,6 +1884,14 @@ static void at_tl_bk()
             at_button((SDL_GameControllerButton)st->index, st->value != 0);
             trace_event(TRACE_FLOW, "autotest", "pad t=%d %s=%d", t, at_button_name(st->index), st->value);
             break;
+        case AT_STEP_SCREEN:
+            at_dump_presented();
+            trace_event(TRACE_FLOW, "autotest", "screen t=%d", t);
+            break;
+        case AT_STEP_MOUSE:
+            at_mouse_dx += st->index;
+            at_mouse_dy += st->value;
+            break;
         case AT_STEP_AXIS:
             at_axis((SDL_GameControllerAxis)st->index, (Sint16)st->value);
             trace_event(TRACE_FLOW, "autotest", "axis t=%d %s=%d", t, at_axis_name(st->index), st->value);
@@ -1927,6 +2100,27 @@ void autotest_tick(float dt)
     }
     at_elapsed += dt;
 
+    // "record <ms>": a presented frame every <ms> of real time, for a video of the run (2026-11-17, his „jestli budeš mít
+    // někde video“). Not a timeline step, so the `at` bot plan still plays the fight. At most AT_RECORD_MAX frames.
+    if (at_record_ms > 0 && at_record_count < AT_RECORD_MAX) {
+        unsigned int now = SDL_GetTicks();
+        if (at_record_count == 0 || now - at_record_last >= (unsigned int)at_record_ms) {
+            at_record_last = now;
+            at_record_count++;
+            at_dump_presented();
+            if (at_record_count == 1 || at_record_count % 50 == 0) {
+                trace_event(TRACE_FLOW, "autotest", "record frame=%d every=%dms t=%.2f", at_record_count, at_record_ms, at_elapsed);
+            }
+        }
+    }
+
+    for (int i = 0; i < at_stagger_count; i++) {
+        if (!at_stagger_done[i] && at_elapsed >= at_stagger_at[i]) {
+            at_stagger_done[i] = true;
+            combat_rt_test_stagger(obj_dude);
+        }
+    }
+
     // Before the screen-test return: a screen test may photograph what a hit-point change starts.
     for (int i = 0; i < at_sethp_count; i++) {
         if (at_sethp[i].done || at_elapsed < at_sethp[i].at) {
@@ -1938,8 +2132,8 @@ void autotest_tick(float dt)
                 int maxHp = stat_level(o, STAT_MAXIMUM_HIT_POINTS);
                 o->data.critter.hp = maxHp * at_sethp[i].pct / 100;
                 trace_event(TRACE_FLOW, "autotest", "sethp id=%d pid=%d hp=%d/%d", o->id, o->pid, o->data.critter.hp, maxHp);
-                if (at_sethp[i].knock) {
-                    combat_rt_test_knockdown(o);
+                if (at_sethp[i].knock || at_sethp[i].ko) {
+                    combat_rt_test_knockdown(o, at_sethp[i].ko);
                 }
                 break;
             }

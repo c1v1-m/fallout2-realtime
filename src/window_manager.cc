@@ -1167,6 +1167,23 @@ int win_get_top_modal()
     return -1;
 }
 
+// Realtime build: windowGetAtPoint that skips hidden windows -- the window the player SEES at x,y, or -1.
+int win_get_top_visible_at(int x, int y)
+{
+    for (int index = gWindowsLength - 1; index >= 0; index--) {
+        Window* w = gWindows[index];
+        if ((w->flags & WINDOW_HIDDEN) != 0) {
+            continue;
+        }
+
+        if (x >= w->rect.left && x <= w->rect.right && y >= w->rect.top && y <= w->rect.bottom) {
+            return w->id;
+        }
+    }
+
+    return -1;
+}
+
 // Realtime build (ported from fallout1-ce gnw.cc): fills xs/ys with the SCREEN-space centres of the
 // enabled buttons of the topmost visible window that has any, up to maxCount, and returns the count.
 // Button rects are window-relative, so each centre is offset by the window's origin. Used for

@@ -1,0 +1,57 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): timer-world-a-drug's other half. The bomb's SET TIMER window opened from the
+# WORLD (the RB quick slot) with a stimpak in the active hand, DONE pressed with A and the A held on. After the window
+# the use-on tracker on the tick took the still-held A as a fresh press, and 220 ms into the hold it armed the
+# stimpak's use-on crosshair -- an aim nobody asked for, parked in front of the dude. Now the A that pressed DONE is
+# nobody's until it is let go.
+name timer-world-a-hold
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 stimpak, row 1 plastic explosive
+dude item 85 1
+dude item 40 1
+dude quickslot rb 85
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0, the stimpak)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+# X: the stimpak into hand A; BACK closes the inventory
+tap +400 X
+tap +500 BACK
+tap +1000 RB
+shot +900
+# A = DONE, held 0.8 s
+tap +500 A 800
+shot +1200
+note +1000 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] close key=DONE by=pad value=60
+expect \[INPUT/pad-spent\] held=a
+expect \[ACTION/explosive-placed\] pid=209
+# the leak: no use-on crosshair armed by the A that pressed DONE -- an armed crosshair takes the use prompt down, so
+# the prompt never offers the bomb just put on the ground (pid 209, kind 2 = pick up); without it, it does
+expect-not \[INPUT/useon-arm\]
+expect \[FLOW/ip-show\] pid=209 kind=2

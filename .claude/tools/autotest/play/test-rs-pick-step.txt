@@ -1,0 +1,22 @@
+# F2 (2026-11-15, his „Skáče to jinam“ about picking people/things with the right stick): one push = one step from the
+# current target; holding the stick or letting it go changes nothing. Klamath downtown, by Maida's bar.
+name test-rs-pick-step
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 12
+dude tile 22879 rot 0
+
+shot 2000
+note 2400 push right and HOLD 1.5 s
+axis 2500 RX 32767
+axis +1500 RX 0
+shot +600
+note +200 push left
+axis +200 RX -32767
+axis +500 RX 0
+shot +600
+note +200 push left again
+axis +200 RX -32767
+axis +500 RX 0
+shot +600

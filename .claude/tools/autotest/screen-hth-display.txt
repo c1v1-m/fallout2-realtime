@@ -1,0 +1,17 @@
+# F2 (2026-11-16, HtH perk and Spiked Knuckles): what the INVENTORY (Dmg: of the knuckles) and the character SHEET
+# (Melee Damage) show with ST 6, without the perk; the -p1 copy adds Bonus HtH Damage x1. Damage itself: play/test-hth-knuckles.
+name screen-hth-display
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude stat ST 6
+dude wield 234
+
+open 1000 inventory
+shot 3000
+tap 4000 BACK
+open 5500 sheet
+shot 7500
+tap 8500 B
+note 10000 every screen should be closed

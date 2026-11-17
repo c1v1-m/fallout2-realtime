@@ -1,0 +1,36 @@
+# The MODS row "Attackers at once" (2026-11-16): PREFERENCES, X for MODS, then up seven rows from the top (the list
+# wraps): Internal resolution, Screen resolution, Rumble, Blast ring, Name the action, Projectiles, onto it. Shot on 2
+# (the default), LB, shot on 1, RB back to 2, B out of all three. 27 rows at 480 lines in Fallout 2 now.
+name screen-mods-attackers-f2
+map DESERT1.MAP
+seed 1
+duration 19
+dude tile 20100 rot 2
+
+# START tapped: the pause menu opens on the release, its highlight on SAVE GAME
+open 1000 options
+# SAVE -> LOAD -> PREFERENCES, A opens it
+tap 2200 DOWN
+tap 2700 DOWN
+tap 3200 A
+# X opens MODS from Preferences
+tap 4600 X
+# the top row wraps to the bottom: Internal resolution, Screen resolution, Rumble, Blast ring
+tap 5800 UP
+tap 6300 UP
+tap 6800 UP
+tap 7300 UP
+tap 7800 UP
+tap 8300 UP
+tap 8800 UP
+shot 9600
+tap 10400 LB
+shot 11200
+tap 12000 RB
+# B closes MODS, B cancels Preferences, B shuts the pause menu
+tap 13000 B
+tap 14200 B
+tap 15400 B
+note 17000 the world should be back
+
+expect \[FLOW/autotest\] end why=time .* modal=-1

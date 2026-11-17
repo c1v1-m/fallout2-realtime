@@ -1,0 +1,30 @@
+# TESTER (2026-11-15): X ("even the deal") in a COMPANION's trade, where the screen now wears an X badge beside the
+# readout. A companion's trade weighs the piles (_barter_compute_value returns the weight of his table), but X's
+# barter_auto_offer prices them: four Miniguns on Vic's table read "SHORT 124" (124 lb), and X would move 124 of the
+# dude's caps onto his offer -- a gift to a companion for what is a free swap. Y (barter_even_if_short) skips companions.
+# FIXED the same day: X refuses there with the buzzer (barter-auto-refused why=companion); no readout, no X badge.
+name test-companion-trade-x
+map DESERT1.MAP
+seed 1
+duration 18
+dude tile 20100 rot 2
+dude item 41 500
+
+spawn 16777278 20302 rot 4 wield 8 item 12 4 party script 50
+
+talk 1500 16777278
+tap 5000 Y
+tap 7500 LB
+axis 9000 LT 32767
+tap 9300 A
+axis 9700 LT -32768
+shot 10500
+tap 11500 X
+shot 12800
+tap 14000 B
+note 16500 end
+
+expect \[FLOW/autotest\] talk .*rc=0
+expect barter-a\] list=3 row=0 pid=12
+expect barter-auto-refused\] why=companion
+expect-not barter-auto-moved\]

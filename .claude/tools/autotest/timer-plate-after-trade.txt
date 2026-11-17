@@ -1,0 +1,52 @@
+# THE PLACE PLATE AFTER A TRADE (review 2026-11-15): MOVE ITEMS -- the amount picker, here RT's in the trade -- drew its
+# word ALL straight into FRM 307 / 308 as the art cache holds them, and the word stayed there while the cache kept the
+# frames. The bomb's SET TIMER window copies those same frames for its PLACE plate and draws PLACE over them with the
+# same font, row and colours, which blend instead of covering: after a trade the plate read PLACE with ALL printed
+# through it, X badge and all. Now ALL goes into copies, as PLACE always did.
+# The timer window once before the trade (shot 1: the plate as the art has it), the trade (shot 3: MOVE ITEMS and its
+# ALL, unchanged), the timer window again from the same quick slot (shot 4: the same plate as shot 1).
+# timer-plate traces the plate's art as the cache hands it out beside the first one this run saw: equal = clean.
+name timer-plate-after-trade
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 29
+dude tile 22879 rot 0
+dude skill traps 150
+dude item 85 2
+dude item 41 2000
+dude quickslot rb 85
+
+# the timer window before any trade
+tap 1500 RB
+shot 2600
+tap 3000 B
+# the trade: RT asks how many caps (MOVE ITEMS), UP UP makes it 3, A confirms, X evens, B leaves the trade
+talk 5000 16777273
+tap 9000 Y
+shot 11500
+axis 12000 RT 32767
+axis 12150 RT -32768
+tap 13000 UP 60
+tap 13500 UP 60
+shot 14000
+tap 14500 A
+tap 16500 X
+tap 18500 B
+# the conversation: UP from the first answer wraps to the last, "Goodbye", and A says it
+tap 20500 UP
+tap 21300 A
+# the timer window again, from the same quick slot
+tap 24000 RB
+shot 25100
+tap 26000 B
+note 27500 done
+
+# the checks (run.js)
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect barter-auto\] want=\d+ give=3 .*ptableCaps=3
+expect-count 2 \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect-count 3 \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+expect \[FLOW/autotest\] end why=time .* modal=-1
+# the fix: after MOVE ITEMS' ALL the plate's art is still the art the first timer window had
+expect-count 2 \[FLOW/timer-plate\] art=([0-9a-f]{8}) first=\1

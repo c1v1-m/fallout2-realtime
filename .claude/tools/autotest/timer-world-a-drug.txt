@@ -1,0 +1,71 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): the bomb's SET TIMER window opened from the WORLD (the RB quick slot) with a
+# stimpak in the active hand -- a drug is a use-on item -- and a body lying beside the dude, so the use prompt offers
+# its LOOT. The window closed with A. Inside the window the mouse hook still saw A's press and, with a use-on item in
+# hand, deferred the prompt's interaction to the release; after the window the use-on tracker on the tick took the
+# still-held A as a fresh press, and its release ran that interaction -- the body's loot window opened. Now the hook
+# stands aside while the window is up, and the A that closed it is nobody's until it is let go.
+# ⚠️ A on CANCEL (the left stick snaps the pointer onto it, and A presses the button under a moved pointer), not A on
+# DONE: in Fallout 2 DONE from the world puts the bomb down with a bend, and the prompt refuses an interaction while
+# the dude is busy (interact_prompt_request) -- the bend hid this leak after DONE, not after CANCEL. DONE's held A is
+# timer-world-a-hold.
+# The stimpak goes into hand A the pad's way (`dude wield` cannot hold a drug): the inventory, the left stick onto it
+# (row 0), X, BACK.
+name timer-world-a-drug
+map DESERT1.MAP
+seed 1
+duration 14
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 stimpak, row 1 plastic explosive
+dude item 85 1
+dude item 40 1
+dude quickslot rb 85
+spawn 16777455 20101 rot 5 item 41 20 item 40 1 dead
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0, the stimpak)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+# X: the stimpak into hand A; BACK closes the inventory
+tap +400 X
+tap +500 BACK
+shot +900
+tap +600 RB
+# the left stick: down (the pointer, left on the inventory's top row, snaps onto DONE), then right (CANCEL)
+axis +900 LY 32767
+axis +150 LY 0
+axis +350 LX 32767
+axis +150 LX 0
+shot +400
+# A presses CANCEL, the button under the moved pointer
+tap +500 A
+shot +1500
+note +1000 done
+
+# the checks (run.js)
+expect \[INPUT/inv-equip\] in hand=A pid=40 row=0
+expect \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-window\] close key=CANCEL by=pad value=60
+# the leak: the A that closed the window must not run the prompt's action (the body's loot)
+expect-not \[ACTION/interact-queue\]
+expect-not \[ACTION/loot-open\]
+expect-not \[INPUT/a-deferred-interact\]

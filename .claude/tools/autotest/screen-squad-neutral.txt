@@ -2,11 +2,15 @@
 # the cursor on a peaceful ghoul left the compass's "Attack" grey and A buzzed; now a neutral takes ATTACK as an enemy
 # does, in the yellow the LT lock gives a neutral (red stays an enemy's). Vic (10mm pistol) 4 tiles left of the dude,
 # Sulik (knife) right below him; a ghoul (the pid of his Gecko ghoul), neutral, 8 tiles in front. LT locks it (nobody
-# fights him: the neutral in front), A opens the mode with the cursor on it. Shots (the screen's 853x480):
+# fights him: the neutral in front), A opens the mode with the cursor on it.
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the ATTACK (half a second later),
+# so the world runs again -- the chevron goes up over the ghoul and their blow starts the fight. Shots (853x480):
 #   1 after the hold: ATTACK in YELLOW over the ghoul, yellow corner brackets round it, white outlines round Vic and
-#     Sulik (who = All), the compass's "Attack" white, the legend "LB RB All  A Attack  X Hold fire  Y No healing  B Back"
-#   2 A: ATTACK to All -- given, the mode closes; "On it." over the nearest, the red chevron over the ghoul (the focus)
-#   3 the fight their order started: the ghoul turned on them
+#     Sulik (who = All), the compass's "Attack" white, the legend
+#     "LB RB All  A Attack  RS Next companion  X Hold fire  Y No healing  LS Keep distance  B Back"
+#   2 A: ATTACK to All -- given, a click, and the mode is still up: "On it." over the nearest, where his name was
+#   3 B: the mode closed; the red chevron over the ghoul (the focus)
+#   4 the fight their order started: the ghoul turned on them
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-neutral.txt 1 --exe build/Release/fallout2-ce.exe
 name screen-squad-neutral
 map DESERT1.MAP
@@ -26,9 +30,12 @@ axis 600 LT 32767
 tap 800 A
 axis 1100 LT -32768
 shot 2600
-# A: ATTACK to All, the mode closes
+# A: ATTACK to All -- it clicks and the mode stays (the world still held)
 tap 3000 A
-shot 3400
+shot 3300
+# B: the mode closes and the world runs -- the chevron, then their blow
+tap 3500 B
+shot 3900
 shot 6500
 note 9000 end
 
@@ -40,10 +47,13 @@ expect \[INPUT/squad-cursor\] on kind=neutral ok=1 obj=\d+ pid=16777375
 expect \[INPUT/squad-a\] kind=neutral order=attack obj=\d+ tile=\d+ who=all ok=1
 expect \[ACTION/squad-order\] order=attack target=16777375 companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
 expect \[FLOW/squad-focus\] on id=\d+ pid=16777375 tile=\d+ hostile=0
+# the order clicks and the mode stays; B alone closes it, after the hold -- which held all along (rtHeld 0)
+expect-count 1 \[INPUT/squad-mode\] stays after=a order=attack speaker=\d+
+expect-count 1 \[INPUT/squad-mode\] close why=
+expect \[INPUT/squad-mode\] close why=b
+expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+# the world runs: the chevron over the focus; the order made it nobody's enemy, their blow did
 expect \[FLOW/squad-mark\] on id=\d+ pid=16777375
-expect \[INPUT/squad-mode\] close why=a
-expect \[FLOW/squad-mode\] close why=a slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
-# the order made it nobody's enemy; their blow did
 expect \[FLOW/newhostile\] pid=16777375 whoDude=0 whoParty=1
 # the A was the mode's both times: no interaction, no attack of the dude's own; no refusal of a neutral
 expect-not \[ACTION/interact-(queue|do)\]

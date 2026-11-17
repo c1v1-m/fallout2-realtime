@@ -458,6 +458,15 @@ typedef struct RtActor {
     // point: a cooldown cannot be used to lock somebody down.
     float next_attack_at;
 
+    // ATTACKERS AT ONCE (MODS row, rt_max_attackers): whom this critter holds a turn at -- the dude or a companion it
+    // attacked, while that attack is not over yet: still in flight, or inside its own cooldown after it. NULL = none.
+    // Compared by pointer only (rt_is_player_side_ptr) until it is known to be in the registry. Released in
+    // rt_resolve_attacks. ⚠️ `fresh` in rt_refresh_registry is uninitialised: set in BOTH branches.
+    Object* turn_on;
+    // rt_clock since which it has stood ready to attack the player's side without a turn; -1 = not waiting. The
+    // longest wait takes the next free turn.
+    float turn_wait_since;
+
     // Have we already tried to draw this NPC's best weapon for the current
     // engagement? Set the first time it acquires a target (see rt_ensure_weapon_-
     // drawn), cleared when it drops back to RT_IDLE. Prevents re-running the
@@ -472,6 +481,10 @@ typedef struct RtActor {
     // rate limit, separate from next_attack_at because healing and swinging are different actions
     // and sharing one timer would let a heal buy a free attack (or the reverse). See rt_try_medic.
     float heal_next_at;
+    // ITS TURNS FOR CHEMS (Fallout 2, rt_try_chems): when the next one comes, and how many it has had -- vanilla's
+    // "every third turn" counts them. ⚠️ `fresh` in rt_refresh_registry is uninitialised: set in BOTH branches.
+    float chem_turn_at;
+    int chem_turns;
 
     // rt_clock when this critter was first seen dead (HP <= 0) but still standing. Lets
     // a corpse whose death animation got stuck (killed mid-walk -> competing sads ->
@@ -1183,6 +1196,19 @@ static float rt_player_ap_regen = 0.0f;
 static int rt_bonus_move_ap = INT_MAX;
 static float rt_bonus_move_regen = 0.0f;
 
+// MODS "Bonus Move" (cfg bonus_move_refill), HOW FAST the reserve comes back while he stands (2026-11-17: his „ten perk
+// teď busted“ -- at the AP rate, x1.2 in contact, it was back in under a second, between two punches -- then „jednou za
+// kolo mi přijde weak“, then the switch, his „Ano, udělej“):
+//   0 Fast      -- the AP regen itself, the distance multiplier included (as it was): ~1 s for 2 points.
+//   1 Half turn -- DEFAULT: half of a vanilla turn, i.e. half the time his whole AP pool takes to refill at the base rate
+//                  (no distance bonus): ~3.75 s for his 15 AP at 0.5 s.
+//   2 Turn      -- a whole such turn, vanilla's "2 points per rank at the start of every turn": ~7.5 s.
+// The reserve still refills only while he is neither walking nor running.
+#define RT_BONUS_MOVE_REFILL_FAST 0
+#define RT_BONUS_MOVE_REFILL_HALF_TURN 1
+#define RT_BONUS_MOVE_REFILL_TURN 2
+static int rt_bonus_move_refill = RT_BONUS_MOVE_REFILL_HALF_TURN;
+
 // Live AP-regen interval (seconds per +1 AP), loaded from config at combat_rt_init
 // (default RT_AP_REGEN_SECONDS). Tunable in the cfg for firing cadence without a
 // rebuild. Clamped to a sane floor so a bad value can't make AP regen instant.
@@ -1399,7 +1425,11 @@ static float rt_walk_ap_cost = RT_WALK_AP_COST;
 // faster than the attack cooldown would let you spend it and the player read it as "AP reload
 // instantly when anyone fires". 1.4 puts the brake back in contact range without touching ranged
 // exchanges, which were not the complaint. (2026-08-13, user picked this lever.)
-#define RT_REGEN_NEAR_MULT 1.4f   // multiplier in contact (dist <= 1)
+// ⚠️ 1.4 -> 1.2 ON 2026-11-17, HIS „zkusme 1,2“ after a self-played comparison (.claude/tools/autotest/sim/): at 1.4 a
+// 3-AP fist refilled faster in contact than its 1.21 s cooldown could spend it, so melee never waited for AP and AGI
+// meant nothing there ("melee jsem mohl furt útočit"). At 1.2 punches drop ~4 % in a short fight and the pool runs down
+// in longer ones -- his „malinkej balance“. The far end (0.6) was left as it is.
+#define RT_REGEN_NEAR_MULT 1.2f   // multiplier in contact (dist <= 1)
 #define RT_REGEN_FAR_MULT 0.6f    // multiplier at/beyond the falloff distance
 #define RT_REGEN_FALLOFF_TILES 12 // tiles at which the multiplier reaches the far value
 static float rt_regen_near_mult = RT_REGEN_NEAR_MULT;
@@ -1858,6 +1888,10 @@ static bool rt_crowd_make_room = true;
 // of a grenade, reloading in cover, searching the last known position, taking a much nearer foe,
 // minding allies in the line of fire. Default ON: his call, 2026-10-17. See the COMBAT AI blocks.
 static bool rt_tactical_ai = true;
+// MODS "Attackers at once" (cfg max_attackers): how many enemies may attack the DUDE at one time, and as many each
+// companion, counted apart; the rest wait their turn (rt_resolve_attacks). 0 = no limit, the old behaviour. Default 2:
+// his calls („Ano, max 2 naráz“, 2026-11-16; „i pro společníky … 2 na mě a 2 na něho“, 2026-11-17).
+static int rt_max_attackers = 2;
 // MODS "Projectiles" (cfg projectiles): bullets fly as tracers and commit on arrival, and every shot that
 // flies checks its line on arrival (rt_projectile_dodge). Default ON, his design (2026-10-18).
 static bool rt_projectiles = true;
@@ -5894,20 +5928,37 @@ static bool rt_reaction_heavy(Object* defender, int flags)
 // Self-played tests only (autotest `sethp ... knock`): what a knockdown hit's commit does to its defender --
 // the reaction layer's FALLING, DAM_KNOCKED_DOWN, the fall in its own sequence -- with no damage. Knockdowns
 // come from criticals and blasts, which a test cannot count on; "killed where it lies" needs one for sure.
-void combat_rt_test_knockdown(Object* critter)
+// knockout (`sethp ... ko`): DAM_KNOCKED_OUT too, as a critical that "knocks him unconscious" -- with no wake-up
+// event queued, so it stays out for the rest of the test.
+static void rt_reaction_flinch(Object* attacker, Object* defender);
+
+// Self-played tests only (autotest `stagger <seconds>`): the stagger a hit gives the dude, with no hit -- the moment
+// a cut heal jab needs (gpui_inject_tick), which real shots cannot be timed to.
+void combat_rt_test_stagger(Object* critter)
+{
+    if (!rt_enabled || critter == NULL || !rt_is_critter(critter) || critter_is_dead(critter)) {
+        return;
+    }
+    trace_event(TRACE_FLOW, "test-stagger", "id=%d pid=%d anim=%d t=%.2f", critter->id, critter->pid,
+        FID_ANIM_TYPE(critter->fid), rt_clock);
+    rt_reaction_flinch(NULL, critter);
+}
+
+void combat_rt_test_knockdown(Object* critter, bool knockout)
 {
     if (!rt_enabled || critter == NULL || !rt_is_critter(critter) || critter_is_dead(critter) || critter_is_prone(critter)) {
         return;
     }
-    if (!rt_reaction_heavy(critter, DAM_KNOCKED_DOWN)) {
+    int flags = DAM_KNOCKED_DOWN | (knockout ? DAM_KNOCKED_OUT : 0);
+    if (!rt_reaction_heavy(critter, flags)) {
         return;
     }
-    critter->data.critter.combat.results |= DAM_KNOCKED_DOWN;
+    critter->data.critter.combat.results |= flags;
     if (rt_register_begin(ANIMATION_REQUEST_RESERVED, "test-knockdown")) {
         register_object_animate(critter, ANIM_FALL_BACK, 0);
         register_end();
     }
-    trace_event(TRACE_FLOW, "test-knockdown", "id=%d pid=%d t=%.2f", critter->id, critter->pid, rt_clock);
+    trace_event(TRACE_FLOW, "test-knockdown", "id=%d pid=%d ko=%d t=%.2f", critter->id, critter->pid, knockout ? 1 : 0, rt_clock);
 }
 
 // A LIGHT hit asks for a cosmetic stagger. Every refusal says WHY out loud -- these used to be
@@ -8030,7 +8081,39 @@ typedef enum RtHealKind {
 // Hurt enough to be worth a dose? Mirrors ai_check_drugs' `bloodied` test, plus the two refusals
 // skill_use makes for real (a corpse, and a ROBOTIC body -- which it scores as an automatic
 // failure rather than a heal, so treating one would just burn the item).
+static bool rt_medic_needs_care_below(Object* c, float fraction);
+
 static bool rt_medic_needs_care(Object* c)
+{
+    return rt_medic_needs_care_below(c, rt_medic_hp_fraction);
+}
+
+// COMBAT CONTROL's "Chem use" (Fallout 2), as vanilla's ai_check_drugs reads it: the share of its maximum HP below
+// which a critter doses ITSELF -- "Stims when hurt a little" 60 %, "Stims when hurt a lot" 30 %, every other setting
+// 50 % (rt_medic_hp_fraction, cfg medic_hp_fraction) -- or -1 for "Clean": no drugs at all, for itself or anyone.
+// ⚠️ HIS „Ano, jako originál“ (2026-11-17): the realtime medic used 50 % for everyone and never read the setting, so a
+// companion set to Clean still took stimpaks and one set to "hurt a lot" dosed itself at half its HP. Vanilla
+// treats only itself; treating an ally (the dude included) is this build's own beat and keeps rt_medic_hp_fraction.
+static float rt_medic_self_fraction(Object* medic)
+{
+#if FALLOUT_RT_GAME == 2
+    switch (aiGetChemUse(medic)) {
+    case CHEM_USE_CLEAN:
+        return -1.0f;
+    case CHEM_USE_STIMS_WHEN_HURT_LITTLE:
+        return 0.60f; // combat_ai.cc kChemUseStimsWhenHurtLittleHpRatio
+    case CHEM_USE_STIMS_WHEN_HURT_LOTS:
+        return 0.30f; // kChemUseStimsWhenHurtLotsHpRatio
+    default:
+        break;
+    }
+#else
+    (void)medic;
+#endif
+    return rt_medic_hp_fraction;
+}
+
+static bool rt_medic_needs_care_below(Object* c, float fraction)
 {
     if (c == NULL || !rt_is_critter(c) || critter_is_dead(c)) {
         return false;
@@ -8046,7 +8129,7 @@ static bool rt_medic_needs_care(Object* c)
 
     // Counted with the heal still coming in (rt_heal_left, RtActor.heal_left): nobody spends a second
     // stimpak on a patient while the first is still working.
-    return (float)rt_hp_with_heal(c) < rt_medic_hp_fraction * (float)maxHp;
+    return (float)rt_hp_with_heal(c) < fraction * (float)maxHp;
 }
 
 // The best healing item this critter carries, or NULL. Drugs are preferred over kits: a Stimpak is
@@ -8055,18 +8138,33 @@ static bool rt_medic_needs_care(Object* c)
 // inven_find_type walks the whole inventory list, and a WIELDED item is still in that list (see
 // inven_right_hand, which finds the hand by scanning it for OBJECT_IN_RIGHT_HAND) -- so this
 // correctly finds the kit Morbid is holding, not just one stowed in his pack.
-static Object* rt_find_healing_item(Object* medic, RtHealKind* kind)
+// drugs: false = a "Clean" critter (rt_medic_self_fraction) -- a kit only.
+static Object* rt_find_healing_item(Object* medic, RtHealKind* kind, bool drugs = true)
 {
     *kind = RT_HEAL_NONE;
 
     int index = -1;
     Object* item;
-    while ((item = inven_find_type(medic, ITEM_TYPE_DRUG, &index)) != NULL) {
+    while (drugs && (item = inven_find_type(medic, ITEM_TYPE_DRUG, &index)) != NULL) {
         if (item->pid == PROTO_ID_STIMPACK || item->pid == PROTO_ID_SUPER_STIMPACK) {
             *kind = RT_HEAL_DRUG;
             return item;
         }
     }
+
+#if FALLOUT_RT_GAME == 2
+    // ⚠️ HEALING POWDER TOO, after the stimpaks (2026-11-17, „healoval se vic?“ → „Ano, i prášek“). Vanilla Fallout 2's
+    // ai_check_drugs heals with every itemIsHealing pid -- Stimpak, Super Stimpak AND Healing Powder (gHealingItemPids)
+    // -- but this list was Fallout 1's, so a companion who carried only powder never healed: test-vic-heal-powder, Vic at
+    // 20 of 70 for the whole fight. Second, because a stimpak heals more and costs no Perception.
+    index = -1;
+    while (drugs && (item = inven_find_type(medic, ITEM_TYPE_DRUG, &index)) != NULL) {
+        if (item->pid == PROTO_ID_HEALING_POWDER) {
+            *kind = RT_HEAL_DRUG;
+            return item;
+        }
+    }
+#endif
 
     index = -1;
     while ((item = inven_find_type(medic, ITEM_TYPE_MISC, &index)) != NULL) {
@@ -8088,9 +8186,10 @@ static Object* rt_find_healing_item(Object* medic, RtHealKind* kind)
 // fighting" is the exact failure mode that has cost this project two regressions already
 // (rt_target_unreachable, the crowd special-case). A medic treats who is already next to it; if
 // nobody is, it fights. Widen rt_medic_ally_tiles before adding movement.
-static Object* rt_medic_patient(Object* medic)
+// selfFraction: below what share of its HP it treats itself (rt_medic_self_fraction); allies keep rt_medic_hp_fraction.
+static Object* rt_medic_patient(Object* medic, float selfFraction)
 {
-    if (rt_medic_needs_care(medic)) {
+    if (rt_medic_needs_care_below(medic, selfFraction)) {
         return medic;
     }
 
@@ -8248,19 +8347,136 @@ static bool rt_try_medic(RtActor* a, Object* npc)
 
     // Item first: most critters carry nothing, and bailing here skips the patient search entirely.
     // rt_medic_patient scans every registered actor, and this runs per actor per frame.
+    // Its "Chem use" (Fallout 2): "Clean" takes no drugs -- a kit still -- and "hurt a little" / "hurt a lot" move where
+    // it doses itself (rt_medic_self_fraction).
+    float selfFraction = rt_medic_self_fraction(npc);
+    bool drugs = selfFraction >= 0.0f;
     RtHealKind kind;
-    Object* item = rt_find_healing_item(npc, &kind);
+    Object* item = rt_find_healing_item(npc, &kind, drugs);
     if (item == NULL) {
         return false;
     }
 
-    Object* patient = rt_medic_patient(npc);
+    Object* patient = rt_medic_patient(npc, drugs ? selfFraction : rt_medic_hp_fraction);
     if (patient == NULL) {
         return false;
     }
 
     return rt_medic_dose(a, npc, patient, item, kind, "beat");
 }
+
+#if FALLOUT_RT_GAME == 2
+// ⚠️ THEY TAKE CHEMS, AS VANILLA (2026-11-17, his „ať berou fet“ after „Ano, jako originál“): the second half of
+// vanilla's ai_check_drugs, by COMBAT CONTROL's "Chem use" -- Sometimes: every third turn of its own, a 25 % chance,
+// one drug; Anytime: every third turn, 75 %, up to two; Always: every turn, as many as its AP pays for. 2 AP each
+// (vanilla's price, from the pool its attacks spend). The drugs its packet wants most (chem_primary_desire) first,
+// then any other non-healing drug it carries, at random within each -- the CE picking. Healing stays the medic's
+// (rt_try_medic, which runs first, as ai_check_drugs heals before it reaches for anything else). A TURN here is what
+// one is worth in realtime: the time a full AP pool takes to refill (rt_script_turn_period, the scripts' turns).
+#define RT_CHEM_AP_COST 2
+static float rt_script_turn_period(Object* critter);
+#define RT_CHEM_BUCKET 3 // kRandomDrugPickingArraySize: at most this many drugs of each kind are looked at per turn
+static bool rt_try_chems(RtActor* a, Object* npc)
+{
+    if (rt_clock < a->chem_turn_at || anim_busy(npc) != 0) {
+        return false; // not its turn, or its body is not free: the turn waits for it
+    }
+    int turn = a->chem_turns;
+    a->chem_turns += 1;
+    a->chem_turn_at = rt_clock + rt_script_turn_period(npc);
+
+    if (critter_body_type(npc) != BODY_TYPE_BIPED) {
+        return false;
+    }
+    int chemUse = aiGetChemUse(npc);
+    int chance = 0;
+    int most = 0;
+    switch (chemUse) {
+    case CHEM_USE_SOMETIMES:
+        chance = turn % 3 == 0 ? 25 : 0; // kChemUseSometimesChance, on _combatNumTurns % 3 == 0
+        most = 1;
+        break;
+    case CHEM_USE_ANYTIME:
+        chance = turn % 3 == 0 ? 75 : 0; // kChemUseAnytimeChance
+        most = 2;
+        break;
+    case CHEM_USE_ALWAYS:
+        chance = 100; // kChemUseAlwaysChance, every turn
+        most = 2 * RT_CHEM_BUCKET;
+        break;
+    default:
+        return false;
+    }
+    if (chance == 0 || a->ap < RT_CHEM_AP_COST || roll_random(0, 100) >= chance) {
+        return false;
+    }
+
+    Object* primary[RT_CHEM_BUCKET];
+    int primaryCount = 0;
+    Object* secondary[RT_CHEM_BUCKET];
+    int secondaryCount = 0;
+    int index = -1;
+    Object* item;
+    while ((item = inven_find_type(npc, ITEM_TYPE_DRUG, &index)) != NULL) {
+        if (itemIsHealing(item->pid)) {
+            continue;
+        }
+        if (aiIsPrimaryChemDesire(npc, item->pid)) {
+            if (primaryCount < RT_CHEM_BUCKET) {
+                primary[primaryCount++] = item;
+            }
+        } else if (secondaryCount < RT_CHEM_BUCKET) {
+            secondary[secondaryCount++] = item;
+        }
+    }
+
+    int taken = 0;
+    while (taken < most && a->ap >= RT_CHEM_AP_COST) {
+        Object** bucket;
+        int* count;
+        if (primaryCount > 0) {
+            bucket = primary;
+            count = &primaryCount;
+        } else if (secondaryCount > 0) {
+            bucket = secondary;
+            count = &secondaryCount;
+        } else {
+            break;
+        }
+        int pick = roll_random(0, *count - 1);
+        Object* drug = bucket[pick];
+        bucket[pick] = bucket[*count - 1];
+        *count -= 1;
+
+        int pid = drug->pid;
+        if (item_remove_mult(npc, drug, 1) != 0) {
+            continue;
+        }
+        if (item_d_take_drug(npc, drug) == -1) {
+            item_add_force(npc, drug, 1); // refused -- give it back rather than lose it
+            continue;
+        }
+        obj_connect(drug, npc->tile, npc->elevation, NULL);
+        obj_destroy(drug);
+        a->ap -= RT_CHEM_AP_COST;
+        taken++;
+        trace_event(TRACE_FLOW, "chem", "id=%d pid=%d drug=%d use=%d turn=%d ap=%d t=%.2f", npc->id, npc->pid, pid,
+            chemUse, turn, a->ap, rt_clock);
+    }
+    if (taken == 0) {
+        return false;
+    }
+
+    // The hands, as the medic's dose shows it (ai_magic_hands in vanilla).
+    if (rt_register_begin(ANIMATION_REQUEST_RESERVED, "chem")) {
+        register_object_animate(npc, ANIM_MAGIC_HANDS_MIDDLE, 0);
+        anim_set_injection_timing(npc);
+        register_end();
+        anim_set_injection_timing(NULL);
+    }
+    return true;
+}
+#endif
 
 static bool rt_shot_blocked(Object* npc, Object* target, int hitMode)
 {
@@ -8808,6 +9024,93 @@ static int rt_wipe_forehead(Object* critter, const char* why)
 // realtime running speed -- the speed it chased you with -- and a cornered critter looks again one
 // turn later (rt_script_turn_period), not every frame. Returns true when this critter is fleeing,
 // i.e. its AI must do nothing else this frame.
+// ⚠️ A HURT COMPANION RUNS TO COVER, NOT FROM YOU (2026-11-17, „vic jenom přišel ke mně a nic nedělal, the fuck?“ ->
+// his pick „Utéct do krytu“). Vanilla's ai_run_away runs every fleeing critter away from the DUDE until max_dist and
+// then sits it out where it stopped. trace_2026-11-17_014727 s=75.5: Vic, sniping 12 tiles off, dropped below his
+// "Run Away" line, was "far enough" on the spot, stopped fighting -- and stood in the raiders' fire until they killed
+// him 5 s later. A party member now runs away from the enemies to a tile none of them can see (perception range and
+// a clear line, as they see), sits there (DISENGAGING) and patches itself up if it can; found again, it runs on; past
+// its "Run Away" line again it comes back to the fight (the RT_IDLE friendly branch).
+
+// Can `seer` see the tile (its perception range, PE x 5, and nothing that blocks sight on the line)?
+static bool rt_tile_seen_by(Object* seer, int tile, int elevation)
+{
+    if (seer->elevation != elevation || tile_dist(seer->tile, tile) > stat_level(seer, STAT_PERCEPTION) * 5) {
+        return false;
+    }
+    Object* wall = NULL;
+    _make_straight_path_func(seer, seer->tile, tile, NULL, &wall, 32, _obj_sight_blocking_at);
+    return wall == NULL;
+}
+
+// The hostiles on its floor that see `npc` now (rt_sees), up to `max`, and the nearest of them. Returns how many.
+static int rt_party_seers(Object* npc, Object** seers, int max, Object** nearest)
+{
+    int count = 0;
+    int bestDist = INT_MAX;
+    *nearest = NULL;
+    for (int i = 0; i < rt_actor_count; i++) {
+        Object* o = rt_actors[i].obj;
+        if (!rt_actors[i].hostile || o == npc || !rt_is_combatant(o) || o->elevation != npc->elevation
+            || !rt_sees(o, npc, false)) {
+            continue;
+        }
+        if (count < max) {
+            seers[count++] = o;
+        }
+        int d = obj_dist(o, npc);
+        if (d < bestDist) {
+            bestDist = d;
+            *nearest = o;
+        }
+    }
+    return count;
+}
+
+// Where a fleeing companion runs on this leg of `ap` tiles: away from the nearest enemy that sees it -- straight,
+// then 60 and 120 degrees off -- the farthest tile none of them sees; with no such tile in reach, the farthest away
+// it can get (vanilla's run). -2 = nobody sees it: it is in cover. -1 = cornered.
+#define RT_COVER_SEERS 16
+static int rt_party_cover_tile(Object* npc, int ap)
+{
+    Object* seers[RT_COVER_SEERS];
+    Object* nearest = NULL;
+    int seerCount = rt_party_seers(npc, seers, RT_COVER_SEERS, &nearest);
+    if (seerCount == 0) {
+        return -2;
+    }
+    if (ap < 1) {
+        return -1;
+    }
+    int away = tile_dir(nearest->tile, npc->tile);
+    static const int turns[] = { 0, 1, 5, 2, 4 };
+    int fallback = -1;
+    for (int dist = ap; dist >= 1; dist--) {
+        for (int t = 0; t < 5; t++) {
+            int tile = tile_num_in_direction(npc->tile, (away + turns[t]) % ROTATION_COUNT, dist);
+            if (tile < 0 || tile == npc->tile || map_tile_is_background(tile, npc->elevation)
+                || obj_blocking_at(npc, tile, npc->elevation) != NULL) {
+                continue;
+            }
+            bool seen = false;
+            for (int s = 0; s < seerCount && !seen; s++) {
+                seen = rt_tile_seen_by(seers[s], tile, npc->elevation);
+            }
+            if (seen && fallback != -1) {
+                continue; // only a tile out of sight can beat the run already found
+            }
+            if (make_path_capped(npc, npc->tile, tile, NULL, 1, 2000) <= 0) {
+                continue;
+            }
+            if (!seen) {
+                return tile;
+            }
+            fallback = tile;
+        }
+    }
+    return fallback;
+}
+
 static bool rt_flee_step(RtActor* a, Object* npc)
 {
     int why = combatai_flee_reason(npc);
@@ -8868,7 +9171,25 @@ static bool rt_flee_step(RtActor* a, Object* npc)
         return true;
     }
 
-    int dest = combatai_flee_tile(npc, ap);
+    // A party member runs to cover (rt_party_cover_tile); everyone else the vanilla way, away from the dude.
+    bool cover = a->friendly && isPartyMember(npc);
+    int dest;
+    if (cover) {
+        // ...and doses itself FIRST when it carries something to do it with (his pick: „když má lék, ošetří se“): out in
+        // the open, test-vic-cover's first run, Vic with two stimpaks ran 8 tiles, stood winded and took the two hits that
+        // killed him -- he would only have healed once out of sight. The heal comes in over time while it runs on.
+        if (rt_try_medic(a, npc)) {
+            return true;
+        }
+        dest = rt_party_cover_tile(npc, ap);
+        if (dest == -2) {
+            npc->data.critter.combat.maneuver |= CRITTER_MANEUVER_DISENGAGING; // as vanilla's run marks it at max_dist
+            trace_event(TRACE_FLOW, "party-cover", "in id=%d pid=%d hp=%d tile=%d t=%.2f", npc->id, npc->pid,
+                critter_get_hits(npc), npc->tile, rt_clock);
+        }
+    } else {
+        dest = combatai_flee_tile(npc, ap);
+    }
 
     if (dest == -2) {
         trace_event(TRACE_FLOW, "flee-done", "id=%d pid=%d dist=%d maxDist=%d t=%.2f",
@@ -9751,6 +10072,54 @@ static void rt_fm_release()
     tile_refresh_rect(&r, obj_dude->elevation);
     obj_set_frame(obj_dude, 0, &r);
     tile_refresh_rect(&r, obj_dude->elevation);
+}
+
+// ⚠️ THE DUDE PUT DOWN ELSEWHERE ON THE SAME MAP STANDS, AND FREE MOVEMENT STARTS AFRESH (Fallout 2 Realtime 2026-11-16,
+// „když uteču do jeskyně tak se moje postava zastaví a bugne se“). An exit grid to another floor of the SAME map (the
+// raiders' encounter CAVE1: the cave mouth on floor 0 leads to floor 1) loads nothing -- mapHandleTransition just moves
+// him -- so the run he made it there with stayed: the RUNNING picture, the run registered on the old floor, his
+// sub-tile offset (x=22 y=4 carried across, trace_2026-11-16_210603 s=1637.59) and free movement's own state. He stood
+// frozen in mid-stride (every heartbeat anim=19) and the stick could not move him. Called from mapHandleTransition
+// right after the move; harmless after a real map load.
+void combat_rt_dude_teleported()
+{
+    if (obj_dude == NULL) {
+        return;
+    }
+    // ⚠️ AND THE FLED FIGHT'S HOLD LETS GO. A mid-fight exit tears combat down and HOLDS it torn down
+    // (rt_map_exit_committed: combat_rt_update returns at once every frame) until the destination map loads -- the
+    // objects-freed hook clears it. Another floor of the same map loads nothing, so the hold never let go and the
+    // whole realtime update, his free movement with it, stayed off for good: the real reason he stood frozen.
+    bool wasHeld = rt_map_exit_committed;
+    rt_map_exit_committed = false;
+    rt_map_exit_armed = false;
+    rt_map_exit_scripted = false;
+
+    reg_anim_clear(obj_dude);
+    bool wasDriving = rt_fm_active;
+    rt_fm_release();
+    rt_fm_active = false;
+    rt_stick_active = false;
+    rt_fm_frame = 0.0f;
+    rt_fm_boxed_since = -1.0f;
+    rt_move_stuck_since = -1.0f;
+
+    Rect r;
+    obj_bound(obj_dude, &r);
+    tile_refresh_rect(&r, obj_dude->elevation);
+    obj_dude->x = 0;
+    obj_dude->y = 0;
+    int anim = FID_ANIM_TYPE(obj_dude->fid);
+    if (anim == ANIM_WALK || anim == ANIM_RUNNING) {
+        int fid = art_id(FID_TYPE(obj_dude->fid), obj_dude->fid & 0xFFF, ANIM_STAND,
+            (obj_dude->fid & 0xF000) >> 12, obj_dude->rotation + 1);
+        obj_change_fid(obj_dude, fid, &r);
+        tile_refresh_rect(&r, obj_dude->elevation);
+    }
+    obj_set_frame(obj_dude, 0, &r);
+    tile_refresh_rect(&r, obj_dude->elevation);
+    trace_event(TRACE_FLOW, "dude-teleported", "tile=%d elev=%d anim=%d driving=%d held=%d t=%.2f", obj_dude->tile,
+        obj_dude->elevation, anim, wasDriving ? 1 : 0, wasHeld ? 1 : 0, rt_clock);
 }
 
 // One frame of free movement along `angle`.
@@ -10892,7 +11261,9 @@ static Object* rt_nearest_hostile_in_sight(int hitMode)
     return best;
 }
 
-static Object* rt_unlocked_attack_target(int hitMode)
+// takeKnockedOut: RT's own pull (see the block below); a quick throw passes false and keeps going to the
+// nearest visible enemy instead (combat_rt_quick_throw_target).
+static Object* rt_unlocked_attack_target(int hitMode, bool takeKnockedOut)
 {
     // ⚠️ THE NEAREST ONE YOU CAN HIT, NOT THE NEAREST ONE (2026-10-20, trace_2026-10-20_220255 s=74.4:
     // RT with no lock took a guard 2 tiles away on the far side of the corner wall, every shot was
@@ -10912,6 +11283,32 @@ static Object* rt_unlocked_attack_target(int hitMode)
     int range = item_w_range(obj_dude, hitMode);
     Object* best = NULL;
     int bestDist = range + 1;
+
+    // ⚠️ RT FINISHES AN UNCONSCIOUS ENEMY TOO (2026-11-16, „borečka jsem sundal na zem a držel útok bez míření a
+    // dudette neútočil“). trace_2026-11-16_223528 s=474.4: a critical knocked raider 238 OUT one tile away, RT held
+    // for 1.4 s, not one swing. rt_nearest_hostile_in_range leaves the knocked-out out on purpose (the A-vs-prompt
+    // split, see there), so only a lock could finish him -- vanilla hits an unconscious critter like any other. Now
+    // when nobody ACTIVE is in reach, RT takes the nearest knocked-out enemy in weapon range and in sight: after the
+    // active ones, so it never turns from one still fighting you; before an idle animal, which never fought you.
+    if (takeKnockedOut) {
+        for (int i = 0; i < rt_actor_count; i++) {
+            Object* critter = rt_actors[i].obj;
+            if (critter == obj_dude || !rt_actors[i].hostile || !rt_is_targetable(critter)
+                || (critter->data.critter.combat.results & DAM_KNOCKED_OUT) == 0) {
+                continue;
+            }
+            int dist = obj_dist(obj_dude, critter);
+            if (dist > range || dist >= bestDist || !rt_lock_in_sight(critter)) {
+                continue;
+            }
+            bestDist = dist;
+            best = critter;
+        }
+        if (best != NULL) {
+            return best;
+        }
+    }
+
     for (int i = 0; i < rt_actor_count; i++) {
         Object* critter = rt_actors[i].obj;
         if (critter == obj_dude || !rt_is_combatant(critter) || !rt_hostile_by_nature(critter)) {
@@ -11557,7 +11954,11 @@ static void rt_refresh_registry()
             a->stuck_x = prev->stuck_x;
             a->stuck_y = prev->stuck_y;
             a->next_attack_at = prev->next_attack_at;
+            a->turn_on = prev->turn_on;
+            a->turn_wait_since = prev->turn_wait_since;
             a->heal_next_at = prev->heal_next_at;
+            a->chem_turn_at = prev->chem_turn_at;
+            a->chem_turns = prev->chem_turns;
             a->weapon_up_until = prev->weapon_up_until;
             a->diag_mode = prev->diag_mode;
             a->diag_range = prev->diag_range;
@@ -11875,6 +12276,8 @@ static void rt_refresh_registry()
             // No opening delay on healing: a critter that walks into the fight already bloodied
             // should be able to patch itself immediately. The AP cost is the only opening gate.
             a->heal_next_at = 0.0f;
+            a->chem_turn_at = 0.0f; // its first turn of a fight is now, as vanilla's turn 0
+            a->chem_turns = 0;
             // Weapon starts DOWN: a critter's opening shot of a fight gets the full raise, which is
             // the one place the animation actually reads as something (it draws a bead on you).
             a->weapon_up_until = 0.0f;
@@ -11901,6 +12304,8 @@ static void rt_refresh_registry()
             a->bal_attacks = 0;
             a->bal_seen = rt_clock;
             a->fought_dude = false;
+            a->turn_on = NULL;
+            a->turn_wait_since = -1.0f;
         }
 
         // (A) A mid-fight load: the first build takes back what the save said this critter was doing
@@ -15227,6 +15632,11 @@ static bool rt_focus_take(RtActor* a, Object* npc, const char* why)
 // trace line to one per distance. True = a leg was asked for; false = the way is shut for the moment.
 static bool rt_party_step_to_dude(RtActor* a, Object* npc, int limit, const char* why, int* logged)
 {
+    // One that ran from this fight (DISENGAGING, rt_party_cover_tile) is never walked back to him while it lasts:
+    // trace_2026-11-17_014727 s=75.6, Vic ran 9 tiles straight back into the raiders' fire and stood there.
+    if (rt_engaged && (npc->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0) {
+        return false;
+    }
     int dist = obj_dist(npc, obj_dude);
 
     // anim.cc bills the mover's ENGINE combat.ap per tile while the combat bit is set and truncates the walk at 0.
@@ -15598,12 +16008,23 @@ static void rt_party_take_order(RtActor* a, Object* npc, bool hold)
 
 // One short line over a companion's head, as design B's orders say theirs (combatai_float_line: the font and colours
 // of its AI packet). A writable copy: the text object writes into the string.
+// Who said the last order's line (rt_squad_say) -- the squad mode, which stays open after an order since 2026-11-17,
+// moves that one's green name aside so the line floating over his head shows. Forgotten with every object (rt_forget).
+static Object* rt_squad_last_speaker = NULL;
+
+Object* combat_rt_squad_last_speaker()
+{
+    return rt_squad_last_speaker;
+}
+
 static void rt_squad_say(Object* c, const char* text)
 {
 #if FALLOUT_RT_GAME == 2
+    rt_squad_last_speaker = NULL;
     if (c == NULL || text == NULL || c->elevation != map_elevation) {
         return;
     }
+    rt_squad_last_speaker = c;
     char line[32];
     snprintf(line, sizeof(line), "%s", text);
     combatai_float_line(c, line);
@@ -17204,6 +17625,13 @@ static void rt_update_actor(RtActor* a, float dt)
         rt_intent_hint(a, RT_INTENT_HEAL, "medic", 3.0f);
         return;
     }
+#if FALLOUT_RT_GAME == 2
+    // Chems after the heal, on a turn of its own (rt_try_chems) -- ai_check_drugs' order.
+    if (fightBeats && rt_try_chems(a, npc)) {
+        rt_intent_hint(a, RT_INTENT_HEAL, "chem", 3.0f);
+        return;
+    }
+#endif
 
     // A chaser that went into its breather mid-step wipes its forehead now that the body is free --
     // still winded, or not at all (rt_wipe_forehead). 0 = not this frame; anything else settles it.
@@ -17467,6 +17895,28 @@ static void rt_update_actor(RtActor* a, float dt)
             // (rt_party_pick); otherwise the nearest enemy it sees, as always. `latched`: FOLLOW off a target it could
             // not reach -- no engage, only the follow below.
             bool ranAway = (npc->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0;
+            // IN COVER (2026-11-17, his pick „Utéct do krytu“, rt_party_cover_tile): past its "Run Away" line again it
+            // comes back; until then it patches itself up if it can (the medic beat, its Chem use too), and when an
+            // enemy finds it, it runs on.
+            if (ranAway && rt_engaged && isPartyMember(npc)) {
+                Object* seers[RT_COVER_SEERS];
+                Object* nearestSeer = NULL;
+                if (combatai_flee_reason(npc) == 0) {
+                    npc->data.critter.combat.maneuver &= ~CRITTER_MANEUVER_DISENGAGING;
+                    ranAway = false;
+                    trace_event(TRACE_FLOW, "party-cover", "back id=%d pid=%d hp=%d t=%.2f", npc->id, npc->pid,
+                        critter_get_hits(npc), rt_clock);
+                } else if (rt_try_medic(a, npc)) {
+                    rt_intent_hint(a, RT_INTENT_HEAL, "medic", 3.0f);
+                    break;
+                } else if (rt_party_seers(npc, seers, RT_COVER_SEERS, &nearestSeer) > 0) {
+                    trace_event(TRACE_FLOW, "party-cover", "found id=%d pid=%d by=%d t=%.2f", npc->id, npc->pid,
+                        nearestSeer != NULL ? nearestSeer->id : -1, rt_clock);
+                    if (rt_flee_step(a, npc)) {
+                        break;
+                    }
+                }
+            }
             // HOLD FIRE (SQUAD COMMAND): it takes nobody -- and the follow and the turn toward what comes below still
             // run. (Without this the pick set CHASE, the drop at the top took it back next frame, and the fight
             // started and ended every other frame, the map scripts with it.)
@@ -18138,6 +18588,39 @@ static void rt_update_actor(RtActor* a, float dt)
 // fire; losers keep their AP and re-contend next frame. Eligibility is
 // re-validated at grant time, so a target that died/fled or an attacker that
 // started animating since recording its intent is dropped.
+// ATTACKERS AT ONCE: one row per defender on the player's side (the dude, each companion) for one frame of
+// rt_resolve_attacks -- how many turns at it are taken, and its longest waiter. The party is small; a defender that
+// finds the table full is simply not limited.
+#define RT_TURN_DEFS_MAX 12
+struct RtTurnDef {
+    Object* def;
+    int turns;
+    RtActor* next;
+    int nextCost;
+    int nextSeq;
+    int ready;
+};
+
+static RtTurnDef* rt_turn_def(RtTurnDef* defs, int* count, Object* def)
+{
+    for (int i = 0; i < *count; i++) {
+        if (defs[i].def == def) {
+            return &defs[i];
+        }
+    }
+    if (*count >= RT_TURN_DEFS_MAX) {
+        return NULL;
+    }
+    RtTurnDef* d = &defs[(*count)++];
+    d->def = def;
+    d->turns = 0;
+    d->next = NULL;
+    d->nextCost = 0;
+    d->nextSeq = 0;
+    d->ready = 0;
+    return d;
+}
+
 static void rt_resolve_attacks(float dt)
 {
     // Decay the latched player intent so a one-shot mouse click eventually
@@ -18229,6 +18712,37 @@ static void rt_resolve_attacks(float dt)
     RtCandidate cand[RT_MAX_ACTORS];
     int candCount = 0;
 
+    // ATTACKERS AT ONCE („Ano, max 2 naráz“, 2026-11-16): at most rt_max_attackers enemies attack the DUDE at one time,
+    // the rest wait their turn. His ambush at the raiders' cave (trace_2026-11-16_210603): six raiders fired inside
+    // 0.1 s, all six again 2.4 s later, and his 81 HP were gone three seconds into the fight.
+    // A TURN is one attack at him, held from the swing until that attacker could swing again: its attack has landed AND
+    // its own cooldown is over. Not the attack alone -- that is short (0.2-0.7 s in flight in his trace), and counting
+    // only it would have spread each volley over half a second and changed nothing. So "two at once" is the fire of two
+    // enemies at their own pace, never a volley of six. The free turn goes to whoever has waited longest.
+    // ⚠️ EACH COMPANION GETS THE SAME LIMIT, COUNTED APART (2026-11-17, „i pro společníky … najednou 2 na mě a 2 na
+    // něho“). trace_2026-11-16_235421 s=884.4: out of the cave, all six raiders opened on Vic inside 0.25 s -- he was
+    // dead 1.3 s after the dude stepped out -- because only attacks AT THE DUDE were limited. So with Vic along, at most
+    // two shoot the dude and two shoot Vic at once. Fights between NPCs, and the companions' own attacks, stay free.
+    RtTurnDef turnDefs[RT_TURN_DEFS_MAX];
+    int turnDefCount = 0;
+    if (rt_max_attackers > 0) {
+        for (int i = 0; i < rt_actor_count; i++) {
+            RtActor* a = &rt_actors[i];
+            // Over (or the attacker is down, or its target is gone from the side or dead): the turn is free.
+            if (a->turn_on != NULL
+                && (!rt_is_combatant(a->obj) || !rt_is_player_side_ptr(a->turn_on) || critter_is_dead(a->turn_on)
+                    || (!rt_attacker_in_flight(a->obj) && !rt_attack_on_cooldown(a->obj)))) {
+                a->turn_on = NULL;
+            }
+            if (a->turn_on != NULL) {
+                RtTurnDef* d = rt_turn_def(turnDefs, &turnDefCount, a->turn_on);
+                if (d != NULL) {
+                    d->turns++;
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < rt_actor_count; i++) {
         RtActor* a = &rt_actors[i];
         if (!a->wants_attack) {
@@ -18261,14 +18775,55 @@ static void rt_resolve_attacks(float dt)
             continue;
         }
 
+        int seq = stat_level(npc, STAT_SEQUENCE);
+
+        // ATTACKERS AT ONCE: ready to attack the dude or a companion. Only that one's longest waiter may take its free
+        // turn (added after the loop); the others keep their intent and wait. Equal waits -- a whole ambush gets ready
+        // in one frame -- go to the quicker one, the same Sequence that orders everything else here.
+        RtTurnDef* turnDef = NULL;
+        if (rt_max_attackers > 0 && !a->friendly && rt_is_player_side_ptr(a->attack_target)) {
+            turnDef = rt_turn_def(turnDefs, &turnDefCount, a->attack_target);
+        }
+        if (turnDef != NULL) {
+            if (a->turn_wait_since < 0.0f) {
+                a->turn_wait_since = rt_clock;
+                trace_event(TRACE_COMBAT, "turn-wait", "aid=%d def=%d turns=%d/%d t=%.2f",
+                    npc->id, a->attack_target->id, turnDef->turns, rt_max_attackers, rt_clock);
+            }
+            RtActor* next = turnDef->next;
+            if (next == NULL || a->turn_wait_since < next->turn_wait_since
+                || (a->turn_wait_since == next->turn_wait_since && seq > turnDef->nextSeq)) {
+                turnDef->next = a;
+                turnDef->nextCost = cost;
+                turnDef->nextSeq = seq;
+            }
+            turnDef->ready++;
+            continue;
+        }
+
         RtCandidate* c = &cand[candCount++];
         c->attacker = npc;
         c->target = a->attack_target;
         c->mode = a->attack_mode;
         c->loc = a->attack_loc;
         c->cost = cost;
-        c->seq = stat_level(npc, STAT_SEQUENCE);
+        c->seq = seq;
         c->ap = &a->ap;
+    }
+
+    for (int i = 0; i < turnDefCount; i++) {
+        RtTurnDef* d = &turnDefs[i];
+        if (d->next == NULL || d->turns >= rt_max_attackers) {
+            continue;
+        }
+        RtCandidate* c = &cand[candCount++];
+        c->attacker = d->next->obj;
+        c->target = d->next->attack_target;
+        c->mode = d->next->attack_mode;
+        c->loc = d->next->attack_loc;
+        c->cost = d->nextCost;
+        c->seq = d->nextSeq;
+        c->ap = &d->next->ap;
     }
 
     // --- Player attack: concurrent, BUT governed by SEQUENCE INITIATIVE when the target is
@@ -18375,6 +18930,19 @@ static void rt_resolve_attacks(float dt)
         if (wa != NULL) {
             wa->plan_valid = false;
         }
+        // ATTACKERS AT ONCE: this attack at the dude or a companion is a turn until it is over. Taken with the limit off
+        // too, so switching it on mid-fight knows who is already shooting.
+        if (wa != NULL && !wa->friendly && rt_is_player_side_ptr(win->target)) {
+            if (rt_max_attackers > 0) {
+                RtTurnDef* d = rt_turn_def(turnDefs, &turnDefCount, win->target);
+                trace_event(TRACE_COMBAT, "turn-take", "aid=%d def=%d turns=%d/%d waited=%.2f waiting=%d t=%.2f",
+                    win->attacker->id, win->target->id, d != NULL ? d->turns + 1 : -1, rt_max_attackers,
+                    wa->turn_wait_since >= 0.0f ? rt_clock - wa->turn_wait_since : 0.0f,
+                    d != NULL && d->ready > 0 ? d->ready - 1 : 0, rt_clock);
+            }
+            wa->turn_on = win->target;
+            wa->turn_wait_since = -1.0f;
+        }
     }
 }
 
@@ -18417,6 +18985,7 @@ static void rt_abandon_encounter()
     memset(rt_marks, 0, sizeof(rt_marks));
     rt_squad_reach_who = NULL;
     rt_squad_reach_tile = -1;
+    rt_squad_last_speaker = NULL;
     if (rt_squad_forget_fn != NULL) {
         rt_squad_forget_fn(NULL); // the squad command mode's own pointers go with the map
     }
@@ -18601,6 +19170,16 @@ void combat_rt_init()
     int tacticalAi = 1;
     config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_TACTICAL_AI_KEY, &tacticalAi);
     rt_tactical_ai = tacticalAi != 0;
+
+    // How many enemies attack the dude at once (MODS "Attackers at once"; 0 = no limit). Default 2: his call, 2026-11-16.
+    int maxAttackers = 2;
+    config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_MAX_ATTACKERS_KEY, &maxAttackers);
+    combat_rt_set_max_attackers(maxAttackers);
+
+    // How fast the Bonus Move reserve comes back (MODS "Bonus Move"). Default Half turn: his „Ano, udělej“, 2026-11-17.
+    int bonusMoveRefill = RT_BONUS_MOVE_REFILL_HALF_TURN;
+    config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_BONUS_MOVE_REFILL_KEY, &bonusMoveRefill);
+    combat_rt_set_bonus_move_refill(bonusMoveRefill);
 
     // Idle hostiles look around (MODS row; 0 = off = vanilla's fixed stare). See rt_idle_look_around.
     // Default ON since the release (his setting).
@@ -19380,7 +19959,7 @@ Object* combat_rt_quick_throw_target()
         // Out of reach it is still the target: the throw lands as far as it goes (rt_player_far_target).
         return rt_is_combatant(rt_lock_target) ? rt_lock_target : NULL;
     }
-    Object* target = rt_unlocked_attack_target(hitMode);
+    Object* target = rt_unlocked_attack_target(hitMode, false);
     return target != NULL ? target : rt_nearest_visible_hostile();
 }
 
@@ -20211,7 +20790,7 @@ void combat_rt_poll_gamepad()
                 }
             }
         } else {
-            Object* target = rt_unlocked_attack_target(hitMode);
+            Object* target = rt_unlocked_attack_target(hitMode, true);
             if (target != NULL) {
                 rt_set_player_intent(target, hitMode, loc);
                 if (attackEdge) {
@@ -21960,10 +22539,11 @@ static const char* rt_party_set_distance(Object* c, int distance)
 #if FALLOUT_RT_GAME == 2
 static const char* const rt_squad_order_names[] = {
     "attack", "follow", "hold", "charge", "go", "hold-fire", "open-fire", "heal-me", "no-healing", "heal-again",
+    "keep-distance",
 };
 static const char* const rt_squad_order_lines[] = {
     "On it.", "Coming.", "Holding.", "Charging!", "Moving.", "Holding fire.", "Weapons free.", "Hold still.",
-    "Saving supplies.", "I'll patch you up.",
+    "Saving supplies.", "I'll patch you up.", "Keeping my distance.",
 };
 // Too few names or lines would compile and leave the last orders a NULL (the trace's %s, the floated line): the
 // COMBAT_RT_ORDER_* list and these move together.
@@ -22116,6 +22696,7 @@ static bool rt_squad_command(Object* who, int order, Object* target, int tile, c
         RT_DIST_NONE, // heal-me
         RT_DIST_NONE, // no-healing
         RT_DIST_NONE, // heal-again
+        RT_DIST_SNIPE, // keep-distance
     };
     static_assert((int)(sizeof(distances) / sizeof(distances[0])) == COMBAT_RT_ORDER_COUNT,
         "distances must list every COMBAT_RT_ORDER_*");
@@ -22307,6 +22888,16 @@ static bool rt_squad_command(Object* who, int order, Object* target, int tile, c
                 rt_squad_cut_walk(a, c, "go"); // out of a fight too: its script's follow
                 rt_squad_heal_end(o, "go");
                 rt_squad_post_set(c, goTiles[i], who != NULL ? "go" : "go-all");
+                break;
+            case COMBAT_RT_ORDER_KEEP_DISTANCE:
+                // KEEP DISTANCE (2026-11-17, his „můžu vicovi říct pomocí LT+A at se drží daleko?“ → „Ano, přidej“): the
+                // dialogue panel's Distance "Snipe", which the realtime fight already keeps (rt_party_snipe_step: back
+                // off from a target nearer than 10 tiles; regroup at 7 with nothing to fight). Ends a post, as CHARGE
+                // does -- a post is a Stay; hold fire is left as it is, the order is about distance only.
+                rt_squad_post_end(o, "keep-distance");
+                if (a != NULL) {
+                    rt_party_take_order(a, c, false);
+                }
                 break;
             case COMBAT_RT_ORDER_HOLD_FIRE:
                 rt_squad_set_hold_fire(c, true, "order");
@@ -22637,6 +23228,66 @@ bool combat_rt_squad_weapon_ready(Object* c, Object* item)
     return c != NULL && item != NULL && rt_squad_weapon_holdable(c, item) && rt_squad_weapon_loaded(c, item);
 }
 
+// ARMOR (2026-11-17, his „ať je možné si vzít i armour“ → „Přidej do LT+A“): COMBAT CONTROL's "Use best armor" from
+// the squad mode's companion wheel -- the very calls the dialogue makes (game_dialog.cc, its 'a' key):
+// _ai_search_inven_armor, the best armour in the pack better than the one worn (party members only), then wielded. No
+// animation, as in the dialogue: the armour is on at once, its AC and resistances with it (_adjust_ac). Vanilla's own
+// exception kept: its button never dresses pid 0x10000A1.
+bool combat_rt_squad_can_wear_armor(Object* c)
+{
+#if FALLOUT_RT_GAME == 2
+    return c != NULL && rt_is_critter(c) && isPartyMember(c) && !critter_is_dead(c) && c->pid != 0x10000A1
+        && critter_body_type(c) == BODY_TYPE_BIPED;
+#else
+    (void)c;
+    return false;
+#endif
+}
+
+Object* combat_rt_squad_best_armor(Object* c)
+{
+#if FALLOUT_RT_GAME == 2
+    return combat_rt_squad_can_wear_armor(c) ? _ai_search_inven_armor(c) : NULL;
+#else
+    (void)c;
+    return NULL;
+#endif
+}
+
+bool combat_rt_squad_wear_best_armor(Object* c)
+{
+#if FALLOUT_RT_GAME == 2
+    if (!rt_enabled || !combat_rt_squad_can_wear_armor(c)) {
+        return false;
+    }
+    char whoText[16];
+    rt_squad_who_text(c, whoText, sizeof(whoText));
+    Object* armor = _ai_search_inven_armor(c);
+    if (armor == NULL) {
+        trace_event(TRACE_ACTION, "squad-order", "order=armor target=- companions=0 skipped=1 why=none speaker=%d t=%.2f who=%s tile=-1",
+            c->id, rt_clock, whoText);
+        rt_squad_say(c, "Nothing better.");
+        return false;
+    }
+    Object* worn = inven_worn(c);
+    int wasPid = worn != NULL ? worn->pid : -1;
+    int pid = armor->pid;
+    int rc = inven_wield(c, armor, 0);
+    trace_event(TRACE_FLOW, "squad-armor", "id=%d pid=%d armor=%d was=%d rc=%d ac=%d t=%.2f", c->id, c->pid, pid, wasPid, rc,
+        stat_level(c, STAT_ARMOR_CLASS), rt_clock);
+    trace_event(TRACE_ACTION, "squad-order", "order=armor target=%d companions=%d skipped=0 why=%s speaker=%d t=%.2f who=%s tile=-1",
+        pid, rc == 0 ? 1 : 0, rc == 0 ? "ok" : "refused", c->id, rt_clock, whoText);
+    if (rc != 0) {
+        return false;
+    }
+    rt_squad_say(c, "Suiting up.");
+    return true;
+#else
+    (void)c;
+    return false;
+#endif
+}
+
 bool combat_rt_squad_set_weapon(Object* c, Object* item)
 {
 #if FALLOUT_RT_GAME == 2
@@ -22907,9 +23558,10 @@ void combat_rt_squad_mode_set_open(bool open, const char* why)
             why != NULL ? why : "-", RT_SQUAD_SLOW_SECONDS, rt_squad_slow_probe != NULL ? rt_squad_slow_probe->id : -1,
             rt_squad_slow_probe != NULL ? rt_squad_slow_probe->pid : -1, rt_clock);
     }
-    // The cursor's reach answer belongs to one opening (the companions move between two).
+    // The cursor's reach answer belongs to one opening (the companions move between two), and so does the last line.
     rt_squad_reach_who = NULL;
     rt_squad_reach_tile = -1;
+    rt_squad_last_speaker = NULL;
 }
 
 bool combat_rt_squad_mode_is_open()
@@ -25070,8 +25722,16 @@ void combat_rt_update(float dt)
         rt_bonus_move_regen = 0.0f;
     } else {
         int bonusMoveBefore = rt_bonus_move_ap;
-        rt_regen_ap(obj_dude, &rt_bonus_move_ap, &rt_bonus_move_regen, bonusMoveMax,
-            (dudeWalking || dudeRunning) ? 0.0f : regenDt);
+        float bonusMoveDt = (dudeWalking || dudeRunning) ? 0.0f : regenDt;
+        if (bonusMoveDt > 0.0f && rt_bonus_move_refill != RT_BONUS_MOVE_REFILL_FAST && bonusMoveMax > 0) {
+            // A turn's worth (MODS "Bonus Move"): rt_regen_ap adds a point per regen interval of dt, so dt scaled by
+            // reserve / pool brings the whole reserve back in the time the whole pool takes at the base rate -- the
+            // raw dt, no distance multiplier -- and twice that share in half of it.
+            int poolMax = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+            float share = poolMax > 0 ? (float)bonusMoveMax / (float)poolMax : 1.0f;
+            bonusMoveDt = dt * share * (rt_bonus_move_refill == RT_BONUS_MOVE_REFILL_HALF_TURN ? 2.0f : 1.0f);
+        }
+        rt_regen_ap(obj_dude, &rt_bonus_move_ap, &rt_bonus_move_regen, bonusMoveMax, bonusMoveDt);
         if (bonusMoveMax > 0 && bonusMoveBefore < bonusMoveMax && rt_bonus_move_ap == bonusMoveMax) {
             trace_event(TRACE_ACTION, "bonus-move-full", "max=%d ap=%d t=%.2f",
                 bonusMoveMax, rt_player_ap, rt_clock);
@@ -26178,6 +26838,9 @@ void combat_rt_notify_critter_removed(Object* removed)
     if (rt_squad_forget_fn != NULL) {
         rt_squad_forget_fn(removed);
     }
+    if (rt_squad_last_speaker == removed) {
+        rt_squad_last_speaker = NULL;
+    }
     if (rt_lock_target == removed) {
         rt_lock_target = NULL;
     }
@@ -26682,6 +27345,30 @@ int combat_rt_get_blast_ring()
 bool combat_rt_get_tactical_ai()
 {
     return rt_tactical_ai;
+}
+
+// 0 = no limit; anything else is clamped to the 1..3 the MODS row offers. Live: the next frame counts the turns.
+void combat_rt_set_max_attackers(int count)
+{
+    rt_max_attackers = count <= 0 ? 0 : (count > 3 ? 3 : count);
+}
+
+int combat_rt_get_max_attackers()
+{
+    return rt_max_attackers;
+}
+
+// 0 Fast, 1 Half turn, 2 Turn (rt_bonus_move_refill); anything else is the default. Live: the next frame refills by it.
+void combat_rt_set_bonus_move_refill(int mode)
+{
+    rt_bonus_move_refill = mode >= RT_BONUS_MOVE_REFILL_FAST && mode <= RT_BONUS_MOVE_REFILL_TURN
+        ? mode
+        : RT_BONUS_MOVE_REFILL_HALF_TURN;
+}
+
+int combat_rt_get_bonus_move_refill()
+{
+    return rt_bonus_move_refill;
 }
 
 // A critter that is IN the fight -- chasing, attacking, or pulled in as hostile -- while one is on.

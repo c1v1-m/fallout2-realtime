@@ -1364,6 +1364,11 @@ int mapHandleTransition()
                 objectSetLocation(gDude, gMapTransition.tile, gMapTransition.elevation, nullptr);
                 mapSetElevation(gMapTransition.elevation);
                 objectSetRotation(gDude, gMapTransition.rotation, nullptr);
+                // CE (realtime): another floor of the same map loads nothing, so the run he arrived with would stay
+                // (combat_rt_dude_teleported, 2026-11-16 -- frozen mid-stride in the raiders' cave).
+                if (combat_rt_enabled()) {
+                    combat_rt_dude_teleported();
+                }
             }
 
             if (tileSetCenter(gDude->tile, TILE_SET_CENTER_REFRESH_WINDOW) == -1) {

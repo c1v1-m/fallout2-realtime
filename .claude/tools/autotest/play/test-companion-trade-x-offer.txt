@@ -1,0 +1,37 @@
+# VERIFIER (2026-11-15): does X's caps move in a COMPANION's trade really end in his pocket? Same setup as
+# test-companion-trade-x (four Miniguns from Vic's column onto his table -- 124 lb, which the readout used to price as
+# "SHORT 124"), then X, then Y (offer). A companion's trade is a free swap (_barter_attempt_transaction checks only
+# weight), so whatever X put on the dude's table went to Vic: x376 caps on the dude and x124 in Vic's column.
+# FIXED the same day: barter_auto_offer refuses in a companion's trade (buzzer, why=companion), the screen shows no
+# readout and no X badge there, and the swap of the Miniguns goes through with all 500 caps still on the dude.
+#   1 Miniguns on Vic's table ("Wt. 124" whole, no readout, no X)   2 after X (nothing moved)
+#   3 after Y (swap done, the dude keeps x500 caps)   4 back in the talk
+name test-companion-trade-x-offer
+map DESERT1.MAP
+seed 1
+duration 22
+dude tile 20100 rot 2
+dude item 41 500
+
+spawn 16777278 20302 rot 4 wield 8 item 12 4 party script 50
+
+talk 1500 16777278
+tap 5000 Y
+tap 7500 LB
+axis 9000 LT 32767
+tap 9300 A
+axis 9700 LT -32768
+shot 10500
+tap 11500 X
+shot 12800
+tap 14000 Y
+shot 15500
+tap 16500 B
+shot 19000
+note 20500 end
+
+expect \[FLOW/autotest\] talk .*rc=0
+expect barter-a\] list=3 row=0 pid=12
+expect barter-auto-refused\] why=companion
+expect-not barter-auto-moved\]
+expect barter-offer\] rc=0 .*party=1

@@ -692,32 +692,47 @@ static bool gdPadNavEngaged = false;
 // image -- the button redraws it every frame). Freed in _gdialog_window_destroy.
 static unsigned char* gd_barter_hint_up = nullptr;
 static unsigned char* gd_control_hint_up = nullptr;
+// ...and the trade screen's OFFER (Y) and TALK (B): created with the barter window, freed with it.
+static unsigned char* gd_offer_hint_up = nullptr;
+static unsigned char* gd_talk_hint_up = nullptr;
+// ...and REVIEW's striped plate (51x29) wearing an "LB" pill, up and pressed: made and freed with the barter / control
+// ones (gdialog_free_hint_buttons).
+static unsigned char* gd_review_hint_up = nullptr;
+static unsigned char* gd_review_hint_down = nullptr;
 
 // Y = barter (the 'b' key the loop already has); X = a party member's COMBAT CONTROL (Fallout 2's own
 // button on that panel -- fallout1-ce put "ask about" there, which Fallout 2 does not have).
 #define GD_KEY_COMBAT_CONTROL 0x7001
+// LB = REVIEW, the conversation so far (2026-11-17, his „where are the buttons?“ over his own shot of a talk with Vic ->
+// „REVIEW nemá tlačítko“: every other button on the panel had a pad button, REVIEW had none, and the review window was
+// out of the pad's reach). LB because REVIEW sits on the panel's left, as LB's column does on the trade screen.
+#define GD_KEY_REVIEW 0x7002
 
 static int gdialog_gamepad_keycode()
 {
     static bool prevY = false;
     static bool prevX = false;
+    static bool prevLB = false;
 
     SDL_GameController* pad = gamepad_ui_get_controller();
     if (pad == nullptr) {
         prevY = false;
         prevX = false;
+        prevLB = false;
         return -1;
     }
 
     SDL_GameControllerUpdate();
     bool yNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
     bool xNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) != 0;
+    bool lbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
 
     // First frame of a new conversation: adopt whatever is held instead of reading it as a press.
     if (gdialog_pad_rearm) {
         gdialog_pad_rearm = false;
         prevY = yNow;
         prevX = xNow;
+        prevLB = lbNow;
         return -1;
     }
 
@@ -726,10 +741,67 @@ static int gdialog_gamepad_keycode()
         keyCode = KEY_LOWERCASE_B; // barter / trade
     } else if (xNow && !prevX && gGameDialogSpeakerIsPartyMember) {
         keyCode = GD_KEY_COMBAT_CONTROL;
+    } else if (lbNow && !prevLB) {
+        keyCode = GD_KEY_REVIEW;
     }
 
     prevY = yNow;
     prevX = xNow;
+    prevLB = lbNow;
+    return keyCode;
+}
+
+// The review window's own pad (gameDialogShowReview): D-pad or left stick up / down scroll a line -- held, it repeats --
+// and LB closes it again, as B and BACK already did (gdialog_gamepad_cancel_key). `rearm` on its first frame adopts what
+// is held: the LB that opened it is still down then.
+#define GD_REVIEW_REPEAT_FIRST_MS 350
+#define GD_REVIEW_REPEAT_MS 90
+static int gdialog_review_pad_key(bool rearm)
+{
+    static bool prevLB = false;
+    static int heldDir = 0;
+    static unsigned int nextStep = 0;
+
+    SDL_GameController* pad = gamepad_ui_get_controller();
+    if (pad == nullptr) {
+        prevLB = false;
+        heldDir = 0;
+        return -1;
+    }
+
+    SDL_GameControllerUpdate();
+    bool lbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+    Sint16 ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+    int dir = 0;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0 || ly < -16000) {
+        dir = -1;
+    } else if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0 || ly > 16000) {
+        dir = 1;
+    }
+
+    if (rearm) {
+        prevLB = lbNow;
+        heldDir = dir;
+        nextStep = getTicks() + GD_REVIEW_REPEAT_FIRST_MS;
+        return -1;
+    }
+
+    bool lbEdge = lbNow && !prevLB;
+    prevLB = lbNow;
+    if (lbEdge) {
+        return KEY_ESCAPE;
+    }
+
+    unsigned int now = getTicks();
+    int keyCode = -1;
+    if (dir != 0 && dir != heldDir) {
+        keyCode = dir < 0 ? KEY_ARROW_UP : KEY_ARROW_DOWN;
+        nextStep = now + GD_REVIEW_REPEAT_FIRST_MS;
+    } else if (dir != 0 && now >= nextStep) {
+        keyCode = dir < 0 ? KEY_ARROW_UP : KEY_ARROW_DOWN;
+        nextStep = now + GD_REVIEW_REPEAT_MS;
+    }
+    heldDir = dir;
     return keyCode;
 }
 
@@ -787,10 +859,31 @@ static void gdialog_tick_cursor(bool* shown, int* lastX, int* lastY, unsigned in
     } else if (*shown && getTicksSince(*lastMove) >= GD_CURSOR_IDLE_MS) {
         gameMouseSetCursor(MOUSE_CURSOR_NONE);
         *shown = false;
+    } else if (!*shown && gameMouseGetCursor() != MOUSE_CURSOR_NONE) {
+        // Hidden, yet someone put the arrow back: the reply window's scroll arrows restore it when the pointer
+        // leaves them (_reply_arrow_restore), and after a trade the pointer sits wherever the trade's pad nav left
+        // it. Blank it again at once (2026-11-15, the arrow that stayed over the replies after trading with Vic).
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
     }
 
     *lastX = x;
     *lastY = y;
+}
+
+// Back from the trade, COMBAT CONTROL or the custom panel: each ran its own loop and left its own arrow up, so the
+// pointer stood over the reply list for good -- the reply nav only hides what it showed itself („a mouse kurzor mě
+// stále obtěžuje“, Fallout 2 Realtime 2026-11-15). Blank it again; the arrow first, because gmouse may still think it
+// holds the blank (the trade sets its arrow without it) and would skip the same cursor set twice.
+static void gdialog_rehide_pointer(bool engaged, bool* shown, int* lastX, int* lastY, unsigned int* lastMove)
+{
+    if (!engaged) {
+        return;
+    }
+    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+    gameMouseSetCursor(MOUSE_CURSOR_NONE);
+    *shown = false;
+    mouseGetPosition(lastX, lastY);
+    *lastMove = getTicks();
 }
 
 // Minimum gap between two accepted reply selections: one press must never answer two reply sets.
@@ -1036,32 +1129,50 @@ static bool gdialog_float_say_message()
     return true;
 }
 
-// A copy of the red button art with `letter` drawn in its middle (malloc'd; nullptr on failure).
+// A copy of the red button art wearing the pad's badge for `letter` in place of the red dot (malloc'd; nullptr on
+// failure): the dark disc and gold letter of every pad mark (intface_pad_face -- the bar, the character selection, the
+// bomb's SET TIMER window). It used to be a small WHITE letter on the red dot, and that did not read as a pad button at
+// all: „barter při konverzaci nemá tlačítko“ (Fallout 2 Realtime 2026-11-15, his Deck) about a button that had one, and
+// his „Ano, postav“ to the mock-up with the whole badge.
+//
+// ⚠️ 16x16, A PIXEL BIGGER EACH WAY THAN THE 14x14 RED BUTTON IT REPLACES (2026-11-15, „Offer a talk tlačítka nejsou
+// vycentrované a nahnuté“). The panels' art paints a red dot of its own under every red button, and that one reaches a
+// pixel past the button's picture -- left and up (OFFER's art dot spans x 40..55 under a button at 41..54). A badge the
+// size of the button left a red crescent showing on one side, so it looked pushed aside and tilted. gdialog_red_button
+// places this picture at (x - 1, y - 1), centred on the art dot's middle, and its rim covers the whole dot.
+#define GD_BADGE_SIZE 16
 static unsigned char* gdialog_hint_button(const char* letter)
 {
-    FrmImage redFrm;
-    if (!redFrm.lock(buildFid(OBJ_TYPE_INTERFACE, 96, 0, 0, 0))) {
+    unsigned char* badge = (unsigned char*)internal_malloc(GD_BADGE_SIZE * GD_BADGE_SIZE);
+    if (badge == nullptr) {
         return nullptr;
     }
+    intface_pad_face_fill(badge, GD_BADGE_SIZE, GD_BADGE_SIZE, letter[0]);
+    return badge;
+}
 
-    int redW = redFrm.getWidth();
-    int redH = redFrm.getHeight();
-    int redSize = redW * redH;
-    unsigned char* copy = (unsigned char*)internal_malloc(redSize);
-    if (copy == nullptr) {
-        return nullptr;
+// One of the dialogue's small red buttons at (x, y) -- or, when `badge` is a pad badge (gdialog_hint_button), that
+// badge in its place, a pixel up and left and two wider, the same picture pressed or not.
+static int gdialog_red_button(int x, int y, int keyCode, unsigned char* badge)
+{
+    if (badge != nullptr) {
+        return buttonCreate(gGameDialogWindow, x - 1, y - 1, GD_BADGE_SIZE, GD_BADGE_SIZE, -1, -1, -1, keyCode,
+            badge, badge, nullptr, BUTTON_FLAG_TRANSPARENT);
     }
-    memcpy(copy, redFrm.getData(), redSize);
+    return buttonCreate(gGameDialogWindow, x, y, 14, 14, -1, -1, -1, keyCode,
+        _redButtonNormalFrmImage.getData(), _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
+}
 
-    int oldFont = fontGetCurrent();
-    fontSetCurrent(101);
-    int hintY = (redH - fontGetLineHeight()) / 2;
-    if (hintY < 0) {
-        hintY = 0;
+static void gdialog_free_barter_hints()
+{
+    if (gd_offer_hint_up != nullptr) {
+        internal_free(gd_offer_hint_up);
+        gd_offer_hint_up = nullptr;
     }
-    fontDrawText(copy + redW * hintY + (redW - fontGetStringWidth(letter)) / 2, letter, redW, redW, _colorTable[32767]);
-    fontSetCurrent(oldFont);
-    return copy;
+    if (gd_talk_hint_up != nullptr) {
+        internal_free(gd_talk_hint_up);
+        gd_talk_hint_up = nullptr;
+    }
 }
 
 static void gdialog_free_hint_buttons()
@@ -1074,6 +1185,30 @@ static void gdialog_free_hint_buttons()
         internal_free(gd_control_hint_up);
         gd_control_hint_up = nullptr;
     }
+    if (gd_review_hint_up != nullptr) {
+        internal_free(gd_review_hint_up);
+        gd_review_hint_up = nullptr;
+    }
+    if (gd_review_hint_down != nullptr) {
+        internal_free(gd_review_hint_down);
+        gd_review_hint_down = nullptr;
+    }
+}
+
+// REVIEW's plate (`art`, w x h) with the pad's "LB" pill on its middle (malloc'd; nullptr on failure): the shoulder
+// pill of the bar and the trade screen's columns (intface_pad_pill), on the yellow-black stripes.
+static unsigned char* gdialog_review_hint_button(const unsigned char* art, int w, int h)
+{
+    if (art == nullptr) {
+        return nullptr;
+    }
+    unsigned char* copy = (unsigned char*)internal_malloc(w * h);
+    if (copy == nullptr) {
+        return nullptr;
+    }
+    memcpy(copy, art, w * h);
+    intface_pad_pill(copy, w, w, h, w / 2, h / 2, "LB");
+    return copy;
 }
 
 // gdialog_init
@@ -1974,6 +2109,8 @@ int gameDialogShowReview()
     int v1 = 0;
     gameDialogReviewWindowUpdate(win, v1);
 
+    gdialog_review_pad_key(true);
+
     while (true) {
         sharedFpsLimiter.mark();
 
@@ -1982,6 +2119,15 @@ int gameDialogShowReview()
         // CE: B / BACK cancels the review window.
         if (keyCode == -1) {
             keyCode = gdialog_gamepad_cancel_key();
+        }
+
+        // CE: and the pad's own: LB closes it again, the D-pad / left stick scroll (gdialog_review_pad_key).
+        if (keyCode == -1) {
+            keyCode = gdialog_review_pad_key(false);
+            if (keyCode != -1) {
+                trace_event(TRACE_FLOW, "gd-review", "pad key=%d top=%d entries=%d", keyCode, v1,
+                    gGameDialogReviewEntriesLength);
+            }
         }
 
         if (keyCode == 17 || keyCode == 24 || keyCode == 324) {
@@ -2050,6 +2196,25 @@ void gameDialogReviewWindowUpdate(int win, int origin)
         width,
         windowBuffer + width * entriesRect.top + entriesRect.left,
         width);
+
+    // CE: with a pad, B on the panel just left of DONE's frame (DONE = 82x46 at 499,398): B and BACK close the review
+    // (gdialog_gamepad_cancel_key), as LB does (gdialog_review_pad_key); DONE's plate has no room of its own for one.
+    // ⚠️ HERE, after the blit above, not once in gameDialogReviewWindowInit: that blit copies WHOLE 640-wide rows from
+    // x 113 on (spilling into the next row's start), so rows 76..433 -- DONE's middle among them -- are painted over on
+    // every scroll, and a badge drawn at the window's creation was gone before the first frame.
+    // ⚠️ AND REFRESHED ONTO THE SCREEN BY ITSELF: this function ends refreshing entriesRect only, and the window's one full
+    // refresh (gameDialogReviewWindowInit) came before -- drawn into the buffer alone, the B was in every `shot` and on
+    // no monitor (autotest step `screen`, 2026-11-17).
+    if (gamepad_ui_get_controller() != nullptr) {
+        intface_pad_face(windowBuffer, GAME_DIALOG_REVIEW_WINDOW_WIDTH, GAME_DIALOG_REVIEW_WINDOW_WIDTH,
+            GAME_DIALOG_REVIEW_WINDOW_HEIGHT, 481, 398 + 46 / 2, 'B');
+        Rect badgeRect;
+        badgeRect.left = 481 - 9;
+        badgeRect.top = 398 + 46 / 2 - 9;
+        badgeRect.right = 481 + 9;
+        badgeRect.bottom = 398 + 46 / 2 + 9;
+        windowRefreshRect(win, &badgeRect);
+    }
 
     int y = 76;
     for (int index = origin; index < gGameDialogReviewEntriesLength; index++) {
@@ -2455,6 +2620,17 @@ int _gdProcess()
             }
         }
 
+        // LB: REVIEW, as its button does (gameDialogReviewButtonOnMouseUp) -- only while that button is up (not under
+        // the trade, which takes the panel). It runs its own loop; the arrow it may leave is blanked on the way back.
+        if (keyCode == GD_KEY_REVIEW) {
+            keyCode = -1;
+            if (_dialogue_state == 1 && _gdialog_buttons[1] != -1) {
+                trace_event(TRACE_FLOW, "gd-review", "open via=pad entries=%d", gGameDialogReviewEntriesLength);
+                gameDialogShowReview();
+                gdialog_rehide_pointer(gdCursorController, &gdCursorShown, &gdCursorX, &gdCursorY, &gdCursorMove);
+            }
+        }
+
         convertMouseWheelToArrowKey(&keyCode);
 
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
@@ -2490,16 +2666,19 @@ int _gdProcess()
                     _dialogue_switch_mode = 1;
                     _dialogue_state = 1;
                 }
+                gdialog_rehide_pointer(gdCursorController, &gdCursorShown, &gdCursorX, &gdCursorY, &gdCursorMove);
                 continue;
             } else if (_dialogue_switch_mode == 9) {
                 _dialogue_state = 10;
                 partyMemberControlWindowHandleEvents();
                 partyMemberControlWindowFree();
+                gdialog_rehide_pointer(gdCursorController, &gdCursorShown, &gdCursorX, &gdCursorY, &gdCursorMove);
                 continue;
             } else if (_dialogue_switch_mode == 12) {
                 _dialogue_state = 13;
                 partyMemberCustomizationWindowHandleEvents();
                 partyMemberCustomizationWindowFree();
+                gdialog_rehide_pointer(gdCursorController, &gdCursorShown, &gdCursorX, &gdCursorY, &gdCursorMove);
                 continue;
             }
 
@@ -3857,15 +4036,38 @@ int _gdialog_barter_create_win()
 
     backgroundFrmImage.unlock();
 
+    // CE: with a pad, OFFER and TALK wear the badges of the buttons that press them -- Y offers (the trade's
+    // barter_even_if_short + offer), B leaves for the talk -- in place of the red dot, as in his approved mock-up
+    // (2026-11-15). The rest of the trade screen's marks (LB / RB over the columns, X by the SHORT / DEAL readout)
+    // are inventory.cc's barter_draw_deal.
+    gdialog_free_barter_hints();
+    if (gamepad_ui_get_controller() != nullptr) {
+        gd_offer_hint_up = gdialog_hint_button("Y");
+        gd_talk_hint_up = gdialog_hint_button("B");
+    }
+
+    // ⚠️ A COMPANION'S trade.frm IS barter.frm WITHOUT ITS TOP ROW (190 rows against 191, the art one row higher
+    // inside the picture), and the window is placed by its bottom edge (barterWindowY above), so its art lands on
+    // the very same screen rows -- but vanilla's button spots below are barter.frm's, so there they sit a row LOW.
+    // A plain red button on a red dot hides that; the badge, which must cover the art's dot exactly
+    // (gdialog_hint_button), showed a red crescent at the top left of TRADE's Y and TALK's B (2026-11-15). So with
+    // a badge the spots are measured from the bottom, like the art; the plain buttons stay where vanilla has them.
+    const int barterFrmHeight = 191;
+    int badgeDy = _dialogue_subwin_len - barterFrmHeight;
+
     // TRADE
-    _gdialog_buttons[0] = buttonCreate(gGameDialogWindow, 41, 163, 14, 14, -1, -1, -1, KEY_LOWERCASE_M, _redButtonNormalFrmImage.getData(), _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
+    _gdialog_buttons[0] = gdialog_red_button(41, 163 + (gd_offer_hint_up != nullptr ? badgeDy : 0), KEY_LOWERCASE_M, gd_offer_hint_up);
     if (_gdialog_buttons[0] != -1) {
         buttonSetCallbacks(_gdialog_buttons[0], _gsound_med_butt_press, _gsound_med_butt_release);
 
         // TALK
-        _gdialog_buttons[1] = buttonCreate(gGameDialogWindow, 584, 162, 14, 14, -1, -1, -1, KEY_LOWERCASE_T, _redButtonNormalFrmImage.getData(), _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
+        _gdialog_buttons[1] = gdialog_red_button(584, 162 + (gd_talk_hint_up != nullptr ? badgeDy : 0), KEY_LOWERCASE_T, gd_talk_hint_up);
         if (_gdialog_buttons[1] != -1) {
             buttonSetCallbacks(_gdialog_buttons[1], _gsound_med_butt_press, _gsound_med_butt_release);
+
+            // The badges onto the screen: the panel scrolled in above before they were made, and buttonCreate only
+            // draws into the window's buffer (the same trap as the talk panel's, _gdialog_window_create).
+            windowRefresh(gGameDialogWindow);
 
             if (objectCreateWithFidPid(&_peon_table_obj, -1, -1) != -1) {
                 _peon_table_obj->flags |= OBJECT_HIDDEN;
@@ -3936,6 +4138,7 @@ void _gdialog_barter_destroy_win()
 
     windowDestroy(gGameDialogWindow);
     gGameDialogWindow = -1;
+    gdialog_free_barter_hints(); // OFFER's and TALK's badge pictures, now that their buttons are gone
 
     aiAttemptWeaponReload(gGameDialogSpeaker, 0);
 }
@@ -5409,24 +5612,21 @@ int _gdialog_window_create()
                 _gdialog_scroll_subwin(gGameDialogWindow, true, backgroundFrmData, windowBuf, nullptr, _dialogue_subwin_len, false);
             }
 
-            // CE: with a controller, "Y" on the barter button and "X" on combat control, baked into
-            // private copies of the art (matches the pad shortcuts in _gdProcess).
-            unsigned char* barterUp = _redButtonNormalFrmImage.getData();
-            unsigned char* controlUp = _redButtonNormalFrmImage.getData();
+            // CE: with a controller, the pad's badge Y on the barter button and X on combat control
+            // (gdialog_hint_button; matches the pad shortcuts in _gdProcess).
+            gdialog_free_hint_buttons();
             if (gamepad_ui_get_controller() != nullptr) {
-                gdialog_free_hint_buttons();
                 gd_barter_hint_up = gdialog_hint_button("Y");
                 gd_control_hint_up = gdialog_hint_button("X");
-                if (gd_barter_hint_up != nullptr) {
-                    barterUp = gd_barter_hint_up;
-                }
-                if (gd_control_hint_up != nullptr) {
-                    controlUp = gd_control_hint_up;
-                }
             }
+            // His PC session (trace_2026-11-15_214530) talked to Vic with a pad, yet he saw no Y / X there while every
+            // self-played run shows them: say, each time the panel is built, whether the pad was seen and the badges made.
+            trace_event(TRACE_FLOW, "gd-badges", "pad=%d barter=%d control=%d party=%d",
+                gamepad_ui_get_controller() != nullptr ? 1 : 0, gd_barter_hint_up != nullptr ? 1 : 0,
+                gd_control_hint_up != nullptr ? 1 : 0, gGameDialogSpeakerIsPartyMember ? 1 : 0);
 
             // BARTER/TRADE
-            _gdialog_buttons[0] = buttonCreate(gGameDialogWindow, 593, 41, 14, 14, -1, -1, -1, -1, barterUp, _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
+            _gdialog_buttons[0] = gdialog_red_button(593, 41, -1, gd_barter_hint_up);
             if (_gdialog_buttons[0] != -1) {
                 buttonSetMouseCallbacks(_gdialog_buttons[0], nullptr, nullptr, nullptr, gameDialogBarterButtonUpMouseUp);
                 buttonSetCallbacks(_gdialog_buttons[0], _gsound_med_butt_press, _gsound_med_butt_release);
@@ -5437,23 +5637,37 @@ int _gdialog_window_create()
                     // di_rest2.frm - dialog rest button down
                     int downFid = buildFid(OBJ_TYPE_INTERFACE, 98, 0, 0, 0);
                     if (_reviewButtonPressedFrmImage.lock(downFid)) {
-                        // REVIEW
-                        _gdialog_buttons[1] = buttonCreate(gGameDialogWindow, 13, 154, 51, 29, -1, -1, -1, -1, _reviewButtonNormalFrmImage.getData(), _reviewButtonPressedFrmImage.getData(), nullptr, 0);
+                        // REVIEW -- with a pad, its plate wears the "LB" that opens it (GD_KEY_REVIEW).
+                        if (gamepad_ui_get_controller() != nullptr) {
+                            gd_review_hint_up = gdialog_review_hint_button(_reviewButtonNormalFrmImage.getData(), 51, 29);
+                            gd_review_hint_down = gdialog_review_hint_button(_reviewButtonPressedFrmImage.getData(), 51, 29);
+                        }
+                        bool reviewHint = gd_review_hint_up != nullptr && gd_review_hint_down != nullptr;
+                        _gdialog_buttons[1] = buttonCreate(gGameDialogWindow, 13, 154, 51, 29, -1, -1, -1, -1,
+                            reviewHint ? gd_review_hint_up : _reviewButtonNormalFrmImage.getData(),
+                            reviewHint ? gd_review_hint_down : _reviewButtonPressedFrmImage.getData(), nullptr, 0);
                         if (_gdialog_buttons[1] != -1) {
                             buttonSetMouseCallbacks(_gdialog_buttons[1], nullptr, nullptr, nullptr, gameDialogReviewButtonOnMouseUp);
                             buttonSetCallbacks(_gdialog_buttons[1], _gsound_red_butt_press, _gsound_red_butt_release);
 
                             if (!gGameDialogSpeakerIsPartyMember) {
+                                // ⚠️ ONTO THE SCREEN NOW (2026-11-17): buttonCreate draws a button's picture into the WINDOW'S BUFFER ONLY (_button_draw,
+                                // draw=false), and this panel was put on screen by _gdialog_scroll_subwin BEFORE its buttons were made -- so the monitor
+                                // kept the art under them: red dots on TRADE / COMBAT CONTROL, a bare REVIEW plate. Vanilla's red buttons look like that
+                                // art, so nobody could tell; the pad badges never showed on his screen for three days (his Windows screenshot), while
+                                // every `shot` and his F12 redraw the windows and showed them. The autotest step `screen` shoots the presented frame.
+                                windowRefresh(gGameDialogWindow);
                                 _gdialog_window_created = true;
                                 return 0;
                             }
 
                             // COMBAT CONTROL
-                            _gdialog_buttons[2] = buttonCreate(gGameDialogWindow, 593, 116, 14, 14, -1, -1, -1, -1, controlUp, _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
+                            _gdialog_buttons[2] = gdialog_red_button(593, 116, -1, gd_control_hint_up);
                             if (_gdialog_buttons[2] != -1) {
                                 buttonSetMouseCallbacks(_gdialog_buttons[2], nullptr, nullptr, nullptr, gameDialogCombatControlButtonOnMouseUp);
                                 buttonSetCallbacks(_gdialog_buttons[2], _gsound_med_butt_press, _gsound_med_butt_release);
 
+                                windowRefresh(gGameDialogWindow); // the buttons onto the screen -- see above
                                 _gdialog_window_created = true;
                                 return 0;
                             }

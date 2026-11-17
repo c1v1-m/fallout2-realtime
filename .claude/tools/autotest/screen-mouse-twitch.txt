@@ -1,0 +1,39 @@
+# SCREEN: A MOUSE NOBODY TOUCHES SUMMONS NO ARROW (2026-11-17, his „STÁLE VIDÍM KURZOR MYŠI“ in the trade, the talk, the
+# world and the inventory -- never in a self-played run, which has no mouse). gpui_mouse_twitch_filter: with a pad in,
+# the mouse must travel 8 px within 0.3 s before the pointer moves at all. `mouse` steps are a real mouse's motion.
+#   1 the world, a 1-count twitch back and forth for 2 s: no arrow     2 a real move (40,20): the arrow
+#   3 the talk with Vic, the same twitch: no arrow                       4 a real move: the arrow over the replies
+#   5 two seconds at rest: gone again
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-mouse-twitch.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-mouse-twitch
+map DESERT1.MAP
+seed 1
+duration 17
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+
+spawn 16777278 20102 rot 5 wield 8 party script 50
+
+# the world: twitch, then a real move
+mouse 1000 1 0 20 100
+mouse 1050 -1 0 20 100
+shot 2800
+mouse 3200 40 20
+shot 3500
+# the talk (the arrow left by the world hides as the talk takes the pad)
+tap 6000 A
+mouse 8500 1 0 20 100
+mouse 8550 -1 0 20 100
+mouse 8520 0 1 20 100
+mouse 8580 0 -1 20 100
+shot 10300
+mouse 10700 -30 -25
+shot 11000
+shot 14000
+note 16000 end
+
+expect mouse-real\] frames=\d+ held=\d+ sum=-?[01],0 max=1 awake=0
+expect mouse-real\] wake dx=40 dy=20
+expect mouse-real\] wake dx=-30 dy=-25
+expect-not mouse-real\] wake dx=-?[0-9] dy=-?[0-9]$

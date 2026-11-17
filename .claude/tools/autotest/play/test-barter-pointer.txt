@@ -1,0 +1,22 @@
+# TEST (2026-11-15, the barter badges): after B leaves the trade, the yellow arrow pointer showed over the reply list in
+# every shot 3 s later (test-barter-reenter, -states, -companion). The talk blanks the pointer with a pad and shows it
+# only for 2 s after it moves (gdialog_tick_cursor) -- does it go away, and when? Maida (as m-barter-y): Y opens the
+# trade, B leaves it, shots 2, 3.5, 5.5 and 8 s after B.
+name test-barter-pointer
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 19
+dude tile 22879 rot 0
+dude item 41 2000
+
+talk 2000 16777273
+tap 6000 Y
+tap 9000 B
+shot 11000
+shot 12500
+shot 14500
+shot 17000
+note 18000 end
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+

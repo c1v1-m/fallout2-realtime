@@ -35,6 +35,7 @@
 #include "window_manager.h"
 
 // Realtime (fallout1-ce's gmouse.cc changes, ported).
+#include "rt/game/autotest.h"
 #include "rt/game/combat_rt.h"
 #include "rt/game/game_trace.h"
 #include "rt/game/gamepad_ui.h"
@@ -1402,23 +1403,47 @@ int gameMouseSetCursor(int cursor)
     // it. With a controller connected, the planet's picture is centred on the screen when it comes up.
     // ...in the middle of the MAP, not of the whole screen (2026-11-01, "logo při loadingu není veprostřed"): the bar
     // stays up while the map goes black above it, and the screen's centre sat 50 px below the black area's.
+    // ⚠️ ...and the middle of the BLACK (2026-11-17, „chci aby loading byl veprostřed … na obrazovce, teď je
+    // dvakrát“): Continue and Load from the main menu, and the quick load, put a black cover over the bar too,
+    // so the whole screen is black and its centre is the middle; only a map change keeps the bar showing.
+    // And ONE planet: mouseSetFrame above has already drawn the first frame where the pointer was, and
+    // _mouse_set_position only moves the coordinates -- that frame stayed on the screen, a second planet
+    // frozen where the pointer was parked. Erase it there, then draw it once in the middle.
+    static int planetOverMap = 0; // where this load's planet was put (its later frames stay there)
+    int planetFromX = -1;
+    int planetFromY = -1;
     if (cursor == MOUSE_CURSOR_WAIT_PLANET && gGameMouseCursor != MOUSE_CURSOR_WAIT_PLANET
         && gamepad_ui_get_controller() != nullptr) {
+        planetOverMap = 0;
+        mouseGetPosition(&planetFromX, &planetFromY);
         int centerX = screenGetWidth() / 2;
         int centerY = screenGetHeight() / 2;
         Rect mapRect;
-        if (gIsoWindow != -1 && windowGetRect(gIsoWindow, &mapRect) == 0) {
+        Rect barRect;
+        if (gIsoWindow != -1 && windowGetRect(gIsoWindow, &mapRect) == 0
+            && gInterfaceBarWindow != -1 && windowGetRect(gInterfaceBarWindow, &barRect) == 0
+            && win_get_top_visible_at((barRect.left + barRect.right) / 2, (barRect.top + barRect.bottom) / 2) == gInterfaceBarWindow) {
             centerX = (mapRect.left + mapRect.right + 1) / 2;
             centerY = (mapRect.top + mapRect.bottom + 1) / 2;
+            planetOverMap = 1;
+        }
+        bool shown = !cursorIsHidden();
+        if (shown) {
+            mouseHideCursor();
         }
         _mouse_set_position(centerX - width / 2 + offsetX, centerY - height / 2 + offsetY);
+        if (shown) {
+            mouseShowCursor();
+        }
     }
     if (cursor == MOUSE_CURSOR_WAIT_PLANET) {
         int mx;
         int my;
         mouseGetPosition(&mx, &my);
-        trace_event(TRACE_FLOW, "planet", "was=%d pad=%d at=%d,%d screen=%dx%d", gGameMouseCursor,
-            gamepad_ui_get_controller() != nullptr ? 1 : 0, mx, my, screenGetWidth(), screenGetHeight());
+        trace_event(TRACE_FLOW, "planet", "was=%d pad=%d from=%d,%d at=%d,%d map=%d screen=%dx%d", gGameMouseCursor,
+            gamepad_ui_get_controller() != nullptr ? 1 : 0, planetFromX, planetFromY, mx, my, planetOverMap,
+            screenGetWidth(), screenGetHeight());
+        autotest_planet_frame(gGameMouseCursor != MOUSE_CURSOR_WAIT_PLANET);
     }
 
     if (gGameMouseCursorFrmHandle != INVALID_CACHE_ENTRY) {

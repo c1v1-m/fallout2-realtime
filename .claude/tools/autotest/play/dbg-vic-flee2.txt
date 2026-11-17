@@ -1,0 +1,10 @@
+# DEBUG (2026-11-17, „vic jenom přišel ke mně a nic nedělal“): Vic (Keep distance, 16 HP) 12 tiles from the dude fights two raiders near him.
+name dbg-vic-flee2
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+dude hp 400
+spawn 16777278 22500 rot 5 wield 8 item 29 6 hp 9 dist 2 party
+spawn 16777454 24496 rot 5 wield 8 item 29 6 hostile
+at 0 idle

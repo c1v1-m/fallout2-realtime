@@ -1,0 +1,46 @@
+# TESTER (2026-11-15, area b): the bomb's SET TIMER window opened from the WORLD (RB quick slot) and closed with X (PLACE,
+# the X marked on the plate) -- X held 0.5 s, past the close. Then the world's own presses must act normally: X tap (the
+# reload: nothing in hand, so reload-refused), an A (the prompt's pick-up of the bomb now at his feet), RB (the second
+# bomb's timer window) closed with B, and a B tap afterwards (no drug wheel, nothing stuck).
+name test-timer-world-x-then
+map DESERT1.MAP
+seed 1
+duration 22
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 2
+dude item 40 1
+dude quickslot rb 85
+
+tap 1500 RB
+shot 2600
+# X = PLACE, held past the close
+tap +500 X 500
+shot +1500
+# the world: X tap = the reload
+tap +800 X
+# A: pick the bomb up again
+tap +1200 A
+shot +2000
+# RB: the timer window again, B = CANCEL, then a B tap in the world
+tap +1000 RB
+shot +1100
+tap +500 B
+shot +900
+tap +800 B
+shot +800
+note +500 done
+
+# the checks (run.js)
+expect-count 2 \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-window\] close key=PLACE by=pad value=60
+expect \[INPUT/pad-spent\] held=x
+expect \[INPUT/pad-spent\] let-go=x
+expect \[ACTION/explosive-placed\] pid=209
+expect-count 1 \[INPUT/reload-refused\]|\[ACTION/reload\]
+expect \[ACTION/interact-(queue|do)\] kind=2 pid=209
+expect \[FLOW/timer-window\] close key=CANCEL by=pad value=60
+expect-count 2 \[INPUT/pad-owned\] off
+expect-not \[FLOW/world-hold\] on
+expect \[FLOW/autotest\] end why=time .* modal=-1

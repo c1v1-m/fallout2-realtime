@@ -1,0 +1,59 @@
+# Balance sim (2026-11-17, "příjde mi ten perk ted busted ... nasimuluj"): AP regen by distance (NOW) vs. flat (FLAT).
+# COMPANION family: the player's melee dude (Spiked Knuckles, ST 10 PE 7 EN 6 AG 9) with Vic beside him (party,
+# Combat Shotgun + 12 ga), against five raiders 10-14 tiles off armed as in his real fight (trace_2026-11-17_173949:
+# pid 16777454 with assault rifles / a combat shotgun, pid 16777455 with grease guns).
+# "hunt", not "fight": the fight bot only swings when the enemy is in weapon range (1 for knuckles) and never walks;
+# hunt runs at anyone within 10 tiles and stands otherwise (a raider shooting from 16-18 tiles held a run for 40 s), so a
+# 1 s "advance" (stick toward the nearest enemy) every 7 s is his charge at the far ones.
+# dude hp 999 + raiders at 30 hp: the bot punches the torso (no eye crits like his); at dude hp 250 he died at 24 s with one
+# raider down, at 999 with full raiders only two were dead after 90 s (the fight never ended).
+# No "dude armor": the harness's inven_wield gives the dude armour art only, not its AC/DR (_adjust_ac is NPC-only).
+name rec-companion-mid
+map DESERT1.MAP
+seed 1
+duration 90
+dude tile 20100 rot 2
+dude stat ST 10
+dude stat PE 7
+dude stat EN 6
+dude stat AG 9
+dude hp 999
+dude skill unarmed 150
+dude wield 234
+
+spawn 16777278 20101 rot 2 wield 242 item 95 4 party
+
+spawn 16777454 22100 rot 5 wield 23 item 35 2 hp 30 hostile
+spawn 16777455 22104 rot 5 wield 332 item 357 2 hp 30 hostile
+spawn 16777455 22096 rot 5 wield 332 item 357 2 hp 30 hostile
+spawn 16777454 22500 rot 5 wield 242 item 95 2 hp 30 hostile
+spawn 16777454 22702 rot 5 wield 23 item 35 2 hp 30 hostile
+
+at 0 hunt
+at 6 advance
+at 7 hunt
+at 13 advance
+at 14 hunt
+at 20 advance
+at 21 hunt
+at 27 advance
+at 28 hunt
+at 34 advance
+at 35 hunt
+at 41 advance
+at 42 hunt
+at 48 advance
+at 49 hunt
+at 55 advance
+at 56 hunt
+at 62 advance
+at 63 hunt
+at 69 advance
+at 70 hunt
+at 76 advance
+at 77 hunt
+
+# MID (2026-11-17, his „kdybychom změnili na 1,2 a 0,8?“): the standing curve 1.2 -> 0.8
+cfg regen_near_mult 1.2
+cfg regen_far_mult 0.8
+record 150

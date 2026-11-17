@@ -38,6 +38,7 @@ int aiGetBestWeapon(Object* obj);
 int aiGetDistance(Object* obj);
 int aiGetAttackWho(Object* obj);
 int aiGetChemUse(Object* obj);
+bool aiIsPrimaryChemDesire(Object* obj, int pid); // realtime: the chem beat's first bucket
 int aiSetAreaAttackMode(Object* critter, int areaAttackMode);
 int aiSetRunAwayMode(Object* obj, int run_away_mode);
 int aiSetBestWeapon(Object* critter, int bestWeapon);

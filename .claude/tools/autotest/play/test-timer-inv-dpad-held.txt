@@ -1,0 +1,72 @@
+# TESTER (2026-11-15, area b): a D-pad direction HELD through the close of the bomb's SET TIMER window, opened from the
+# INVENTORY. The natural two-handed gesture: hold D-pad DOWN to run the clock down to 0:10, and press A (DONE) with the
+# right thumb while the left one is still down. The inventory's own D-pad list scroll (inventory.cc
+# inven_gamepad_scroll_key) reads the pad itself with its own edge statics, which did not run while the window was up:
+# a DOWN still held when the inventory gets the pad back reads there as a fresh press (and then as a held one, which
+# repeats). Eight kinds of item, so the list (six rows) CAN scroll. Shot 3/4: has the list moved under the pointer? The
+# A afterwards acts on the row under the pointer: the RadAway (pid 48) if nothing scrolled, the knife (4) or club (5)
+# if the held DOWN scrolled the list one or two rows.
+name test-timer-inv-dpad-held
+map DESERT1.MAP
+seed 1
+duration 22
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 RadAway, row 1 plastic explosive, then knife, club, spear, first aid kit,
+# Mentats, dynamite
+dude item 51 1
+dude item 53 1
+dude item 47 1
+dude item 7 1
+dude item 5 1
+dude item 4 1
+dude item 85 1
+dude item 48 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+shot +400
+# A on the plastic explosive: its timer window
+tap +500 A
+# D-pad DOWN held: the clock runs down to 0:10
+pad +900 DOWN 1
+shot +700
+# A = DONE with DOWN still held; DOWN let go 1.2 s later, in the inventory
+tap +100 A
+shot +500
+pad +700 DOWN 0
+shot +400
+# the inventory's own A on the row under the pointer
+tap +600 A
+shot +1000
+note +1000 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=DONE by=pad value=10
+expect \[INPUT/pad-spent\] held=a,dpdown
+# the leak: the held DOWN must not scroll the list under the pointer -- the A then acts on the RadAway
+expect \[INPUT/inv-quick\] pid=48 row=1

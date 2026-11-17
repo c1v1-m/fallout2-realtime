@@ -2,8 +2,11 @@
 # in front of the dude is LT-locked (PE 10), so LT + A opens the mode with the cursor on it: red ATTACK over it, red
 # corner brackets round it, white outlines round Vic and Sulik (who = All), the compass with Attack lit. The world
 # slows for 1.5 s, then holds (shot 1). RB: who = Vic, the nearest (beside the dude; Sulik stands 5 tiles off) (shot 2).
-# A: ATTACK for Vic alone -- his own focus with the red chevron over the raider, "On it." over him, the mode gone
-# (shot 3); he shoots it. Sulik is not given it (he fights as he likes, on his own Distance).
+# A: ATTACK for Vic alone -- his own focus, "On it." over him, the mode still up and the world still held (shot 3).
+# B: the mode gone, the red chevron over the raider (shot 4); he shoots it. Sulik is not given it (he fights as he
+# likes, on his own Distance).
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the A, with a shot of the mode
+# still up between them; the chevron and Vic's shot come once B lets the world run.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-attack.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-pad-attack
 map DESERT1.MAP
@@ -26,9 +29,12 @@ shot 2600
 # RB: who = the nearest companion
 tap 3000 RB
 shot 3400
-# A: ATTACK for him alone
+# A: ATTACK for him alone -- it clicks and the mode stays open (the world held still)
 tap 3800 A
-shot 4300
+shot 4000
+# B: the mode closes and the world runs -- the chevron over the raider, Vic shoots it
+tap 4200 B
+shot 4500
 shot 6500
 note 12500 end
 
@@ -39,10 +45,14 @@ expect \[INPUT/squad-a\] kind=enemy order=attack obj=\d+ tile=\d+ who=18062 ok=1
 expect \[ACTION/squad-order\] order=attack target=16777454 companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=18062
 expect \[FLOW/squad-focus\] own-on who=18062 id=\d+ pid=16777454
 expect \[FLOW/squad-mark\] on id=\d+ pid=16777454
-expect \[INPUT/squad-mode\] close why=a
-expect \[FLOW/squad-mode\] close why=a slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
-# Vic goes for it; the order was his alone -- no squad focus, nothing for Sulik
-expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777454
+# the A clicks and leaves the mode open; the B closes it, and the hold held till then (rt_clock still, freeze to B)
+expect \[INPUT/squad-mode\] stays after=a order=attack speaker=18062
+expect-count 1 \[INPUT/squad-mode\] close why=b ms=
+expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+# Vic goes for it once B lets the world run: the world stood still at t=1.55, so a shot of his at t>=1.6 is one after
+# the order (his first, t=0.6, came before LT: he saw it himself). The order was his alone -- no squad focus, nothing
+# for Sulik
+expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777454 did=\d+ hm=\d+ t=(1\.[6-9]|[2-9]\.|\d\d+\.)
 expect-not \[FLOW/squad-focus\] own-on who=18097
 expect-not \[FLOW/squad-focus\] on id=
 expect-not \[ACTION/interact-(queue|do)\]

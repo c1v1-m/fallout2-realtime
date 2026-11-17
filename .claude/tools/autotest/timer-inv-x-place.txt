@@ -1,0 +1,64 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): the bomb's SET TIMER window opened from the INVENTORY, PLACE pressed with X.
+# The inventory's own X shortcut (the mouse hook runs in the window's loop) put the list row under the pointer into
+# hand A in the same frame: while the window is up the row the plastic explosive left holds the dynamite below it,
+# and the dynamite went into the hand. Checked afterwards with the inventory's own A on that row: the dynamite still in
+# the list opens its timer window (the second one here); gone into the hand, A finds an empty row.
+# Before the fix: one timer window, the dynamite in hand A (shot 3). After: two windows, the hands empty.
+name timer-inv-x-place
+map DESERT1.MAP
+seed 1
+duration 15
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 stimpak, row 1 plastic explosive, row 2 dynamite
+dude item 51 1
+dude item 85 1
+dude item 40 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+shot +400
+# A on the plastic explosive: its timer window
+tap +500 A
+shot +900
+# X = PLACE: armed and put on the ground
+tap +600 X
+shot +1200
+# A on the same row: the dynamite, if it is still in the list
+tap +600 A
+shot +1200
+# B backs out of that second window
+tap +600 B
+note +1200 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=PLACE by=pad value=60
+expect \[INPUT/pad-spent\] held=x
+# the leak: X must not have put the row under the pointer into a hand -- the dynamite is still in the list
+expect-not \[INPUT/inv-equip\]
+expect-count 2 \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+expect \[FLOW/timer-window\] open pid=51 from=inventory pad=1

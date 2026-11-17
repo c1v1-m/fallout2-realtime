@@ -1,0 +1,47 @@
+# SCREEN: ARMOR IN THE COMPANION'S WHEEL (2026-11-17, his „ať je možné si vzít i armour“ → „Přidej do LT+A“): COMBAT
+# CONTROL's "Use best armor" from the squad command mode. screen-squad-mode's setup, Vic with a Leather Armor (pid 1) in
+# his pack too. Shots: 1 the cursor on Vic, the legend "A Equip"; 2 A: his wheel -- Auto, the 10mm pistol and the
+# Leather Armor ("Put on"); 3 the stick on the armour; 4 A: the mode closes, "Suiting up." over Vic, his AC up.
+#   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/screen-squad-armor.txt 1 --exe build/Release/fallout2-ce.exe
+name screen-squad-armor
+map DESERT1.MAP
+seed 1
+duration 12
+dude tile 20100 rot 2
+dude hp 400
+dude curhp 200
+dude armor 2
+
+spawn 16777278 19904 rot 5 wield 8 item 29 3 item 40 2 item 1 1 party
+spawn 16777313 20302 rot 4 wield 4 party
+
+# LT + A: the mode, LT up -- the mode stays
+axis 600 LT 32767
+tap 800 A
+axis 1100 LT -32768
+# the cursor onto the dude, then onto Vic (screen-squad-mode's moves)
+axis 3800 RX -12535
+axis 3800 RY -15146
+axis 4159 RX 0
+axis 4159 RY 0
+axis 5800 RX -19548
+axis 5800 RY 2094
+axis 6336 RX 0
+axis 6336 RY 0
+shot 6800
+# A: his wheel -- Auto (top), the 10mm pistol (lower right), the Leather Armor (lower left)
+tap 7200 A
+shot 7700
+# the stick to the armour (240 degrees from the top), then A
+axis 8000 RX -28377
+axis 8000 RY 16383
+shot 8400
+tap 8600 A
+axis 8900 RX 0
+axis 8900 RY 0
+shot 9400
+note 11500 end
+
+expect squad-weapon-wheel\] open .* armor=2 best=1
+expect squad-armor\] id=[0-9]+ pid=16777278 armor=1 was=-1 rc=0
+expect squad-order\] order=armor target=1 companions=1 skipped=0 why=ok

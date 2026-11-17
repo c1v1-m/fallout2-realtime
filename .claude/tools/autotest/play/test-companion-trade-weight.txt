@@ -1,0 +1,28 @@
+# TESTER (2026-11-15): the trade screen's new X badge with a COMPANION, whose trade shows weights ("Wt. N") where a
+# trader shows caps ($N). The badge sits in the gap between the companion table's total and the SHORT / DEAL readout
+# (inventory.cc barter_draw_deal, dealX - 9); in test-companion-talk the total "Wt. 0" already touches it. Here four
+# Miniguns (pid 12, 28 lb each) go from Vic's column onto his table (RB to his column, LT+A all stack), so the total
+# reads three digits: does it run under the badge?
+name test-companion-trade-weight
+map DESERT1.MAP
+seed 1
+duration 16
+dude tile 20100 rot 2
+
+spawn 16777278 20302 rot 4 wield 8 item 12 4 party script 50
+
+talk 1500 16777278
+tap 5000 Y
+shot 6800
+tap 7500 RB
+shot 8300
+axis 9000 LT 32767
+tap 9300 A
+axis 9700 LT -32768
+shot 10800
+tap 12000 B
+note 14500 end
+
+expect \[FLOW/autotest\] talk .*rc=0
+expect dialog-start\] pid=16777278
+expect barter-a\]

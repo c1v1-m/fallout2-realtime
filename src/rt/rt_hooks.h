@@ -149,6 +149,15 @@ void intface_update_quick_slot_lb(Object* item, int count, bool armed);
 void intface_update_pad_badges();
 void intface_pad_pill(unsigned char* buf, int pitch, int w, int h, int cx, int cy, const char* text);
 void intface_pad_face(unsigned char* buf, int pitch, int w, int h, int cx, int cy, char key);
+void intface_pad_face_fill(unsigned char* buf, int w, int h, char key);
+void intface_pad_plate(unsigned char* buf, int pitch, int w, int h, int x0, int y0, int pw, int ph);
+int intface_pad_gold();
+// The D-pad's mark: the same disc, a cross whose arms in `lit` are gold and the rest dim (the bar's D-pad marks).
+#define INTFACE_DPAD_LEFT 1
+#define INTFACE_DPAD_DOWN 2
+#define INTFACE_DPAD_UP 4
+#define INTFACE_DPAD_RIGHT 8
+void intface_pad_dpad(unsigned char* buf, int pitch, int w, int h, int cx, int cy, int lit);
 void intface_update_aim_part(int hitLocation);
 void intface_rt_combat_box_tick(bool engaged, float dt);
 void intface_rt_combat_box_reset();

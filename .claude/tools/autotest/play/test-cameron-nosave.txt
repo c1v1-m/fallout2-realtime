@@ -1,0 +1,33 @@
+# TESTER (2026-11-15): m-cameron without its quick save (no SAVEGAME writes from a tester). Cameron (the Temple of
+# Trials' Warrior, ARCAVES floor 2) talked out of the fight with the pad -- the dialogue's replies picked with the
+# D-pad and A, the conversation ending on the script's own take-over. Regression sweep of the dialogue screen after
+# game_dialog.cc's badge work: the conversation must open, take the A presses and close again.
+name test-cameron-nosave
+map ARCAVES.MAP
+mapscript on
+seed 1
+duration 34
+dude elevation 2
+dude tile 14525 rot 1
+dude stat IN 8
+dude stat CH 8
+dude skill speech 120
+
+talk 1500 16777490
+shot 3500
+tap 4500 A
+tap 6500 A
+shot 7500
+tap 8500 DOWN
+tap 9500 A
+shot 10500
+tap 11500 A
+shot 12500
+tap 13500 A
+shot 15000
+shot 22000
+shot 30000
+note 32000 end
+
+expect \[FLOW/autotest\] talk .*rc=0
+expect-not \[FLOW/autotest\] modal win=.*options=1

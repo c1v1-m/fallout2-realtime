@@ -283,6 +283,9 @@ static int inventoryQuantityWindowFree(int inventoryWindowType);
 static bool mt_place_requested = false;
 static unsigned char mt_place_up[MT_PLACE_W * MT_PLACE_H];
 static unsigned char mt_place_down[MT_PLACE_W * MT_PLACE_H];
+// ...and MOVE ITEMS' own ALL plate the same way, its word drawn into copies of 307 / 308 (inventoryQuantityWindowInit).
+static unsigned char mt_all_up[MT_PLACE_W * MT_PLACE_H];
+static unsigned char mt_all_down[MT_PLACE_W * MT_PLACE_H];
 
 // True only while the normal inventory screen (inventoryOpen) is up: the controller's equip/close
 // shortcuts must not misfire inside loot, trade, or use-on screens that reuse the same window statics.
@@ -2694,6 +2697,8 @@ bool inven_equip_under_cursor(int hand)
         if (itemAdd(_inven_dude, *handSlot, 1) != 0) {
             return false;
         }
+        // Traced (2026-11-15): the bomb's timer window used to send its X / B here too (gamepad_ui.cc, gpui_buttons_owned).
+        trace_event(TRACE_INPUT, "inv-equip", "out hand=%s pid=%d", overLeft ? "A" : "B", (*handSlot)->pid);
         *handSlot = NULL;
 
         _adjust_fid();
@@ -2732,6 +2737,8 @@ bool inven_equip_under_cursor(int hand)
     // a3 (source slot) is NULL for a list item; a4 != -1 makes _switch_hand pull
     // the item out of the inventory and return any displaced hand item to it.
     Object** handSlot = (hand == HAND_RIGHT) ? &gInventoryRightHandItem : &gInventoryLeftHandItem;
+    trace_event(TRACE_INPUT, "inv-equip", "in hand=%s pid=%d row=%d", hand == HAND_RIGHT ? "B" : "A", item->pid,
+        displayIndex);
     _switch_hand(item, handSlot, NULL, 1000 + displayIndex);
 
     _adjust_fid();
@@ -2865,6 +2872,9 @@ bool inven_gamepad_quick_normal()
             return false;
         }
 
+        // Traced (2026-11-15): the A that pressed the bomb's timer window's DONE -- which lies over this slot -- used to
+        // land here on its release (gamepad_ui.cc, gpui_buttons_owned).
+        trace_event(TRACE_INPUT, "inv-quick", "armor-off pid=%d", gInventoryArmor->pid);
         Object* armor = gInventoryArmor;
         gInventoryArmor = NULL;
         if (itemAdd(_inven_dude, armor, 1) != 0) {
@@ -2910,6 +2920,9 @@ bool inven_gamepad_quick_normal()
     }
 
     int itemType = itemGetType(item);
+    // Which row a tap of A acted on -- traced (2026-11-15) since the A that pressed the bomb's timer window's DONE fired
+    // one here on its release, on the row the bomb had left (gamepad_ui.cc, gpui_buttons_owned).
+    trace_event(TRACE_INPUT, "inv-quick", "pid=%d row=%d type=%d", item->pid, displayIndex, itemType);
 
     // Ammo loads into a compatible equipped weapon (right hand preferred) rather
     // than going to a hand slot, reusing the engine's drag-ammo-onto-weapon path
@@ -3560,6 +3573,17 @@ static void inventoryRenderSummary()
                 int maxDamage;
                 int bonusDamage = unarmedGetDamage(hitMode, &minDamage, &maxDamage);
                 int meleeDamage = critterGetStat(_stack[0], STAT_MELEE_DAMAGE);
+                // REALTIME (2026-11-16): Bonus HtH Damage exactly as the weapon line below treats it. This line used to
+                // put the perk on the top only (1-5 with one rank, while weaponGetDamage rolls 3-5): hidden whole when
+                // the bonus is not displayed, on both ends -- where BonusHtHDamageFix puts it -- when it is.
+                if (_stack[0] == gDude && damageModGetBonusHthDamageFix()) {
+                    int hthBonus = 2 * perkGetRank(gDude, PERK_BONUS_HTH_DAMAGE);
+                    if (damageModGetDisplayBonusDamage()) {
+                        minDamage += hthBonus;
+                    } else {
+                        meleeDamage -= hthBonus;
+                    }
+                }
                 // TODO: Localize unarmed attack names.
                 snprintf(formattedText, sizeof(formattedText), "%s %d-%d",
                     messageListItem.text,
@@ -6309,41 +6333,70 @@ static void barter_draw_deal()
     int th = fontGetLineHeight();
 
     // ⚠️ THE LAYOUT IS DICTATED BY FOUR 64px COLUMNS AT x 29 / 165 / 250 / 388. The first attempt
-    // put this in the gap between the two inner columns, which measures 250 - (165+64) = 17 PIXELS --
-    // enough for nothing. The usable space is the strip to the RIGHT of the NPC's $total (drawn at
-    // x 254) and before the NPC's inventory column starts at 388.
+    // put this in the gap between the two inner columns, which measures 250 - (165+64) = 21 PIXELS --
+    // enough for nothing but a badge (the X below sits there). The usable space is the strip to the
+    // RIGHT of the NPC's $total and before the NPC's inventory column starts at 388; the 46 px from
+    // x 254 to the plate are that total's own room ("$19500" takes 40 of them).
     const int dealX = 300;
     const int dealW = INVENTORY_TRADE_RIGHT_SCROLLER_X - dealX - 2;
     const int dealY = INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + 24;
 
+    // ⚠️ A COMPANION'S TRADE IS NOT PRICED (2026-11-15). There _barter_compute_value hands back the WEIGHT of his
+    // table, and the offer only asks who can carry what (_barter_attempt_transaction). Set against the caps value of
+    // the player's pile, four miniguns on Vic's table read "SHORT 124" -- their 124 lb as a price -- and X paid it in
+    // caps. So a companion's trade has no readout and no X, as in vanilla (barter_auto_offer refuses there too).
+    bool priced = !gGameDialogSpeakerIsPartyMember;
+
     // Both strips are FILLED first: this is background art underneath, not a flat panel, so text
     // drawn straight onto it would sit on whatever the frame happens to show there.
-    if (dealW > 8) {
-        bufferFill(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * dealY + dealX,
-            dealW, th + 2, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[0]);
+    if (dealW > 8 && priced) {
+        // A dark rounded plate in the pad marks' greys rather than a black box (his „udělej to hezčí, ten černej
+        // pruh je strašnej“, 2026-11-15) -- still filled every time, so the last readout never shows through.
+        intface_pad_plate(windowBuffer, INVENTORY_TRADE_WINDOW_WIDTH, INVENTORY_TRADE_WINDOW_WIDTH,
+            INVENTORY_TRADE_WINDOW_HEIGHT, dealX, dealY, dealW, th + 2);
 
         // OVERPAY is a deal the trader accepts but you are losing on -- exactly what X evens out, so
         // it is shown rather than hidden under "DEAL OK" (which is how a lopsided trade looked fine).
+        //
+        // ⚠️ EVERY DIGIT OR NONE (2026-11-15). The font draw stops at the first glyph that does not fit, so
+        // "OVERPAY 2500" (91 px against the plate's 86) read "OVERPAY 250" -- one rocket launcher sold to Maida
+        // showed a tenth of its price, on the one line that exists to show the exact number -- and the clamp to
+        // dealX put the first letter on the plate's rim. Now the longest wording that fits between the rims wins:
+        // "OVERPAY n", then "OVER n" (to six digits), then the bare signed number; "SHORT n" (to five digits),
+        // then the bare number. The colour still says which side it is.
+        const int innerX = dealX + 1; // the rim is the plate's outermost pixel on either side
+        const int innerW = dealW - 2;
+        const int fitW = innerW + 1; // a measured width ends in the last glyph's 1 px of spacing, which inks nothing
         char text[32];
         int color;
         if (shortBy > 0) {
             snprintf(text, sizeof(text), "SHORT %d", shortBy);
+            if (fontGetStringWidth(text) > fitW) {
+                snprintf(text, sizeof(text), "-%d", shortBy);
+            }
             color = _colorTable[31744];
         } else if (shortBy < 0) {
             snprintf(text, sizeof(text), "OVERPAY %d", -shortBy);
+            if (fontGetStringWidth(text) > fitW) {
+                snprintf(text, sizeof(text), "OVER %d", -shortBy);
+            }
+            if (fontGetStringWidth(text) > fitW) {
+                snprintf(text, sizeof(text), "+%d", -shortBy);
+            }
             color = _colorTable[32747];
         } else {
             snprintf(text, sizeof(text), "DEAL OK");
             color = _colorTable[992];
         }
 
-        int tw = fontGetStringWidth(text);
-        int tx = dealX + (dealW - tw) / 2;
-        if (tx < dealX) {
-            tx = dealX;
+        // Centred on its ink between the rims, and never drawn onto them.
+        int tw = fontGetStringWidth(text) - 1;
+        int tx = innerX + (innerW - tw) / 2;
+        if (tx < innerX) {
+            tx = innerX;
         }
         fontDrawText(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * (dealY + 1) + tx,
-            text, dealW, INVENTORY_TRADE_WINDOW_WIDTH, color);
+            text, innerX + fitW - tx, INVENTORY_TRADE_WINDOW_WIDTH, color);
     }
 
     // THE CONTROL LEGEND, on screen where the controls are actually used. The Pip-Boy CONTROLS page
@@ -6358,9 +6411,12 @@ static void barter_draw_deal()
     const int legW = INVENTORY_TRADE_WINDOW_WIDTH - 12;
     const int legY = 4;
 
+    bool pad = gamepad_ui_get_controller() != nullptr;
     if (legW > 40) {
-        bufferFill(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * legY + legX,
-            legW, th + 2, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[0]);
+        if (!pad) {
+            bufferFill(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * legY + legX,
+                legW, th + 2, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[0]);
+        }
 
         // ⚠️ THE LEGEND MUST NAME THE ACTUAL AXES. It read "LB/RB item" back when the shoulders
         // walked the flat left-to-right list of every occupied slot; they now step COLUMN (empty
@@ -6374,20 +6430,101 @@ static void barter_draw_deal()
         // " exit" whole; with two-space gaps it is 463 and fits. "RT amount" does not fit on this line at
         // any gap (536 px, and still 501 with single spaces), so RT stays off it.
         const char* legend = "LB/RB column  D-pad item  A move  LT+A all stack  X even  Y offer  B exit";
-        int lw = fontGetStringWidth(legend);
-        int lx = legX + (legW - lw) / 2;
-        if (lx < legX) {
-            lx = legX;
+        if (!priced) {
+            legend = "LB/RB column  D-pad item  A move  LT+A all stack  Y offer  B exit"; // no X in a companion's trade
         }
-        fontDrawText(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * (legY + 1) + lx,
-            legend, legW, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[32767]);
+
+        // WITH A PAD, WHAT HAS A PLACE ON THE SCREEN WEARS ITS BADGE AND LEAVES THE LINE (Fallout 2 Realtime
+        // 2026-11-15, „ještě obchodování bychom mohli vylepšit tlačítky, Ui myšleno“, his „Ano, postav“ to the
+        // mock-up): LB and RB sit over the two inventory columns they step to (x 29 and 388, 64 wide), X between
+        // the two totals it evens (below), and Y / B on OFFER / TALK themselves (game_dialog.cc,
+        // _gdialog_barter_create_win). The line keeps only what has nowhere else to be shown. Without a pad the
+        // whole line stays, as before.
+        //
+        // ...and it no longer runs as a black band across the frame („udělej to hezčí, ten černej pruh je strašnej“,
+        // 2026-11-15): with a pad the short line sits on a dark rounded plate of its own width, in the badges' gold,
+        // and the frame's rivets show either side of it.
+        if (pad) {
+            // ...and the plate holds BADGES AND A WORD, not button names spelled out: "D-pad item  A move" read
+            // „docela weak“; of two mock-ups he took the short words, „ale jiná, trade? Trade zná divně“ -- so A is
+            // "Transfer" (the item goes across, as in Fallout 4's containers) and LT+A "Whole stack" (2026-11-15).
+            // The D-pad is left off: it is plainly the cursor. The plate is 16 px tall (y 2..17, free art: the
+            // columns start at y 20) so the 15 px badges sit inside it.
+            const int W = INVENTORY_TRADE_WINDOW_WIDTH;
+            const int H = INVENTORY_TRADE_WINDOW_HEIGHT;
+            const char* moveWord = "Transfer";
+            const char* stackWord = "Whole stack";
+            const int face = 15; // the badge disc, PAD_BADGE_R 7
+            const int pillW = 2 * 6 + 5; // "LT"
+            int w1 = fontGetStringWidth(moveWord);
+            int w2 = fontGetStringWidth(stackWord);
+            const int groupGap = 30; // between "Transfer" and the LT+A pair: his „posun LT A vpravo at to vypadá stylisticky pěkně“
+            int contentW = face + 4 + w1 + groupGap + pillW + 2 + face + 4 + w2;
+            int plateW = contentW + 14;
+            int plateX = legX + (legW - plateW) / 2;
+            int plateY = legY - 2;
+            int midY = plateY + 8;
+            intface_pad_plate(windowBuffer, W, W, H, plateX, plateY, plateW, 16);
+            int x = plateX + 7;
+            intface_pad_face(windowBuffer, W, W, H, x + 7, midY, 'A');
+            x += face + 4;
+            fontDrawText(windowBuffer + W * (midY - 5) + x, moveWord, w1 + 1, W, intface_pad_gold());
+            // The second pair mirrors the first -- its badges at the plate's right end, after the words: „ne, whole
+            // stack LT A“ -- so the badges frame the plate and the two words face each other in the middle.
+            x += w1 + groupGap;
+            fontDrawText(windowBuffer + W * (midY - 5) + x, stackWord, w2 + 1, W, intface_pad_gold());
+            x += w2 + 4;
+            intface_pad_pill(windowBuffer, W, W, H, x + pillW / 2, midY, "LT");
+            x += pillW + 2;
+            intface_pad_face(windowBuffer, W, W, H, x + 7, midY, 'A');
+        } else {
+            int lw = fontGetStringWidth(legend);
+            int lx = legX + (legW - lw) / 2;
+            if (lx < legX) {
+                lx = legX;
+            }
+            fontDrawText(windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * (legY + 1) + lx,
+                legend, legW, INVENTORY_TRADE_WINDOW_WIDTH, _colorTable[32767]);
+        }
+
+        if (pad) {
+            int midY = legY + (th + 2) / 2;
+            intface_pad_pill(windowBuffer, INVENTORY_TRADE_WINDOW_WIDTH, INVENTORY_TRADE_WINDOW_WIDTH,
+                INVENTORY_TRADE_WINDOW_HEIGHT, 29 + 32, midY, "LB");
+            intface_pad_pill(windowBuffer, INVENTORY_TRADE_WINDOW_WIDTH, INVENTORY_TRADE_WINDOW_WIDTH,
+                INVENTORY_TRADE_WINDOW_HEIGHT, 388 + 32, midY, "RB");
+        }
+    }
+
+    // ⚠️ X SITS BETWEEN THE TWO TOTALS IT EVENS, NOT BESIDE THE READOUT (2026-11-15). Beside the readout, as in the
+    // mock-up, the disc (x 284..298) lay on the trader's $total, which runs from x 254 with up to 80 px of room:
+    // "$7000" lost half its last 0, "$19500" read "$1950" -- a price ten times too low -- and Vic's "Wt. 124" read
+    // "Wt. 1". The 21 px between the two inner columns are drawn on by nothing else: the dude's total ends by x 217
+    // even at "$999999", the trader's starts at 254, and neither table's repaint (x 169..232, 254..317) reaches the
+    // disc (233..247), so it lies on art that stays put. It sits on the totals' row, its letter on the rows of
+    // their digits (font 101 inks a digit's top 7 rows). Where it is not drawn -- no pad, a companion's trade -- the
+    // art under it is put back, so a pad pulled out mid-trade leaves no stale X behind.
+    const int evenX = INVENTORY_TRADE_INNER_RIGHT_SCROLLER_X - 10;
+    const int evenY = INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_TRADE_INNER_RIGHT_SCROLLER_Y_PAD + 3;
+    if (pad && priced) {
+        intface_pad_face(windowBuffer, INVENTORY_TRADE_WINDOW_WIDTH, INVENTORY_TRADE_WINDOW_WIDTH,
+            INVENTORY_TRADE_WINDOW_HEIGHT, evenX, evenY, 'X');
+    } else {
+        unsigned char* art = windowGetBuffer(_barter_back_win);
+        if (art != NULL) {
+            // The disc reaches 7 px from its centre (interface.cc PAD_BADGE_R); the trade window's art is the
+            // background window's, INVENTORY_TRADE_WINDOW_OFFSET to the right (_setup_inventory).
+            blitBufferToBuffer(art + INVENTORY_TRADE_BACKGROUND_WINDOW_WIDTH * (evenY - 7) + evenX - 7 + INVENTORY_TRADE_WINDOW_OFFSET,
+                15, 15, INVENTORY_TRADE_BACKGROUND_WINDOW_WIDTH,
+                windowBuffer + INVENTORY_TRADE_WINDOW_WIDTH * (evenY - 7) + evenX - 7, INVENTORY_TRADE_WINDOW_WIDTH);
+        }
     }
 
     fontSetCurrent(oldFont);
 
     Rect r;
     r.left = legX < dealX ? legX : dealX;
-    r.top = legY;
+    r.top = legY - 2; // the pad's plate starts two rows above the old strip
     r.right = (legX + legW) > (dealX + dealW) ? (legX + legW) : (dealX + dealW);
     r.bottom = dealY + th + 2;
     windowRefreshRect(gInventoryWindow, &r);
@@ -6410,6 +6547,16 @@ static void barter_draw_deal()
 // the trader's -- and only then adds new ones, so a press never shuffles caps both ways at once.
 static void barter_auto_offer()
 {
+    // ⚠️ NOT IN A COMPANION'S TRADE (2026-11-15). There `want` below is the WEIGHT of his table (_barter_compute_value),
+    // so four miniguns on Vic's table (124 lb) made X put 124 of the dude's caps on the offer, and the offer handed
+    // them to Vic. A companion's trade weighs the piles, it does not price them (barter_draw_deal shows no readout and
+    // no X there). Refused out loud, like every other refusal below.
+    if (gGameDialogSpeakerIsPartyMember) {
+        soundPlayFile("iisxxxx1");
+        trace_event(TRACE_INPUT, "barter-auto-refused", "why=companion");
+        return;
+    }
+
     Object* npc = _target_stack[0];
 
     int want = _barter_compute_value(_inven_dude, npc); // what the trader asks for its pile
@@ -7551,7 +7698,8 @@ static bool mt_pad_arm = true;
 
 // ⚠️ A PRESSES WHAT THE CURSOR IS ON, once the cursor has been moved (fallout1-ce 2026-10-17). With
 // the cursor where it was when the window opened, A is the quick DONE; once it has been moved onto a
-// button, A presses that button -- PLACE, DONE, CANCEL, + or -.
+// button, A presses that button -- PLACE, DONE, CANCEL, + or -. (SET TIMER with a pad hides its arrow
+// at rest, and there A follows the pointer only while the arrow shows: mt_a_follows_pointer.)
 //
 // ⚠️ ...BY ITS OWN KEY, NOT BY A CLICK (Fallout 2 Realtime 2026-10-24). It used to leave the press to
 // the mouse hook's A-as-left-click, and that click is what leaked: opened from the WORLD (the wheel, a
@@ -7594,18 +7742,334 @@ static int mt_button_under_cursor()
 }
 
 // The window's hold on A, for as long as it is up (see mt_button_under_cursor).
+//
+// ⚠️ ...AND, AS SET TIMER, ON EVERY BUTTON IT ANSWERS (2026-11-15, his „dáme tlačítka k pokládání bomby, ať nemusí hráč
+// left joystickem vybírat příkazy“). The marks below name A / B / X and the D-pad on the window, and each of those
+// presses was ALSO taken by the screen underneath, through the mouse hook that runs inside this loop: from the inventory
+// X / B put the list row under the pointer into a hand, LB / RB bound it to a quick slot, BACK cancelled the window,
+// and the A that pressed DONE fired the inventory's quick action on its release; from the world, with a drug in hand,
+// the A that closed the window ran the use prompt's deferred action on its release (after CANCEL -- DONE's bend makes
+// the prompt refuse) or, held on, armed the drug's crosshair, a B held after CANCEL opened the drug wheel, and an L3 / R3
+// held through it opened the skill wheel / the called-shot window. So the hook stands aside while the window is up
+// (gamepad_ui_set_buttons_owned) and the press that closes it is spent until it is let go
+// (gamepad_ui_spend_held_buttons). The quantity picker of MOVE ITEMS keeps exactly what it had.
 struct MtPadOwner {
     bool previous;
-    MtPadOwner()
+    bool timer;
+    bool previousOwned;
+    MtPadOwner(int inventoryWindowType)
         : previous(gamepad_ui_set_suppress_a_click(true))
+        , timer(inventoryWindowType == INVENTORY_WINDOW_TYPE_SET_TIMER)
+        , previousOwned(timer ? gamepad_ui_set_buttons_owned(true) : false)
     {
     }
     ~MtPadOwner()
     {
         gamepad_ui_set_suppress_a_click(previous);
+        if (timer) {
+            gamepad_ui_set_buttons_owned(previousOwned);
+            gamepad_ui_spend_held_buttons();
+        }
         gamepad_ui_bump_input_epoch();
     }
 };
+
+// --- THE PAD'S BUTTONS ON THE SET TIMER WINDOW (Fallout 2 Realtime, 2026-11-15) ---------------------------------------
+//
+// His ask: „dáme tlačítka k pokládání bomby, ať nemusí hráč left joystickem vybírat příkazy“. Every command of this
+// window already had a pad button (move_timer_gamepad_keycode: A DONE, B CANCEL, X PLACE, Y 3:00, the D-pad +-10 s),
+// but nothing on the screen said so, so he went from button to button with the left stick. Of two mock-ups he picked
+// „Varianta 1“: the bar's own badges (interface.cc, intface_pad_face / intface_pad_dpad: a dark disc, gold marks),
+//   - A and B: the WHOLE BADGE IN PLACE OF THE RED DOT on DONE and CANCEL, as the character selection wears its four
+//     („Celá značka“, 2026-11-14) -- the same 15 x 16 red buttons, art 8 / 9;
+//   - X on the PLACE plate, left of its word;
+//   - the D-pad, up and down lit, in the empty slot right of the clock, level with + and -;
+//   - nothing for Y (3:00): it keeps working, unmarked.
+// Only while a pad is in, asked every frame, so one plugged in or pulled out mid-window takes them with it; the
+// keyboard-and-mouse game never sees them, and MOVE ITEMS' quantity picker (the same window) never has them.
+//
+// ⚠️ NEVER DRAWN INTO THE ART. DONE and CANCEL show FRM 8 / 9 straight from the art cache, which the character
+// selection's red buttons lock too: a badge drawn there would be on every red button that uses it. So each button gets
+// COPIES (character_selector.cc's sel_red_* pattern): a GNW button blits its image over the window at every refresh, so
+// a badge on the window art under it would be covered -- the copy is the whole tile made OPAQUE (the bare window art
+// that lies under the button, the button's own non-zero pixels over it, then the badge), swapped in with
+// _win_register_button_image while a pad is in, the plain images back when it goes. PLACE's plate is already a copy of
+// its own (mt_place_up / _down, its word drawn in); its X goes into a second copy, and what lay under the X is kept, for
+// a transparent plate covers only its own pixels. The D-pad is window art, not a button: drawn on the window, the art
+// it covered kept and put back.
+#define MT_RED_W 15
+#define MT_RED_H 16
+enum {
+    MT_RED_DONE,
+    MT_RED_CANCEL,
+    MT_RED_COUNT,
+};
+static const int mt_red_at[MT_RED_COUNT][2] = { { 98, 128 }, { 148, 128 } };
+static const char mt_red_keys[MT_RED_COUNT] = { 'A', 'B' };
+static int mt_red_btn[MT_RED_COUNT] = { -1, -1 };
+static unsigned char mt_red_under[MT_RED_COUNT][MT_RED_W * MT_RED_H]; // the bare window art under each red button
+static unsigned char mt_red_badged[MT_RED_COUNT][2][MT_RED_W * MT_RED_H]; // [normal, pressed], opaque
+
+// A mark's box: the disc reaches 7 px from its centre (intface_pad_face, intface_pad_dpad).
+#define MT_MARK_HALF 7
+#define MT_MARK_D (2 * MT_MARK_HALF + 1)
+#define MT_PLACE_X 120
+#define MT_PLACE_Y 86
+#define MT_PLACE_MARK_X 13 // plate-local: left of the word PLACE
+#define MT_PLACE_MARK_Y 14
+#define MT_DPAD_MARK_X 241 // the empty slot right of the clock, level with + (194,64) and - (194,76)
+#define MT_DPAD_MARK_Y 75
+static int mt_place_btn = -1;
+static unsigned char mt_place_pad_up[MT_PLACE_W * MT_PLACE_H];
+static unsigned char mt_place_pad_down[MT_PLACE_W * MT_PLACE_H];
+static unsigned char mt_place_mark_under[MT_MARK_D * MT_MARK_D]; // the window art under the X, before the plate
+static unsigned char mt_dpad_mark_under[MT_MARK_D * MT_MARK_D];
+static bool mt_marks_kept = false; // the art under everything is kept (the window is up, SET TIMER)
+static bool mt_marks_ready = false; // ...and the badged copies are made
+static bool mt_marks_shown = false;
+
+static void mt_box_copy(unsigned char* dest, int destPitch, const unsigned char* src, int srcPitch, int w, int h)
+{
+    for (int y = 0; y < h; y++) {
+        memcpy(dest + destPitch * y, src + srcPitch * y, w);
+    }
+}
+
+// Once, on the bare art: after the background, the clock and the item, before any button is made (a button draws
+// itself into the window as it is made).
+static void mt_marks_keep_under(unsigned char* windowBuffer, int pitch)
+{
+    for (int i = 0; i < MT_RED_COUNT; i++) {
+        mt_box_copy(mt_red_under[i], MT_RED_W, windowBuffer + pitch * mt_red_at[i][1] + mt_red_at[i][0], pitch, MT_RED_W,
+            MT_RED_H);
+    }
+    int px = MT_PLACE_X + MT_PLACE_MARK_X - MT_MARK_HALF;
+    int py = MT_PLACE_Y + MT_PLACE_MARK_Y - MT_MARK_HALF;
+    mt_box_copy(mt_place_mark_under, MT_MARK_D, windowBuffer + pitch * py + px, pitch, MT_MARK_D, MT_MARK_D);
+    int dx = MT_DPAD_MARK_X - MT_MARK_HALF;
+    int dy = MT_DPAD_MARK_Y - MT_MARK_HALF;
+    mt_box_copy(mt_dpad_mark_under, MT_MARK_D, windowBuffer + pitch * dy + dx, pitch, MT_MARK_D, MT_MARK_D);
+    mt_marks_kept = true;
+    mt_marks_ready = false;
+    mt_marks_shown = false;
+}
+
+// Once the buttons exist: the badged copies. A red button's art of another size than 15 x 16 gets no badge (the plain
+// buttons stay, and no mark shows).
+static void mt_marks_make()
+{
+    mt_marks_ready = false;
+    if (!mt_marks_kept || mt_place_btn == -1 || mt_red_btn[MT_RED_DONE] == -1 || mt_red_btn[MT_RED_CANCEL] == -1) {
+        return;
+    }
+    for (int i = 0; i < MT_RED_COUNT; i++) {
+        for (int p = 0; p < 2; p++) {
+            FrmImage* art = &(_moveFrmImages[4 + p]); // DONE and CANCEL share art 8 (normal) / 9 (pressed)
+            if (art->getData() == nullptr || art->getWidth() != MT_RED_W || art->getHeight() != MT_RED_H) {
+                return;
+            }
+            unsigned char* tile = mt_red_badged[i][p];
+            memcpy(tile, mt_red_under[i], MT_RED_W * MT_RED_H);
+            const unsigned char* img = art->getData();
+            for (int k = 0; k < MT_RED_W * MT_RED_H; k++) {
+                if (img[k] != 0) {
+                    tile[k] = img[k];
+                }
+            }
+            intface_pad_face(tile, MT_RED_W, MT_RED_W, MT_RED_H, MT_RED_W / 2, MT_RED_H / 2, mt_red_keys[i]);
+        }
+    }
+    memcpy(mt_place_pad_up, mt_place_up, sizeof(mt_place_pad_up));
+    memcpy(mt_place_pad_down, mt_place_down, sizeof(mt_place_pad_down));
+    intface_pad_face(mt_place_pad_up, MT_PLACE_W, MT_PLACE_W, MT_PLACE_H, MT_PLACE_MARK_X, MT_PLACE_MARK_Y, 'X');
+    intface_pad_face(mt_place_pad_down, MT_PLACE_W, MT_PLACE_W, MT_PLACE_H, MT_PLACE_MARK_X, MT_PLACE_MARK_Y, 'X');
+    mt_marks_ready = true;
+}
+
+// The marks with a pad in, the window's own look without one; nothing when that is already so. Every frame of the
+// window. The button swaps refresh the window themselves.
+static void mt_marks_show(bool pad)
+{
+    if (!mt_marks_ready || pad == mt_marks_shown || _mt_wid == -1) {
+        return;
+    }
+    unsigned char* buffer = windowGetBuffer(_mt_wid);
+    int pitch = windowGetWidth(_mt_wid);
+    int height = windowGetHeight(_mt_wid);
+
+    for (int i = 0; i < MT_RED_COUNT; i++) {
+        // The bare art back under the button first: a transparent image covers only its own non-zero pixels.
+        mt_box_copy(buffer + pitch * mt_red_at[i][1] + mt_red_at[i][0], pitch, mt_red_under[i], MT_RED_W, MT_RED_W,
+            MT_RED_H);
+        if (pad) {
+            _win_register_button_image(mt_red_btn[i], mt_red_badged[i][0], mt_red_badged[i][1], nullptr, true);
+        } else {
+            _win_register_button_image(mt_red_btn[i], _moveFrmImages[4].getData(), _moveFrmImages[5].getData(), nullptr,
+                true);
+        }
+    }
+
+    int px = MT_PLACE_X + MT_PLACE_MARK_X - MT_MARK_HALF;
+    int py = MT_PLACE_Y + MT_PLACE_MARK_Y - MT_MARK_HALF;
+    mt_box_copy(buffer + pitch * py + px, pitch, mt_place_mark_under, MT_MARK_D, MT_MARK_D, MT_MARK_D);
+    if (pad) {
+        _win_register_button_image(mt_place_btn, mt_place_pad_up, mt_place_pad_down, nullptr, true);
+    } else {
+        _win_register_button_image(mt_place_btn, mt_place_up, mt_place_down, nullptr, true);
+    }
+
+    int dx = MT_DPAD_MARK_X - MT_MARK_HALF;
+    int dy = MT_DPAD_MARK_Y - MT_MARK_HALF;
+    if (pad) {
+        intface_pad_dpad(buffer, pitch, pitch, height, MT_DPAD_MARK_X, MT_DPAD_MARK_Y, INTFACE_DPAD_UP | INTFACE_DPAD_DOWN);
+    } else {
+        mt_box_copy(buffer + pitch * dy + dx, pitch, mt_dpad_mark_under, MT_MARK_D, MT_MARK_D, MT_MARK_D);
+    }
+    Rect rect = { dx, dy, dx + MT_MARK_D - 1, dy + MT_MARK_D - 1 };
+    windowRefreshRect(_mt_wid, &rect);
+
+    mt_marks_shown = pad;
+    trace_event(TRACE_FLOW, "timer-marks", "shown=%d", pad ? 1 : 0);
+}
+
+// The window is going: nothing of it is ours any more.
+static void mt_marks_forget()
+{
+    mt_marks_kept = false;
+    mt_marks_ready = false;
+    mt_marks_shown = false;
+    mt_red_btn[MT_RED_DONE] = -1;
+    mt_red_btn[MT_RED_CANCEL] = -1;
+    mt_place_btn = -1;
+}
+
+// THE POINTER: hidden while a pad is in, as on the character selection (sel_tick_cursor) -- the pad does everything
+// here. Moving it (the left stick's snap onto a button, the right stick, the Deck's trackpad, a mouse) brings the arrow
+// back, and MT_CURSOR_IDLE_MS of rest hides it again; without a pad it stays the arrow. Never moved, and never
+// mouseHideCursor(), which gates the input hook off -- the snap and "A presses the button under a moved pointer"
+// (move_timer_gamepad_keycode) need the pointer alive. ⚠️ The blank shape is the INVENTORY's (FRM 266, the same blank as
+// MOUSE_CURSOR_NONE) and not gameMouseSetCursor(MOUSE_CURSOR_NONE): this window's pointer is the inventory's own
+// (inventorySetCursor, the arrow its init puts up), and under the inventory gmouse already holds MOUSE_CURSOR_NONE,
+// where gameMouseSetCursor returns early and the arrow would have stayed. Closing puts back the pointer the window
+// leaves without a pad (mt_cursor_put_back), so the screen after it is the one it always was.
+#define MT_CURSOR_IDLE_MS 2000
+
+static bool mt_cursor_pad = false; // hidden for a pad at least once (the arrow is owed on the way out)
+static bool mt_cursor_shown = false;
+static int mt_cursor_x;
+static int mt_cursor_y;
+static unsigned int mt_cursor_move;
+static int mt_cursor_entry = -1; // gmouse's cursor as the window opened (mt_cursor_put_back)
+
+// The pointer the window would show WITHOUT a pad, put back: its init's arrow -- unless the world's mouse handler
+// (gameMouseRefresh, a background process that runs in this loop too) put up a pointer of its own meanwhile: opened
+// from the world with the pointer over the map, it blanks it there, and without a pad the window always ended with
+// that one. So when gmouse's cursor is no longer what it was at the open, its own picture goes back, the same cursor
+// set again (its early-out would skip a cursor it already holds, hence the arrow first); gmouse's state ends as it was.
+// Seen in a world-opened window whose pointer had been left over the map: the inventory's arrow stayed in the world
+// after the window, where the window without a pad leaves none (2026-11-15, probe-arrow).
+static void mt_cursor_put_back()
+{
+    int now = gameMouseGetCursor();
+    if (now == mt_cursor_entry || now < 0) {
+        inventorySetCursor(INVENTORY_WINDOW_CURSOR_ARROW);
+        return;
+    }
+    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+    if (now != MOUSE_CURSOR_ARROW) {
+        gameMouseSetCursor(now);
+    }
+}
+
+// Once a frame of the SET TIMER window.
+static void mt_tick_cursor(bool pad)
+{
+    if (!pad) {
+        if (mt_cursor_pad) { // the pad went: the pointer is the mouse's again
+            mt_cursor_put_back();
+            mt_cursor_pad = false;
+            trace_event(TRACE_FLOW, "timer-cursor", "back why=no-pad");
+        }
+        return;
+    }
+
+    int x;
+    int y;
+    mouseGetPosition(&x, &y);
+
+    if (!mt_cursor_pad) {
+        mt_cursor_pad = true;
+        mt_cursor_shown = false;
+        inventorySetCursor(INVENTORY_WINDOW_CURSOR_BLANK);
+        trace_event(TRACE_FLOW, "timer-cursor", "hidden");
+    } else if (x != mt_cursor_x || y != mt_cursor_y) {
+        mt_cursor_move = getTicks();
+        if (!mt_cursor_shown) {
+            inventorySetCursor(INVENTORY_WINDOW_CURSOR_ARROW);
+            mt_cursor_shown = true;
+            trace_event(TRACE_FLOW, "timer-cursor", "shown at=%d,%d", x, y);
+        }
+    } else if (mt_cursor_shown && getTicksSince(mt_cursor_move) >= MT_CURSOR_IDLE_MS) {
+        inventorySetCursor(INVENTORY_WINDOW_CURSOR_BLANK);
+        mt_cursor_shown = false;
+        trace_event(TRACE_FLOW, "timer-cursor", "hidden why=idle");
+    }
+
+    mt_cursor_x = x;
+    mt_cursor_y = y;
+}
+
+// On the way out: the pointer the window would have left without a pad, if a pad took it (mt_cursor_put_back).
+static void mt_cursor_restore()
+{
+    if (mt_cursor_pad) {
+        mt_cursor_put_back();
+        mt_cursor_pad = false;
+        trace_event(TRACE_FLOW, "timer-cursor", "back why=close gmouse=%d entry=%d", gameMouseGetCursor(),
+            mt_cursor_entry);
+    }
+}
+
+// The trace's name of what a key code does in the window (the timer-window and timer-a lines).
+static const char* mt_key_name(int keyCode)
+{
+    switch (keyCode) {
+    case KEY_RETURN:
+        return "DONE";
+    case KEY_ESCAPE:
+        return "CANCEL";
+    case MT_KEY_PLACE:
+        return "PLACE";
+    case 6000:
+        return "PLUS";
+    case 7000:
+        return "MINUS";
+    case 5000:
+        return "ALL";
+    case -1:
+        return "none";
+    }
+    return "?";
+}
+
+// ⚠️ WITH THE ARROW HIDDEN, A IS DONE -- AS ITS BADGE SAYS (review 2026-11-15). "A presses the button under a moved
+// pointer" (mt_open_mx) comes from a window whose arrow never went away: a pointer moved onto a button was always on
+// the screen, so A's target was in front of his eyes. Since SET TIMER hides the arrow at rest while a pad is in
+// (mt_tick_cursor, his „dáme tlačítka k pokládání bomby, ať nemusí hráč left joystickem vybírat příkazy“), a pointer
+// left on CANCEL by one push of the left stick stayed there unseen, and two seconds later the A that the window marks on
+// DONE pressed CANCEL -- the bomb not armed and, from a quick slot, its AP spent all the same; left on the PLACE plate,
+// A from the inventory put the armed bomb at his feet instead of into the pack. autotest screen-timer-marks had traced
+// that very pointer: shown on CANCEL, hidden two seconds later. So with a pad A follows the pointer only while its
+// arrow is ON THE SCREEN (or it moved this very frame and the arrow is due on the next), and with no arrow showing A is
+// DONE wherever the hidden pointer rests -- what is on the screen is what A does. The snap + A route is untouched: the
+// snap brings the arrow back. MOVE ITEMS, whose arrow never hides, keeps "moved since the window opened".
+static bool mt_a_follows_pointer(int mx, int my)
+{
+    if (mt_window_type == INVENTORY_WINDOW_TYPE_SET_TIMER && mt_cursor_pad) {
+        return mt_cursor_shown || mx != mt_cursor_x || my != mt_cursor_y;
+    }
+    return mx != mt_open_mx || my != mt_open_my;
+}
 
 // Re-arm the picker's gamepad edge detection so a button still held from whatever opened
 // the picker (e.g. LT+A in barter) doesn't instantly fire on the first frame.
@@ -7614,10 +8078,11 @@ static void move_timer_gamepad_reset()
     mt_pad_arm = true;
 }
 
-// CE: Gamepad control for the quantity picker (inventoryQuantitySelect). A = confirm (KEY_RETURN),
-// B = cancel (KEY_ESCAPE), Y = set to max (5000), D-pad Up/Right = +1 (6000), D-pad
-// Down/Left = -1 (7000). The +/- steps auto-repeat while held so you can ramp the count
-// up quickly. Read SDL directly -- gamepad_ui_tick doesn't run in this modal loop.
+// CE: Gamepad control for the quantity picker (inventoryQuantitySelect). A = confirm (KEY_RETURN, or the button under a
+// moved pointer), B = cancel (KEY_ESCAPE), Y = set to max (5000), X = PLACE (SET TIMER only), D-pad Up/Right = + (6000:
+// one more item, or 10 s more), D-pad Down/Left = - (7000). The +/- steps auto-repeat while held so you can ramp the
+// count up quickly. Read SDL directly -- gamepad_ui_tick doesn't run in this modal loop. SET TIMER names A, B, X and the
+// D-pad on its face (mt_marks_*, 2026-11-15); Y stays unmarked.
 static int move_timer_gamepad_keycode()
 {
     static bool prevA = false;
@@ -7664,11 +8129,17 @@ static int move_timer_gamepad_keycode()
         int mx;
         int my;
         mouseGetPosition(&mx, &my);
-        bool moved = mx != mt_open_mx || my != mt_open_my;
-        // On a button A presses it (see mt_open_mx); anywhere else A is DONE.
-        keyCode = moved ? mt_button_under_cursor() : -1;
+        // On a button the pointer points at, A presses it (see mt_open_mx and mt_a_follows_pointer); anywhere else, and
+        // in SET TIMER whenever its arrow is hidden, A is DONE.
+        bool pointing = mt_a_follows_pointer(mx, my);
+        int under = mt_button_under_cursor();
+        keyCode = pointing ? under : -1;
         if (keyCode == -1) {
             keyCode = KEY_RETURN;
+        }
+        if (mt_window_type == INVENTORY_WINDOW_TYPE_SET_TIMER) {
+            trace_event(TRACE_FLOW, "timer-a", "arrow=%s under=%s to=%s", pointing ? "shown" : "hidden",
+                mt_key_name(under), mt_key_name(keyCode));
         }
     } else if (bNow && !prevB) {
         keyCode = KEY_ESCAPE;
@@ -7695,13 +8166,23 @@ static int move_timer_gamepad_keycode()
 
 static int inventoryQuantitySelect(int inventoryWindowType, Object* item, int max)
 {
-    ScopedGameMode gm(GameMode::kCounter);
-    MtPadOwner padOwner;
+    // Asked before the window's own game mode goes on: where the window was opened from (the trace's from=).
+    bool fromInventory = inven_any_open();
 
+    ScopedGameMode gm(GameMode::kCounter);
+    MtPadOwner padOwner(inventoryWindowType);
+
+    bool timer = inventoryWindowType == INVENTORY_WINDOW_TYPE_SET_TIMER;
     mt_window_type = inventoryWindowType;
     inventoryQuantityWindowInit(inventoryWindowType, item);
     move_timer_gamepad_reset();
     mt_place_requested = false;
+    if (timer) {
+        mt_cursor_pad = false;
+        mt_cursor_entry = gameMouseGetCursor(); // after the init: what it leaves gmouse holding (mt_cursor_put_back)
+        trace_event(TRACE_FLOW, "timer-window", "open pid=%d from=%s pad=%d", item != nullptr ? item->pid : -1,
+            fromInventory ? "inventory" : "world", gamepad_ui_get_controller() != nullptr ? 1 : 0);
+    }
 
     int value;
     int min;
@@ -7722,14 +8203,28 @@ static int inventoryQuantitySelect(int inventoryWindowType, Object* item, int ma
     for (;;) {
         sharedFpsLimiter.mark();
 
+        // SET TIMER's marks and its hidden pointer follow the pad, re-asked every frame: one plugged in or pulled out
+        // while the window is up takes them with it (the handle is never kept: it can dangle).
+        if (timer) {
+            bool pad = gamepad_ui_get_controller() != nullptr;
+            mt_marks_show(pad);
+            mt_tick_cursor(pad);
+        }
+
         int keyCode = inputGetInput();
 
         // CE: the pad (A/B/Y/X + D-pad) when no real key fired.
+        bool byPad = false;
         if (keyCode == -1) {
             keyCode = move_timer_gamepad_keycode();
+            byPad = keyCode != -1;
         }
 
         if (keyCode == KEY_ESCAPE) {
+            if (timer) {
+                trace_event(TRACE_FLOW, "timer-window", "close key=CANCEL by=%s value=%d", byPad ? "pad" : "input", value);
+                mt_cursor_restore();
+            }
             inventoryQuantityWindowFree(inventoryWindowType);
             return -1;
         }
@@ -7744,6 +8239,11 @@ static int inventoryQuantitySelect(int inventoryWindowType, Object* item, int ma
                 if (inventoryWindowType != INVENTORY_WINDOW_TYPE_SET_TIMER || value % 10 == 0) {
                     soundPlayFile("ib1p1xx1");
                     mt_place_requested = place;
+                    if (timer) {
+                        trace_event(TRACE_FLOW, "timer-window", "close key=%s by=%s value=%d", mt_key_name(keyCode),
+                            byPad ? "pad" : "input", value);
+                        mt_cursor_restore();
+                    }
                     break;
                 }
             }
@@ -7865,6 +8365,27 @@ static int inventoryQuantitySelect(int inventoryWindowType, Object* item, int ma
     return value;
 }
 
+// The PLACE plate's art (FRM 307 + 308) hashed as the art cache hands it out, beside the first such hash of this process:
+// traced at every SET TIMER (timer-plate), so a run can tell nothing ever wrote into the cached frames. MOVE ITEMS did
+// (its ALL, review 2026-11-15, see the ALL plate below), and the PLACE plate copied them; art == first is clean.
+static void mt_plate_trace(const unsigned char* up, const unsigned char* down)
+{
+    static bool seen = false;
+    static unsigned int first = 0;
+    unsigned int hash = 2166136261u; // FNV-1a
+    for (int i = 0; i < MT_PLACE_W * MT_PLACE_H; i++) {
+        hash = (hash ^ up[i]) * 16777619u;
+    }
+    for (int i = 0; i < MT_PLACE_W * MT_PLACE_H; i++) {
+        hash = (hash ^ down[i]) * 16777619u;
+    }
+    if (!seen) {
+        seen = true;
+        first = hash;
+    }
+    trace_event(TRACE_FLOW, "timer-plate", "art=%08x first=%08x", hash, first);
+}
+
 // Creates move items/set timer interface.
 //
 // 0x476AB8
@@ -7924,11 +8445,16 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
                 windowDescription->width);
         }
 
+        // The pad's marks: the bare art under each of them, kept before the first button draws itself in.
+        mt_marks_forget();
+        mt_marks_keep_under(windowBuffer, windowDescription->width);
+
         // PLACE -- the ALL plate, 6 px lower than ALL sits in the move-items mode (the clock reaches
         // further down than the counter). Its label is drawn into a COPY of the art.
         FrmImage plateUpFrm;
         FrmImage plateDownFrm;
         if (plateUpFrm.lock(buildFid(OBJ_TYPE_INTERFACE, 307, 0, 0, 0)) && plateDownFrm.lock(buildFid(OBJ_TYPE_INTERFACE, 308, 0, 0, 0))) {
+            mt_plate_trace(plateUpFrm.getData(), plateDownFrm.getData());
             memcpy(mt_place_up, plateUpFrm.getData(), sizeof(mt_place_up));
             memcpy(mt_place_down, plateDownFrm.getData(), sizeof(mt_place_down));
 
@@ -7937,11 +8463,12 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
             fontDrawText(mt_place_up + (MT_PLACE_W - length) / 2 + 4 * MT_PLACE_W, label, 200, MT_PLACE_W, _colorTable[21091]);
             fontDrawText(mt_place_down + (MT_PLACE_W - length) / 2 + 4 * MT_PLACE_W, label, 200, MT_PLACE_W, _colorTable[18977]);
 
-            int placeBtn = buttonCreate(_mt_wid, 120, 86, MT_PLACE_W, MT_PLACE_H, -1, -1, -1, MT_KEY_PLACE,
+            int placeBtn = buttonCreate(_mt_wid, MT_PLACE_X, MT_PLACE_Y, MT_PLACE_W, MT_PLACE_H, -1, -1, -1, MT_KEY_PLACE,
                 mt_place_up, mt_place_down, nullptr, BUTTON_FLAG_TRANSPARENT);
             if (placeBtn != -1) {
                 buttonSetCallbacks(placeBtn, _gsound_red_butt_press, _gsound_red_butt_release);
             }
+            mt_place_btn = placeBtn;
         }
     }
 
@@ -8037,6 +8564,7 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
         if (btn != -1) {
             buttonSetCallbacks(btn, _gsound_red_butt_press, _gsound_red_butt_release);
         }
+        mt_red_btn[MT_RED_DONE] = btn; // kept for SET TIMER's A badge (mt_marks_make)
 
         // Cancel
         btn = buttonCreate(_mt_wid,
@@ -8055,6 +8583,12 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
         if (btn != -1) {
             buttonSetCallbacks(btn, _gsound_red_butt_press, _gsound_red_butt_release);
         }
+        mt_red_btn[MT_RED_CANCEL] = btn; // ...and its B
+    }
+
+    // SET TIMER: the pad's badged copies, now that every button they go on exists (shown by the window's loop).
+    if (inventoryWindowType == INVENTORY_WINDOW_TYPE_SET_TIMER) {
+        mt_marks_make();
     }
 
     if (inventoryWindowType == INVENTORY_WINDOW_TYPE_MOVE_ITEMS) {
@@ -8070,9 +8604,21 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
             if (messageListGetItem(&gInventoryMessageList, &messageListItem)) {
                 int length = fontGetStringWidth(messageListItem.text);
 
+                // ⚠️ INTO COPIES, NEVER INTO THE ART (review 2026-11-15). The original drew ALL straight into FRM 307 / 308
+                // as the art cache holds them -- a lock hands out the cache's own block, not a copy -- and the word
+                // stayed in the plate for as long as the cache kept it. The bomb's SET TIMER window takes the same two
+                // frames for its PLACE plate (above) and draws PLACE over them with the same font, row and colours, and
+                // this font blends rather than covers (a glyph's blank pixels leave what lies under them), so after a
+                // stack had been split in a trade or dropped the PLACE plate read as PLACE with ALL printed through it,
+                // and its X badge copies took it along (autotest timer-plate-after-trade: 199 pixels of the plate, a
+                // "PAACE"). Each MOVE ITEMS window also printed ALL over its last ALL. The copies look exactly as the
+                // art did the first time: the same bytes, the same word.
+                memcpy(mt_all_up, _moveFrmImages[6].getData(), sizeof(mt_all_up));
+                memcpy(mt_all_down, _moveFrmImages[7].getData(), sizeof(mt_all_down));
+
                 // TODO: Where is y? Is it hardcoded in to 376?
-                fontDrawText(_moveFrmImages[6].getData() + (94 - length) / 2 + 376, messageListItem.text, 200, 94, _colorTable[21091]);
-                fontDrawText(_moveFrmImages[7].getData() + (94 - length) / 2 + 376, messageListItem.text, 200, 94, _colorTable[18977]);
+                fontDrawText(mt_all_up + (94 - length) / 2 + 376, messageListItem.text, 200, 94, _colorTable[21091]);
+                fontDrawText(mt_all_down + (94 - length) / 2 + 376, messageListItem.text, 200, 94, _colorTable[18977]);
 
                 btn = buttonCreate(_mt_wid,
                     120,
@@ -8083,8 +8629,8 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
                     -1,
                     -1,
                     5000,
-                    _moveFrmImages[6].getData(),
-                    _moveFrmImages[7].getData(),
+                    mt_all_up,
+                    mt_all_down,
                     nullptr,
                     BUTTON_FLAG_TRANSPARENT);
                 if (btn != -1) {
@@ -8111,6 +8657,7 @@ static int inventoryQuantityWindowFree(int inventoryWindowType)
     }
 
     windowDestroy(_mt_wid);
+    mt_marks_forget(); // its buttons are gone with it
 
     return 0;
 }

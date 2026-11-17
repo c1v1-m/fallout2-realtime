@@ -175,6 +175,7 @@ unsigned char* windowGetBuffer(int win);
 int windowGetAtPoint(int x, int y);
 // Realtime build (ported from fallout1-ce): see window_manager.cc.
 int win_get_top_modal();
+int win_get_top_visible_at(int x, int y);
 int win_get_top_button_centers(int* xs, int* ys, int maxCount);
 int windowGetWidth(int win);
 int windowGetHeight(int win);

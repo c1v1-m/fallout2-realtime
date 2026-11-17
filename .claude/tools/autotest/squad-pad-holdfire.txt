@@ -4,6 +4,9 @@
 # mode closes. Vic sees the raider and would take it (squad-fire refuse) but attacks nobody. At 7 s LT + A and X again:
 # every one of who holds fire, so X is OPEN FIRE now -- and Vic shoots. (The world runs on in the slowdown: an X given
 # 0.4 s after the open came after Vic's first shot -- the order is quick, the world is not stopped yet.)
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after each X (0.35 s and 0.3 s later,
+# both still in the slowdown), so the world runs on with Vic holding his fire, then shooting. The OPEN FIRE keeps its
+# own LT + A: the world has to run between the two orders, and a mode left open holds it still.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-holdfire.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-pad-holdfire
 map DESERT1.MAP
@@ -18,26 +21,33 @@ spawn 16777278 19904 rot 1 wield 8 item 29 3 party
 spawn 16777454 22700 rot 5 wield 8 item 29 2 hostile hp 60
 
 # LT + A, X: HOLD FIRE -- in the slowdown, before Vic has taken the raider on (the world still runs then, slower and
-# slower: an order in it is given at once)
+# slower: an order in it is given at once); it clicks and the mode stays open -- B, still in the slowdown, closes it
 axis 100 LT 32767
 tap 200 A
 axis 400 LT -32768
 tap 450 X
-# LT + A, X: OPEN FIRE
+tap 800 B
+# LT + A, X: OPEN FIRE; B closes the mode (in its slowdown too) and the world runs at full speed again
 axis 6800 LT 32767
 tap 7000 A
 axis 7300 LT -32768
 tap 7500 X
+tap 7800 B
 note 15500 end
 
 # the checks (run.js)
 expect \[INPUT/squad-x\] order=hold-fire who=all ok=1
 expect \[FLOW/squad-fire\] hold id=18062 pid=16777278 why=order
-expect \[FLOW/squad-mode\] close why=x slowed=0\.\d\d frozen=0
+# each X clicked and left the mode open, and its B closed it while the world was still slowing (frozen=0: under 1.5 s
+# after the open) -- so the X before it was given in the slowdown, at once
+expect \[INPUT/squad-mode\] stays after=x order=hold-fire speaker=18062
+expect-count 2 \[FLOW/squad-mode\] close why=b slowed=0\.\d\d frozen=0
 expect \[FLOW/squad-fire\] refuse id=18062 pid=16777278 tgt=\d+ tgtPid=16777454
 expect \[INPUT/squad-x\] order=open-fire who=all ok=1
+expect \[INPUT/squad-mode\] stays after=x order=open-fire speaker=18062
 expect \[FLOW/squad-fire\] open id=18062 pid=16777278 why=order
 expect \[COMBAT/attack\] NPC aid=18062 ->pid=16777454 did=\d+ hm=\d+ t=([7-9]|\d\d)\.
 # held: no attack of Vic's before the OPEN FIRE (t is rt_clock, about the timeline's seconds)
 expect-not \[COMBAT/attack\] NPC aid=18062 .*t=[0-6]\.
-expect-count 2 \[INPUT/squad-mode\] close why=x
+expect-count 2 \[INPUT/squad-mode\] stays after=x
+expect-count 2 \[INPUT/squad-mode\] close why=b ms=

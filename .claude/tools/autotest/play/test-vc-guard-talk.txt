@@ -1,0 +1,10 @@
+# F2 (2026-11-15, his PC: „při kovnverzaci je barter stále bez Y a u companion combat je taky bez tlačítka“): the Vault
+# City gate guard he talked to (pid 16777675). The panel's BARTER button must wear the pad's Y badge.
+name test-vc-guard-talk
+map VCTYCTYD.MAP
+mapscript on
+seed 1
+duration 8
+talk 2000 16777675
+shot 4500
+expect dialog-start\] pid=16777675

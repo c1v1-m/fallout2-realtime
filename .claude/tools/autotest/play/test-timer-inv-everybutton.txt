@@ -1,0 +1,114 @@
+# TESTER (2026-11-15, area b): the bomb's SET TIMER window opened from the INVENTORY (A on the plastic explosive),
+# EVERY pad button pressed inside it, closed with A (DONE). Inside: Y = 3:00, the D-pad steps 10 s (UP/RIGHT +, DOWN/LEFT -),
+# and LB / RB / BACK / START / GUIDE / L3 / R3 / LT / RT must do nothing. Expected close value: 3:00 -10 -10 +10 +10 (+0
+# at the max) -10 = 2:50 = 170. Then the inventory's and the world's own presses must act normally (no lost press, no
+# stuck owned state): A on the row under the pointer (the stimpak that moved up into the bomb's old row), RB binds it,
+# BACK closes, then in the world X (reload), RB / LB (quick slots), Y (hand swap), START (pause menu) and START again.
+name test-timer-inv-everybutton
+map DESERT1.MAP
+seed 1
+duration 34
+dude tile 20100 rot 2
+dude hp 300
+dude curhp 150
+dude skill traps 150
+# the list shows the newest first: row 0 stimpak (2), row 1 plastic explosive, row 2 dynamite
+dude item 51 1
+dude item 85 1
+dude item 40 2
+dude quickslot lb 40
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+shot +400
+# A on the plastic explosive: its timer window
+tap +500 A
+shot +900
+# the window's own buttons
+tap +500 Y 60
+shot +300
+tap +400 DOWN 60
+tap +400 LEFT 60
+tap +400 RIGHT 60
+tap +400 UP 60
+tap +400 UP 60
+tap +400 DOWN 60
+# buttons the window does not use
+tap +400 LB
+tap +400 RB
+tap +400 BACK
+tap +400 START
+tap +400 guide
+tap +400 L3
+tap +400 R3
+axis +400 LT 32767
+axis +200 LT -32768
+axis +300 RT 32767
+axis +200 RT -32768
+shot +500
+# A = DONE at 2:50
+tap +500 A
+shot +900
+# the inventory's own A on the row under the pointer, then RB binds that row
+tap +700 A
+shot +900
+tap +600 RB
+shot +600
+# BACK closes the inventory
+tap +600 BACK
+# the world's presses
+tap +1200 X
+tap +800 RB
+tap +1500 LB
+tap +1500 Y
+shot +800
+tap +800 START
+shot +1500
+tap +600 START
+shot +1500
+note +500 done
+
+# the checks (run.js)
+expect-count 1 \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=DONE by=pad value=170
+expect-count 1 \[INPUT/pad-owned\] on
+expect-count 1 \[INPUT/pad-owned\] off
+expect-count 1 \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+expect-count 1 \[STATE/msg\] You set the timer
+# nothing from the buttons pressed inside the window
+expect-not \[INPUT/inv-equip\]
+expect-count 1 \[INPUT/quick-slot-bind\]
+expect-not \[FLOW/world-hold\] on
+expect-not \[INPUT/aim-(picker|refused)\]
+# the presses after the window
+expect-count 2 \[INPUT/inv-quick\]
+expect \[INPUT/inv-quick\] pid=40 row=1
+expect \[INPUT/quick-slot-bind\] slot=1 pid=40
+expect-count 1 \[INPUT/reload-refused\]|\[ACTION/reload\]
+expect-count 1 \[INPUT/quick-slot-press\] src=rb
+expect-count 1 \[INPUT/quick-slot-press\] src=lb
+expect-count 1 \[INPUT/hand-swap\] src=y
+expect-count 1 options=1
+expect \[FLOW/autotest\] end why=time .* modal=-1

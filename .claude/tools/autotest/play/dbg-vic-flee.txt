@@ -1,0 +1,11 @@
+# DEBUG (2026-11-17, „vic jenom přišel ke mně a nic nedělal“): Vic hurt (10 HP) 12 tiles from the dude, raiders near him.
+name dbg-vic-flee
+map DESERT1.MAP
+seed 1
+duration 10
+dude tile 20100 rot 2
+dude hp 400
+spawn 16777278 22500 rot 5 wield 8 item 29 6 hp 10 party
+spawn 16777454 24496 rot 5 wield 8 item 29 6 hostile
+spawn 16777454 24504 rot 5 wield 8 item 29 6 hostile
+at 0 idle

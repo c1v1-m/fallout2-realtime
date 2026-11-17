@@ -1,0 +1,75 @@
+# TESTER (2026-11-15, area b): the bomb's SET TIMER window opened from the WORLD (the RB quick slot), EVERY pad button
+# pressed inside it, closed with B (CANCEL). Then the world's own presses must act normally: Y (hand swap), X (reload),
+# LB (the LB quick slot, a stimpak), a B HOLD (the drug wheel opens, B lets go), RB again (the timer window again), A =
+# DONE there (the bomb goes down with a bend), and an A afterwards (the prompt's pick-up of that bomb).
+name test-timer-world-everybutton
+map DESERT1.MAP
+seed 1
+duration 30
+dude tile 20100 rot 2
+dude hp 300
+dude curhp 150
+dude skill traps 150
+dude item 85 2
+dude item 40 2
+dude quickslot rb 85
+dude quickslot lb 40
+
+tap 1500 RB
+shot 2600
+# the window's own buttons: Y = 3:00, the D-pad
+tap +500 Y 60
+tap +400 DOWN 60
+tap +400 LEFT 60
+tap +400 RIGHT 60
+# buttons the window does not use
+tap +400 LB
+tap +400 RB
+tap +400 BACK
+tap +400 START
+tap +400 guide
+tap +400 L3
+tap +400 R3
+axis +400 LT 32767
+axis +200 LT -32768
+shot +400
+# B = CANCEL
+tap +500 B
+shot +900
+# the world's presses
+tap +800 Y
+tap +900 X
+tap +900 LB
+shot +1200
+# a B hold: the drug wheel
+pad +800 B 1
+shot +900
+pad +100 B 0
+shot +700
+# RB again: the timer window, DONE with A
+tap +1200 RB
+shot +1100
+tap +500 A
+shot +1500
+# A: the prompt's pick-up of the bomb at his feet
+tap +1500 A
+shot +2000
+note +500 done
+
+# the checks (run.js)
+expect-count 2 \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-window\] close key=CANCEL by=pad value=170
+expect \[FLOW/timer-window\] close key=DONE by=pad value=60
+expect-count 2 \[INPUT/pad-owned\] on
+expect-count 2 \[INPUT/pad-owned\] off
+# nothing from the buttons pressed inside the window
+expect-count 1 \[INPUT/quick-slot-press\] src=lb
+expect-count 2 \[INPUT/quick-slot-press\] src=rb
+expect-not \[INPUT/aim-(picker|refused)\]
+expect-not options=1
+# the presses after the window
+expect-count 1 \[INPUT/hand-swap\] src=y
+expect-count 1 \[INPUT/reload-refused\]|\[ACTION/reload\]
+expect-count 1 \[FLOW/world-hold\] on
+expect \[ACTION/explosive-placed\] pid=209
+expect \[ACTION/interact-(queue|do)\] kind=2 pid=209

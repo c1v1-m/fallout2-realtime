@@ -35,6 +35,7 @@
 
 // Realtime (fallout1-ce item.cc).
 #include "rt/game/combat_rt.h"
+#include "rt/game/game_trace.h"
 
 namespace fallout {
 
@@ -1254,6 +1255,7 @@ int weaponGetDamage(Object* critter, int hitMode)
     int maxDamage = 0;
     int meleeDamage = 0;
     int bonusDamage = 0;
+    bool handToHand = true; // for the dmg-roll trace below
 
     // NOTE: Uninline.
     Object* weapon = critterGetWeaponForHitMode(critter, hitMode);
@@ -1263,6 +1265,7 @@ int weaponGetDamage(Object* critter, int hitMode)
         weaponGetDamageMinMax(weapon, &minDamage, &maxDamage);
 
         int attackType = weaponGetAttackTypeForHitMode(weapon, hitMode);
+        handToHand = attackType == ATTACK_TYPE_MELEE || attackType == ATTACK_TYPE_UNARMED;
         if (attackType == ATTACK_TYPE_MELEE || attackType == ATTACK_TYPE_UNARMED) {
             meleeDamage = critterGetStat(critter, STAT_MELEE_DAMAGE);
 
@@ -1290,7 +1293,21 @@ int weaponGetDamage(Object* critter, int hitMode)
         }
     }
 
-    return randomBetween(bonusDamage + minDamage, bonusDamage + meleeDamage + maxDamage);
+    int lo = bonusDamage + minDamage;
+    int hi = bonusDamage + meleeDamage + maxDamage;
+    int roll = randomBetween(lo, hi);
+
+    // [COMBAT/dmg-roll] (2026-11-16, „přijde mi že HTH perk mi nepřidává dmg ke spiked unarmed zbrani, ověř to“): the
+    // dude's hand-to-hand damage roll BEFORE armour, with its bounds. [COMBAT/hit] shows only what DT/DR left of it,
+    // which smears a +2. melee= is STAT_MELEE_DAMAGE (Bonus HtH Damage is in it, +2 a rank, on the top of the range);
+    // fix=1 is sfall's BonusHtHDamageFix, which puts the same +2 a rank on the bottom too.
+    if (critter == gDude && handToHand) {
+        trace_event(TRACE_COMBAT, "dmg-roll", "hm=%d pid=%d lo=%d hi=%d roll=%d melee=%d hth=%d fix=%d",
+            hitMode, weapon != nullptr ? weapon->pid : -1, lo, hi, roll, meleeDamage,
+            perkGetRank(gDude, PERK_BONUS_HTH_DAMAGE), damageModGetBonusHthDamageFix() ? 1 : 0);
+    }
+
+    return roll;
 }
 
 // 0x478570

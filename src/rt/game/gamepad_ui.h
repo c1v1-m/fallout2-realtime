@@ -109,6 +109,14 @@ bool gamepad_ui_set_suppress_a_click(bool suppress);
 unsigned int gamepad_ui_input_epoch();
 void gamepad_ui_bump_input_epoch();
 bool gamepad_ui_a_click_suppressed();
+// A window that answers the pad's BUTTONS itself in its own loop but keeps the shared pointer (the left-stick snap,
+// the right stick, RT's click) -- the bomb's SET TIMER window. While set, the hook's button shortcuts and its A
+// router stand aside (their edges still tracked). Returns the PREVIOUS state.
+bool gamepad_ui_set_buttons_owned(bool owned);
+// Every button down right now is nobody's press until it has been let go: the one that closed such a window (A on
+// DONE, B on CANCEL...) must not go on to act in the world or the screen under it. The edge trackers that never
+// see the input epoch (the wheels, the use-on hold) read such a button as up.
+void gamepad_ui_spend_held_buttons();
 void gamepad_ui_set_suppress_snap(bool active);
 // Set while a pre-game modal screen with no live session is up (the death scene): the gameplay
 // shortcuts must not fire into a game that main_reset_system has already torn down.

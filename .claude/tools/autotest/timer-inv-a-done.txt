@@ -1,0 +1,58 @@
+# LEAK (Fallout 2 Realtime 2026-11-15): the bomb's SET TIMER window opened from the INVENTORY with a tap of A on the
+# plastic explosive, and DONE pressed with A. The inventory's own A router ran under the window (the mouse hook runs in
+# its loop) and took that A as the start of a tap: on its release, after the window had gone, it fired the quick action
+# on the list row under the pointer. After DONE the armed bomb is the newest item (row 0), so the row the bomb left
+# holds the item that was above it -- here the dynamite, whose use opened the timer window a SECOND time.
+# Before the fix: two timer windows (modal size=259x162 twice). After: one, and the A spent until let go.
+name timer-inv-a-done
+map DESERT1.MAP
+seed 1
+duration 13
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+# the list shows the newest first: row 0 dynamite, row 1 plastic explosive
+dude item 85 1
+dude item 51 1
+
+open 1000 inventory
+# the left stick's snap: four left (the list), six up (row 0), one down (row 1, the plastic explosive)
+axis 2500 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +280 LX -32767
+axis +120 LX 0
+axis +300 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +280 LY -32767
+axis +120 LY 0
+axis +300 LY 32767
+axis +120 LY 0
+shot +400
+# A on the plastic explosive: its timer window
+tap +500 A
+shot +900
+# A = DONE (1:00)
+tap +600 A
+shot +1500
+note +1500 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=inventory pad=1
+expect \[FLOW/timer-window\] close key=DONE by=pad value=60
+expect \[INPUT/pad-spent\] held=a
+# the leak: the A that pressed DONE must not act on the inventory once the window is gone
+expect-count 1 \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=259x162
+expect-count 1 \[INPUT/inv-quick\]
+expect-not \[FLOW/timer-window\] open pid=51

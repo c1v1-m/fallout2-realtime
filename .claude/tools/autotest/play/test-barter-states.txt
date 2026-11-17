@@ -1,0 +1,50 @@
+# TEST (2026-11-15, the barter badges): the trade readout's three states on its plate, with the pad's own keys.
+# Maida (KLADWTWN, as m-barter-y). The dude carries 99999 caps, so OVERPAY gets a five-digit number.
+#   1 the trade opens: tables empty, DEAL OK
+#   2 LB (column left = her stock), A: one of her items onto her table -> SHORT
+#   3 D-pad DOWN (next item in her column), A: a second item -> SHORT grows
+#   4 X evens with his caps -> DEAL OK
+#   5 RB (column right = wraps to his stock), LT+A: every cap onto his table -> OVERPAY 9xxxx (does it fit the plate?)
+#   6 X evens back (his caps come off his table) -> DEAL OK
+#   7 Y offers: "OK, that's a good trade" -> DEAL OK on empty tables
+#   8 B leaves for the talk
+name test-barter-states
+map KLADWTWN.MAP
+mapscript on
+seed 1
+duration 33
+dude tile 22879 rot 0
+dude item 41 99999
+
+talk 2000 16777273
+tap 6000 Y
+shot 8500
+tap 9000 LB
+tap 10000 A
+shot 11500
+tap 12000 DOWN
+tap 13000 A
+shot 14500
+tap 15000 X
+shot 16500
+tap 17000 RB
+axis 18000 LT 32767
+tap 18400 A 150
+axis 19000 LT -32768
+shot 20500
+tap 21000 X
+shot 22500
+tap 23000 Y
+shot 25000
+tap 26000 B
+shot 29500
+note 31500 end
+
+expect autotest\] talk t=\d+ pid=16777273 id=\d+
+expect barter-a\] list=3 row=0 .*amount=ONE
+expect barter-nav\] over=\d+ col=3 row=0
+expect barter-a\] list=3 row=1 .*amount=ONE
+expect-count 2 barter-auto-moved\]
+expect barter-a\] list=0 row=0 pid=41 .*amount=ALL
+expect barter-offer\] rc=0
+expect-not barter-offer\] rc=-1

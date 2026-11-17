@@ -3,6 +3,8 @@
 # tiles in front of the dude), the right stick takes it 8 tiles left of the dude, A = GO: Vic walks there and holds it.
 # Then a knife raider, off the screen until now and neutral, turns on the dude and comes: Vic fights from his post --
 # Distance "Stay" there: no step for the fight (no chase, no back-off, no flank), he shoots what he can hit from it.
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the GO, so the world runs again and
+# Vic walks to his post before the fight.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-go-fight.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-pad-go-fight
 map DESERT1.MAP
@@ -25,14 +27,18 @@ axis 1300 RX -26181
 axis 1300 RY 1309
 axis 1809 RX 0
 axis 1809 RY 0
-# A: GO
+# A: GO -- it clicks and the mode stays open (the world held still); B closes it, the world runs and Vic walks there
 tap 2400 A
+tap 2800 B
 # the fight: the raider turns on the dude
 hostile 6000 16777455
 note 19500 end
 
 # the checks (run.js)
 expect \[INPUT/squad-a\] kind=ground order=go obj=-1 tile=\d+ who=all ok=1
+# the GO clicks and leaves the mode open; the B closes it
+expect \[INPUT/squad-mode\] stays after=a order=go speaker=18062
+expect-count 1 \[INPUT/squad-mode\] close why=b ms=
 expect \[FLOW/squad-post\] set id=18062 pid=16777278 tile=\d+
 expect \[FLOW/squad-post\] arrive id=18062 pid=16777278
 expect \[FLOW/autotest\] hostile t=\d+ pid=16777455 id=\d+

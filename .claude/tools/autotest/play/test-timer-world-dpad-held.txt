@@ -1,0 +1,37 @@
+# TESTER (2026-11-15, area b): test-timer-inv-dpad-held's gesture from the WORLD (the RB quick slot): D-pad DOWN held to
+# run the clock down to 0:10, A (DONE) while DOWN is still held, DOWN let go 1.2 s later in the world. In the world a held
+# D-pad DOWN opens the character sheet (a hold) and a short one scrolls the messages or steps the prompt (a tap): none of
+# that may come of the press made in the window. Then a fresh D-pad DOWN hold must still open the sheet, and B close it.
+name test-timer-world-dpad-held
+map DESERT1.MAP
+seed 1
+duration 18
+dude tile 20100 rot 2
+dude hp 300
+dude skill traps 150
+dude item 85 2
+dude quickslot rb 85
+
+tap 1500 RB
+pad 2500 DOWN 1
+shot +700
+tap +100 A
+shot +600
+pad +600 DOWN 0
+shot +600
+# a fresh hold of D-pad DOWN: the character sheet
+pad +1500 DOWN 1
+pad +900 DOWN 0
+shot +600
+tap +800 B
+shot +900
+note +500 done
+
+# the checks (run.js)
+expect \[FLOW/timer-window\] open pid=85 from=world pad=1
+expect \[FLOW/timer-window\] close key=DONE by=pad value=10
+expect \[INPUT/pad-spent\] held=a,dpdown
+expect \[ACTION/explosive-placed\] pid=209
+# exactly one character sheet (640x480): the one from the fresh hold
+expect-count 1 \[FLOW/autotest\] modal win=\d+ at=\d+,\d+ size=640x480
+expect \[FLOW/autotest\] end why=time .* modal=-1

@@ -9,6 +9,10 @@
 # fighter's, his hold fire or not) never doses the dude. At 7 s LT + A again: every one of who keeps his supplies now,
 # so the legend says "Y Heal me again" (shot 3), and Y gives HEAL AGAIN ("I'll patch you up.", shot 4) -- and Vic's
 # medic beat doses the dude.
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after each Y -- the first one while that
+# Y and LT are still down and the world still slowing (its close spends them: still no firing mode, no weapon wheel),
+# so the fight runs with Vic keeping his supplies; the second after shot 4, so his beat doses. HEAL AGAIN keeps its own
+# LT + A: the fight has to run between the two orders, and a mode left open holds the world still.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-pad-noheal.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-pad-noheal
 map DESERT1.MAP
@@ -24,41 +28,49 @@ spawn 16777455 16700 rot 2 wield 4 team 50
 
 # Vic stays beside him (the medic doses within 3 tiles)
 squad 100 hold all
-# LT + A; Y 0.25 s later, in the slowdown, with LT still down and Y held 500 ms: NO HEALING
+# LT + A; Y 0.25 s later, in the slowdown, with LT still down and Y held 500 ms: NO HEALING -- it clicks and the mode
+# stays open; B closes it, Y and LT still down, the world still slowing
 axis 200 LT 32767
 tap 400 A
 shot 600
 tap 650 Y 500
+tap 1000 B
 axis 1300 LT -32768
 shot 1400
 # he holds his fire (nobody ends the fight), and the raider turns on the dude
 squad 1500 holdfire all
 hostile 2000 16777455
-# LT + A, Y: HEAL AGAIN
+# LT + A, Y: HEAL AGAIN; B (after shot 4, in the slowdown) closes the mode and the world runs
 axis 6800 LT 32767
 tap 7000 A
 axis 7300 LT -32768
 shot 7350
 tap 7500 Y
 shot 7800
+tap 7900 B
 note 15000 end
 
 # the checks (run.js)
 expect \[INPUT/squad-y\] order=no-healing who=all ok=1
 expect \[ACTION/squad-order\] order=no-healing target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
 expect \[FLOW/medic-optout\] id=18062 treats=0 count=1
-expect \[FLOW/squad-mode\] close why=y slowed=0\.\d\d frozen=0
+# each Y clicked and left the mode open, and its B closed it while the world was still slowing (frozen=0: under 1.5 s
+# after the open) -- so the Y before it was given in the slowdown, at once
+expect \[INPUT/squad-mode\] stays after=y order=no-healing speaker=18062
+expect-count 2 \[FLOW/squad-mode\] close why=b slowed=0\.\d\d frozen=0
 expect \[FLOW/autotest\] hostile t=\d+ pid=16777455 id=\d+
 # the fight was on for him: he would take the raider, but holds his fire
 expect \[FLOW/squad-fire\] refuse id=18062 pid=16777278 tgt=\d+ tgtPid=16777455
 expect \[INPUT/squad-y\] order=heal-again who=all ok=1
 expect \[ACTION/squad-order\] order=heal-again target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=all
 expect \[FLOW/medic-optout\] id=18062 treats=1 count=0
+expect \[INPUT/squad-mode\] stays after=y order=heal-again speaker=18062
 # ...and his medic beat doses the dude
 expect \[FLOW/medic\] id=18062 pid=16777278 patient=18000 self=0 kind=1 item=40 .* ap=\d+ t=([7-9]|\d\d)\.\d+ why=beat
 # held: no dose of the beat's to him before HEAL AGAIN (t is rt_clock, about the timeline's seconds)
 expect-not \[FLOW/medic\] id=18062 pid=16777278 patient=18000 .* ap=\d+ t=[0-6]\.\d+ why=beat
-expect-count 2 \[INPUT/squad-mode\] close why=y
+expect-count 2 \[INPUT/squad-mode\] stays after=y
+expect-count 2 \[INPUT/squad-mode\] close why=b ms=
 # the Y was the mode's: no LT + Y firing mode, no Y-hold weapon wheel, no interaction
 expect-not \[INPUT/fire-mode\]
 expect-not \[FLOW/world-hold\] on why=wheel

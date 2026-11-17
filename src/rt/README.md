@@ -200,8 +200,17 @@ only when a ring comes, goes or moves with the view. The tile in the air is the 
 reads the target after that frame's moves and can be a hex out. `[COMBAT/blast-ring] on|off` traces, harness
 `blastring on|off|awareness` and `dude perk <n>`, `screen-blast-ring.txt`, `screen-blast-ring-far.txt`,
 `blast-ring-rocket.txt`, `blast-ring-aware-on.txt` / `-off.txt`, `screen-mods-blast.txt` (the row; 25 rows at
-480 lines, pitch 12 = the `lineH + 2` floor: the next MODS row needs a new layout). Not in fallout1-ce yet
+480 lines, pitch 12 = the `lineH + 2` floor). Not in fallout1-ce yet
 (module delta in `combat_rt.cc` / `.h`, `mods_page.cc`, `autotest.cc`).
+
+**Bonus Move refill** (2026-11-17, his „ten perk teď busted“ → „jednou za kolo mi přijde weak“ → MODS switch, „Ano,
+udělej“): the perk's movement reserve (2 points per rank, spent by walking first) came back at the AP regen rate,
+distance bonus included, whenever the dude stood — under a second next to an enemy, between two blows. MODS row
+"Bonus Move" (above "Attackers at once"), cfg `bonus_move_refill`: 0 Fast (that old rate), **1 Half turn (default)**,
+2 Turn = vanilla's once per turn, a turn being the time the whole AP pool takes to refill at the base rate (no distance
+multiplier): `combat_rt.cc` scales the reserve's dt by reserve / pool (×2 for half). Still refills only while standing.
+Measured (AG 9, 9 AP, rank 1): Fast ~1.2 s, Half 2.4 s, Turn 4.8 s after he stopped (`sim/bm-refill-*.txt`, harness
+`cfg`); the row: `screen-mods-bonus-move.txt` (28 rows at 480 lines: the window 452 high, still on the screen).
 
 **The exit wheel** (2026-11-10, his „pokud není možné vybrat východ, tak to tlačítko docela ztrácí smysl“):
 BACK held, when the exit grids on the dude's floor lead to two places or more, opens a radial wheel of them
@@ -326,12 +335,21 @@ the LT-locked target or 3 tiles in front of the dude; on a critter's sprite it t
 the tile under it — corner brackets frame which. A gives the order for what is under it (red ATTACK + red brackets on
 an enemy, the same in the lock's yellow on a neutral he can see since 2026-11-14, green GO + green brackets round the
 tile on free ground — grey where nobody chosen can get, reach asked of the pathfinder only after the cursor rests
-120 ms —, green or grey HEAL ME on the dude, WEAPON on a companion: a radial wheel of what his art can hold plus Auto,
+120 ms —, green or grey HEAL ME on the dude, EQUIP on a companion (WEAPON until 2026-11-17, when the wheel took armour too):
+a radial wheel of what his art can hold plus Auto and his best armour,
 B back to the mode; anything else — a wall, a neutral a roof or a wall hides — no word, grey brackets, and A buzzes); X
 hold fire / open fire and Y no healing / heal me again for who (the legend says which: "X Hold fire" or "X Open fire",
 "Y No healing" or "Y Heal me again" — his preview „A Heal me X Hold fire Y No healing B Back“; no Y at all while the
 medic beat is off, cfg `medic_enabled=0`, as the dialogue then has no line either); the D-pad design B's four for who
-(a compass of four words beside the cursor); B closes. Every order closes it, a refusal buzzes and leaves it open. A
+(a compass of four words beside the cursor); R3 jumps the cursor onto the next companion ("RS Next companion", his
+„R3 skáče“ 2026-11-17: nearest first and round again, the one it is on counts as where it stands, only one the view
+shows; a buzz when none is on the screen) and L3 gives Keep distance for who ("LS Keep distance", the dialogue's
+Distance "Snipe"; on R3 earlier the same day) — both presses spent, so no called-shot window and no Skilldex follow
+(`screen-squad-r3.txt`); B closes. ⚠️ Only B: since 2026-11-17 („když dávám rozkazy tak se ukončí režim a musím zase
+LT+A … je to docela annoying“) an order clicks and the mode STAYS OPEN for the next one (`[INPUT/squad-mode] stays
+after= order= speaker=`; a companion's wheel goes back to the mode after its pick), the world staying slowed / held until
+B; the speaker's green name stands aside while his line floats there (`combat_rt_squad_last_speaker`). Until then every
+order closed it. A refusal buzzes and leaves it open, as before. A
 Y held on after its order is spent like X (the close bumps the input epoch; the Y-hold weapon wheel stands aside while
 the mode is up): no hand swap, no LT + Y firing mode, no wheel. The marks ride on combat_rt's world overlay
 (`gpui_squad_overlay`): the dotted lines, over them the OUTLINES (his pick 2026-11-12 „Obrys postavy“, after „nelíbí se

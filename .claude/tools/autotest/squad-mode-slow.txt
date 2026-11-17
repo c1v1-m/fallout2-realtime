@@ -7,6 +7,9 @@
 # doses the dude. Then an order given DURING the slowdown (X, hold fire, 0.4 s after the open) is given at once and the
 # world never holds. Then LT + D-pad (design B) opens nothing and slows nothing. (GO's walk to a post was the walker
 # until GO went, 2026-11-13; GO came back on 2026-11-14, and the HEAL ME walk stayed the walker.)
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the X, 0.4 s later and still in
+# the slowdown, so that open never reaches the hold (one freeze and one world-hold in all, as before), and design B's
+# LT + D-pad comes with the mode closed (an open mode would take the D-pad as its own FOLLOW).
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-mode-slow.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-mode-slow
 map DESERT1.MAP
@@ -27,11 +30,13 @@ tap 1000 A
 axis 1300 LT -32768
 # held for a while; B: the world runs again, at once
 tap 4500 B
-# an order in the slowdown: LT + A, X 0.4 s later -- HOLD FIRE given at once, the mode closes before the hold
+# an order in the slowdown: LT + A, X 0.4 s later -- HOLD FIRE given at once; the mode stays for the next order, and
+# B 0.4 s after the X (0.8 s after the open, still in the slowdown) closes it before the hold
 axis 7000 LT 32767
 tap 7200 A
 axis 7400 LT -32768
 tap 7600 X
+tap 8000 B
 # design B: LT + D-pad Down (FOLLOW) -- no mode, no slowdown
 axis 9500 LT 32767
 tap 9800 DOWN
@@ -46,7 +51,8 @@ expect \[FLOW/squad-mode\] slow f=0\.9\d after=0\.\d\d rt=\+0\.(0[5-9]|1[0-3])\d
 expect \[FLOW/squad-mode\] slow f=0\.[3-6]\d after=0\.\d\d rt=\+0\.0[1-7]\d probe=\d+ moved=\d+
 expect \[FLOW/squad-mode\] slow f=0\.0\d after=1\.\d\d rt=\+0\.0[01]\d probe=\d+ moved=[0-2] dude=
 expect-count >=10 \[FLOW/squad-mode\] slow f=
-# ...and then the hold, after 1.5 s of real time and about half of that on rt_clock
+# ...and then the hold, after 1.5 s of real time and about half of that on rt_clock -- this open's only: section 2's
+# mode is closed by B in its slowdown, so one freeze in all
 expect \[FLOW/squad-mode\] freeze after=1\.5\d rtSlowed=0\.[5-9]\d\d probe=\d+
 expect-count 1 \[FLOW/squad-mode\] freeze
 expect \[FLOW/world-hold\] on why=squad
@@ -55,10 +61,17 @@ expect \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=
 expect \[FLOW/world-hold\] off
 # ...and Vic came on and dosed him afterwards
 expect \[FLOW/squad-heal\] dose id=\d+ pid=16777278 item=40 kind=1 ok=1
-# 2. an order in the slowdown: given at once, the mode closed before the hold, the world never held for it
+# 2. an order in the slowdown, given at once: X is the mode's (its stays line), and that mode was up only in its
+# slowdown -- B closed it at 0.8 s, frozen=0, and the one freeze above is section 1's -- so the order came before any
+# hold, and the world never held for it
 expect \[ACTION/squad-order\] order=hold-fire target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
-expect \[FLOW/squad-mode\] close why=x slowed=0\.[3-7]\d frozen=0 heldMs=0
+expect-count 1 \[INPUT/squad-mode\] stays after=x order=hold-fire
+expect \[FLOW/squad-mode\] close why=b slowed=0\.[6-9]\d frozen=0 heldMs=0
 expect-count 1 \[FLOW/world-hold\] on why=squad
-# 3. design B's LT + D-pad opens no mode
+# both modes were closed by B, nothing else
+expect-count 2 \[FLOW/squad-mode\] close why=
+expect-count 2 \[FLOW/squad-mode\] close why=b slowed=
+# 3. design B's LT + D-pad opens no mode (and the mode's own D-pad took nothing: it was closed by then)
 expect \[ACTION/squad-order\] order=follow target=- companions=1 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
 expect-count 2 \[FLOW/squad-mode\] open why=
+expect-not \[INPUT/squad-dpad\]

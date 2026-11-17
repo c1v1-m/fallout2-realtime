@@ -466,4 +466,46 @@ void textObjectsRemoveByOwner(Object* object)
     }
 }
 
+// Realtime build: [object]'s lines OFF AT ONCE, and the map repainted where they were. textObjectsRemoveByOwner only
+// marks them; the ticker takes them off, and it stands still while the world is held (the squad command mode:
+// map_disable_bk_processes -> isoDisable -> textObjectsDisable), while textObjectsRenderInRect draws a marked line all
+// the same -- so a companion's second line in one open mode was printed over his first until the mode closed
+// (screen-squad-y, 2026-11-17, when orders stopped closing the mode).
+void textObjectsRemoveByOwnerNow(Object* object)
+{
+    bool removed = false;
+    Rect dirtyRect;
+    for (int index = 0; index < gTextObjectsCount; index++) {
+        TextObject* textObject = gTextObjects[index];
+        if (textObject->owner != object) {
+            continue;
+        }
+        tileToScreenXY(textObject->tile, &(textObject->x), &(textObject->y), gElevation);
+        textObject->x += textObject->sx;
+        textObject->y += textObject->sy;
+
+        Rect textObjectRect;
+        textObjectRect.left = textObject->x;
+        textObjectRect.top = textObject->y;
+        textObjectRect.right = textObject->width + textObject->x - 1;
+        textObjectRect.bottom = textObject->height + textObject->y - 1;
+        if (removed) {
+            rectUnion(&dirtyRect, &textObjectRect, &dirtyRect);
+        } else {
+            rectCopy(&dirtyRect, &textObjectRect);
+            removed = true;
+        }
+
+        internal_free(textObject->data);
+        internal_free(textObject);
+        memmove(&(gTextObjects[index]), &(gTextObjects[index + 1]), sizeof(*gTextObjects) * (gTextObjectsCount - index - 1));
+        gTextObjectsCount--;
+        index--;
+    }
+
+    if (removed) {
+        tileWindowRefreshRect(&dirtyRect, gElevation);
+    }
+}
+
 } // namespace fallout

@@ -5,6 +5,9 @@
 # orders by the pad are squad-pad-go, -go-fight, -heal, -weapon, -attack, -holdfire, -noheal (A on free ground is GO
 # again since 2026-11-14: squad-pad-go); the slowdown and the hold are squad-mode-slow; the pictures are
 # screen-squad-mode and squad-pad-attack.
+# 2026-11-17: the mode stays open after an order (only B closes it): B tapped after the X, the D-pad's FOLLOW and the
+# Y; each order keeps its own opening (B, then LT + A again), so each starts from a fresh mode (who = All) and every
+# opening A is still checked to be no order -- an A in a mode left open would be GO on the ground under the cursor.
 # Vic (pistol) 4 tiles left of the dude; Sulik (knife) beside him; no enemy, so nothing moves the world but the orders.
 #   node ../fallout1-ce/.claude/tools/autotest/run.js .claude/tools/autotest/squad-mode-pad.txt 1 --exe build/Release/fallout2-ce.exe
 name squad-mode-pad
@@ -24,40 +27,51 @@ axis 500 LT 32767
 tap 700 A
 tap 1500 B
 axis 1800 LT -32768
-# 2. LT + A, X (after the hold): HOLD FIRE to All; the order closes the mode.
+# 2. LT + A, X (after the hold): HOLD FIRE to All; the mode stays; B closes it (the world still held).
 axis 2500 LT 32767
 tap 2700 A
 tap 4600 X
-axis 4900 LT -32768
-# 3. LT + A, RB (who = the nearest companion, Sulik), RB (Vic), D-pad Down: FOLLOW to Vic alone; closes.
+tap 4900 B
+axis 5200 LT -32768
+# 3. LT + A, RB (who = the nearest companion, Sulik), RB (Vic), D-pad Down: FOLLOW to Vic alone; the mode stays;
+#    B closes it (1.4 s after the open: still in the slowdown).
 axis 5500 LT 32767
 tap 5700 A
 tap 6100 RB
 tap 6400 RB
 tap 6800 DOWN
-axis 7100 LT -32768
-# 4. LT + A, Y (after the hold): NO HEALING to All; the order closes the mode.
+tap 7100 B
+axis 7400 LT -32768
+# 4. LT + A, Y (after the hold): NO HEALING to All; the mode stays; B closes it (the world still held).
 axis 8000 LT 32767
 tap 8200 A
 tap 10100 Y
-axis 10400 LT -32768
+tap 10400 B
+axis 10700 LT -32768
 note 12500 end
 
 # the checks (run.js)
 expect-count 4 \[FLOW/squad-mode\] open why=lt\+a slow=1\.50
+# every close is B's: four in all, one with no order (in the slowdown), three after an order that left the mode open
+expect-count 4 \[FLOW/squad-mode\] close why=
+expect-count 4 \[FLOW/squad-mode\] close why=b slowed=
+expect-count 3 \[INPUT/squad-mode\] stays after=
 expect \[FLOW/squad-mode\] close why=b slowed=0\.\d\d frozen=0
-expect \[FLOW/squad-mode\] close why=x slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+expect \[INPUT/squad-mode\] stays after=x order=hold-fire speaker=\d+
 expect \[ACTION/squad-order\] order=hold-fire target=- companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
 expect \[INPUT/squad-who\] who=\w+ id=18097 pid=16777313 index=0 of=2
 expect \[INPUT/squad-who\] who=\w+ id=18062 pid=16777278 index=1 of=2
 expect \[INPUT/squad-dpad\] dir=down order=follow who=18062 ok=1
 expect \[ACTION/squad-order\] order=follow target=- companions=1 skipped=0 why=ok speaker=18062 t=[\d.]+ who=18062
-expect \[FLOW/squad-mode\] close why=dpad
+expect \[INPUT/squad-mode\] stays after=dpad order=follow speaker=18062
 expect \[INPUT/squad-y\] order=no-healing who=all ok=1
 expect \[ACTION/squad-order\] order=no-healing target=- companions=2 skipped=0 why=ok speaker=\d+ t=[\d.]+ who=all
 expect \[FLOW/medic-optout\] id=18062 treats=0
 expect \[FLOW/medic-optout\] id=18097 treats=0
-expect \[FLOW/squad-mode\] close why=y slowed=1\.5\d frozen=1 heldMs=\d+ rtHeld=0\.000
+expect \[INPUT/squad-mode\] stays after=y order=no-healing speaker=\d+
+# X and Y came after the hold, and the world held on through the order until B 0.3 s later (rt_clock did not move):
+# two such closes, each held well over 0.1 s (section 3's B comes 1.4 s after its open, still in its slowdown)
+expect-count 2 \[FLOW/squad-mode\] close why=b slowed=1\.5\d frozen=1 heldMs=\d{3,} rtHeld=0\.000
 # the mode opens on free ground (GO's, since 2026-11-14), but no A there: no post was set
 expect \[INPUT/squad-mode\] open members=2 start=ahead x=\d+ y=\d+ tile=\d+ kind=ground
 expect-not \[FLOW/squad-post\] set

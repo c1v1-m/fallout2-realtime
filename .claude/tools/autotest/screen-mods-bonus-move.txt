@@ -1,0 +1,41 @@
+# The MODS row "Bonus Move" (2026-11-17, his „Ano, udělej“): PREFERENCES, X for MODS, then up eight rows from the top
+# (the list wraps): Internal resolution, Screen resolution, Rumble, Blast ring, Name the action, Projectiles, Attackers at
+# once, onto it. `screen` = the presented frame. Shots: 1 on "Half turn" (the default), 2 LB -> "Fast", 3 RB RB -> "Turn";
+# then LB back to Half turn and B out of all three. 28 rows at 480 lines in Fallout 2 now.
+name screen-mods-bonus-move
+map DESERT1.MAP
+seed 1
+duration 21
+dude tile 20100 rot 2
+
+# START tapped: the pause menu opens on the release, its highlight on SAVE GAME
+open 1000 options
+# SAVE -> LOAD -> PREFERENCES, A opens it
+tap 2200 DOWN
+tap 2700 DOWN
+tap 3200 A
+# X opens MODS from Preferences
+tap 4600 X
+# the top row wraps to the bottom: up eight rows onto Bonus Move
+tap 5800 UP
+tap 6200 UP
+tap 6600 UP
+tap 7000 UP
+tap 7400 UP
+tap 7800 UP
+tap 8200 UP
+tap 8600 UP
+screen 9400
+tap 10000 LB
+screen 10800
+tap 11400 RB
+tap 11900 RB
+screen 12700
+tap 13300 LB
+# B closes MODS, B cancels Preferences, B shuts the pause menu
+tap 14500 B
+tap 15700 B
+tap 16900 B
+note 19000 the world should be back
+
+expect \[FLOW/autotest\] end why=time .* modal=-1

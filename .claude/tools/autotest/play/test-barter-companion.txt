@@ -1,0 +1,52 @@
+# TEST (2026-11-15, the barter badges): a talk with a COMPANION -- the party panel (di_talkp) wears Y on BARTER and X on
+# COMBAT CONTROL; X opens the control panel, B comes back; Y opens the companion's trade (trade.frm, weights not prices)
+# with OFFER Y / TALK B over that panel's own red dots, LB / RB, the legend plate and the X readout.
+# Vic runs his party script (DCVic.int = scripts.lst line 50, as squad-heal-script) and stands next to the dude; he
+# carries two rocket launchers besides his ammo, so his side of the table can weigh two digits ("Wt. NN" beside X).
+#   1 the party talk               2 X: COMBAT CONTROL
+#   3 B: back to the talk          4 Y: the companion trade
+#   5 A on the dude's first item (onto his table)   6 X in the companion trade (what does "even" do here?)
+#   7 LB (Vic's column), LT+A: his launchers onto his table -- "Wt. NN" next to the X badge
+#   8 B: back to the talk
+# FIXED the same day: the badges on trade.frm sit a row higher than barter.frm's spots (no red crescent at the top left
+# of TRADE's Y and TALK's B, shot 4); a companion's trade shows no readout and no X badge, and X there only buzzes
+# (shot 6); "Wt. NN" stands whole (shot 7).
+name test-barter-companion
+map DESERT1.MAP
+seed 1
+duration 31
+dude tile 20100 rot 2
+dude hp 400
+dude armor 2
+dude item 41 500
+dude item 40 3
+
+spawn 16777278 20102 rot 5 wield 8 item 29 3 item 13 2 party script 50
+
+talk 1500 16777278
+shot 4500
+tap 5500 X
+shot 8000
+tap 9000 B
+shot 11500
+tap 12500 Y
+shot 15500
+tap 16000 A
+shot 17500
+tap 18000 X
+shot 19500
+tap 20000 LB
+axis 21000 LT 32767
+tap 21400 A 150
+axis 22000 LT -32768
+shot 23000
+tap 23500 B
+shot 27000
+note 29500 end
+
+expect \[FLOW/autotest\] script pid=16777278 line=50 rc=0
+expect \[FLOW/autotest\] party-add id=\d+ pid=16777278 rc=0
+expect autotest\] talk t=\d+ pid=16777278 id=\d+ dist=\d+ rc=0
+expect barter-a\] list=3 row=0 pid=13 .*amount=ALL
+expect barter-auto-refused\] why=companion
+expect-not barter-auto-moved\]

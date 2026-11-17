@@ -1,0 +1,19 @@
+# F2 (2026-11-17, „Ano, jako originál“): the realtime medic follows COMBAT CONTROL's "Chem use" as vanilla's
+# ai_check_drugs: Clean = no drugs, "Stims when hurt a little" below 60 %, "a lot" below 30 %, the rest below 50 %.
+# Vic (party, 3 stimpaks, max 70 HP) starts at 40 HP with Chem use 1; two UNARMED raiders walk up, so he fights
+# and is not hurt much before the beat has decided.
+name test-vic-chem-little
+map DESERT1.MAP
+seed 1
+duration 6
+dude tile 20100 rot 2
+dude hp 400
+spawn 16777278 19904 rot 5 wield 8 item 29 6 item 40 3 hp 40 chem 1 party
+
+spawn 16777454 21292 rot 5 hostile
+spawn 16777454 21300 rot 5 hostile
+
+at 0 idle
+
+expect autotest\] chem id=[0-9]+ pid=16777278 chem=1 rc=0
+expect FLOW/medic\] .*self=1 .*hp=40/70
