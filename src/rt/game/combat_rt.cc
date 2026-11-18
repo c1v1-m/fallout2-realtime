@@ -1430,7 +1430,10 @@ static float rt_walk_ap_cost = RT_WALK_AP_COST;
 // meant nothing there ("melee jsem mohl furt útočit"). At 1.2 punches drop ~4 % in a short fight and the pool runs down
 // in longer ones -- his „malinkej balance“. The far end (0.6) was left as it is.
 #define RT_REGEN_NEAR_MULT 1.2f   // multiplier in contact (dist <= 1)
-#define RT_REGEN_FAR_MULT 0.6f    // multiplier at/beyond the falloff distance
+// ⚠️ 0.6 -> 0.8 ON 2026-11-18: he had asked for „1,2 a 0,8“ as a pair (the self-played comparison above ran exactly that
+// pair: shotgun shots/s 0.28 -> 0.33, a companion at 11-20 tiles a third faster), but his „zkusme 1,2“ was read as the
+// near end alone and the far end stayed -- „vždyť jsem ti říkal taky 0,8“. Still below 1.0: the far end costs, less.
+#define RT_REGEN_FAR_MULT 0.8f    // multiplier at/beyond the falloff distance
 #define RT_REGEN_FALLOFF_TILES 12 // tiles at which the multiplier reaches the far value
 static float rt_regen_near_mult = RT_REGEN_NEAR_MULT;
 static float rt_regen_far_mult = RT_REGEN_FAR_MULT;
