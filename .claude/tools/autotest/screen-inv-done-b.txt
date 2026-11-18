@@ -1,0 +1,19 @@
+# SCREEN (2026-11-18, his phone: „otevřu inventory a není tlačítko pro vypnutí inventory a hráč neví“): with a pad the
+# inventory's little red DONE button wears a dark B disc, as the LOOT window's does (his „ano, dej tam B“): B closes the
+# inventory wherever the pointer is not on an item, BACK closes it anywhere. `screen` = the presented frame.
+#   1 the inventory with B on DONE      2 after BACK: the world again
+name screen-inv-done-b
+map DESERT1.MAP
+seed 1
+duration 9
+dude tile 20100 rot 2
+dude wield 8
+
+open 1000 inventory
+screen 3000
+tap 4000 BACK
+screen 5500
+note 8000 end
+
+expect autotest\] screen t=
+expect \[FLOW/autotest\] end why=time .* modal=-1

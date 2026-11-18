@@ -1,0 +1,25 @@
+# F2 (2026-11-18, his phone, Arroyo's hunting ground: „na fucking geckona nešlo zaútočit pouhým RT, musel jsem zamířit. Furt
+# mi to házelo prompt na povídání“): an idle gecko with its own script (ACGecko.int, scripts.lst line 200 -- no talk proc)
+# stands next to the dude, who holds a knife. RT with no aim must hit it (it is an enemy by nature, like a rat), and the
+# use prompt must never offer to talk to it.
+name test-gecko-rt
+map DESERT1.MAP
+seed 1
+duration 9
+dude tile 20100 rot 2
+dude hp 300
+dude wield 4
+
+spawn 16777296 20101 rot 5 script 200
+
+axis 2500 RT 32767
+axis 2700 RT 0
+axis 3300 RT 32767
+axis 3500 RT 0
+axis 4100 RT 32767
+axis 4300 RT 0
+note 8000 end
+
+expect autotest\] script pid=16777296 line=200 rc=0
+expect \[ACTION/attack\] target=16777296 .*locked=0
+expect-not ip-show\] pid=16777296 kind=3

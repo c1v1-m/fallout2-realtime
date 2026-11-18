@@ -11216,6 +11216,20 @@ static bool rt_obj_on_screen(Object* obj)
 // answer to "what species is this", so it decides. Brahmin and dogs are not on the list -- cattle are
 // peaceful and a dog may be Dogmeat. ⚠️ COLOUR ONLY: what counts as hostile for the A button, the
 // interact prompt and the lock's auto-hop is still rt_is_hostile, i.e. whoever is actually fighting.
+//
+// ⚠️ FALLOUT 2'S OWN SPECIES (2026-11-18, his phone, Arroyo's hunting ground: „na fucking geckona nešlo zaútočit pouhým RT,
+// musel jsem zamířit. Furt mi to házelo prompt na povídání“). The list came from Fallout 1, which has no geckos: an idle
+// Arroyo gecko (ACGecko.int: no talk proc) was drawn yellow, eight RT pulls one tile away did nothing, only LT could hit
+// it -- trace_2026-11-18_144116 s=584.4-587.3. Geckos, giant ants and aliens (the wanamingos) are enemies by nature too.
+// And a critter that can TALK is never one, whatever its species: Fallout 2's Vault 13 deathclaws and Goris speak, and
+// a red outline plus RT on them would start a fight nobody chose.
+static bool rt_critter_has_talk_proc(Object* critter)
+{
+    Script* script;
+    return critter->sid != -1 && scr_ptr(critter->sid, &script) != -1
+        && script->procs[SCRIPT_PROC_TALK] != SCRIPT_PROC_NO_PROC;
+}
+
 static bool rt_hostile_by_nature(Object* critter)
 {
     switch (critter_kill_count_type(critter)) {
@@ -11226,7 +11240,12 @@ static bool rt_hostile_by_nature(Object* critter)
     case KILL_TYPE_MANTIS:
     case KILL_TYPE_DEATH_CLAW:
     case KILL_TYPE_PLANT:
-        return true;
+#if FALLOUT_RT_GAME == 2
+    case KILL_TYPE_GECKO:
+    case KILL_TYPE_ALIEN:
+    case KILL_TYPE_GIANT_ANT:
+#endif
+        return !rt_critter_has_talk_proc(critter);
     default:
         return false;
     }

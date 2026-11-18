@@ -17,6 +17,9 @@ bool autotest_active();
 // The scenario's `mouse` steps, added to a real mouse's delta in the pad's mouse hook.
 void autotest_take_mouse(int* dx, int* dy);
 
+// A step of the talk panel sliding in (up) or out: a self-played run with `talkshots on` saves each as presented.
+void autotest_talk_frame(bool up, int step);
+
 // The scenario's `cfg <key> <value>` lines into [preferences], for this run only: called once the cfg is loaded and
 // before combat_rt and the pad read their levers (game.cc).
 void autotest_apply_cfg();

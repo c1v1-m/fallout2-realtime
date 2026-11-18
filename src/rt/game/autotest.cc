@@ -269,6 +269,7 @@ static char at_file[260] = "";
 static int at_seed = 1;
 static bool at_map_script = false;
 static bool at_planet_shots = false; // "planetshots on": the loading planet's frames as presented (autotest_planet_frame)
+static bool at_talk_shots = false; // "talkshots on": the talk panel sliding in / out, every step as presented (autotest_talk_frame)
 
 // "cfg <key> <value>": a [preferences] value of THIS run only, set over the folder's fallout2.cfg before combat_rt and the
 // pad read their levers (autotest_apply_cfg, game.cc) -- the same fight under another balance without touching the file
@@ -855,6 +856,8 @@ static bool at_parse(const char* path)
             at_map_script = strcmp(tok[1], "on") == 0;
         } else if (strcmp(tok[0], "planetshots") == 0 && n >= 2) {
             at_planet_shots = strcmp(tok[1], "on") == 0;
+        } else if (strcmp(tok[0], "talkshots") == 0 && n >= 2) {
+            at_talk_shots = strcmp(tok[1], "on") == 0;
         } else if (strcmp(tok[0], "record") == 0 && n >= 2) {
             at_record_ms = atoi(tok[1]) < 0 ? 0 : atoi(tok[1]);
         } else if (strcmp(tok[0], "cfg") == 0 && n >= 3 && at_cfg_count < AT_MAX_CFG) {
@@ -1047,6 +1050,20 @@ static void at_dump_presented()
         screenshotHandlerDefaultImpl(w, h, buf, _getSystemPalette());
     }
     free(buf);
+}
+
+// A step of the talk panel sliding in (`up`) or out (game_dialog.cc _gdialog_scroll_subwin). Its loop runs no game
+// loop either: in a scenario that says `talkshots on`, each step is saved as presented, at most 40 in a run (2026-11-18,
+// his „když se ukončí rozhovor, tak proběhne animace a ta už nemá tlačítka vidět“).
+void autotest_talk_frame(bool up, int step)
+{
+    static int shots = 0;
+    if (!at_active || !at_talk_shots || shots >= 40) {
+        return;
+    }
+    shots++;
+    at_dump_presented();
+    trace_event(TRACE_FLOW, "autotest", "talk-screen n=%d dir=%s step=%d", shots, up ? "in" : "out", step);
 }
 
 void autotest_apply_cfg()

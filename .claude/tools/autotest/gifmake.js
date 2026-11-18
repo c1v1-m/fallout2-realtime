@@ -1,6 +1,6 @@
 // Animated GIF from the game's 8-bit BMP frames (the harness `record` / `screen` dumps): the BMP's own palette becomes the
 // GIF's global colour table, so no colour is lost or dithered.
-//   node gifmake.js <out.gif> <half 0|1> <delay_cs> <bmp...>
+//   node gifmake.js <out.gif> <half 0|1> <delay_cs> [--crop x,y,w,h] <bmp...>
 // half=1 takes every second pixel (853x480 -> 426x240). delay_cs = hundredths of a second per frame.
 const fs = require('fs');
 
@@ -95,7 +95,12 @@ function subBlocks(data) {
   return Buffer.concat(parts);
 }
 
-const [out, halfArg, delayArg, ...files] = process.argv.slice(2);
+const [out, halfArg, delayArg, ...rest] = process.argv.slice(2);
+let crop = null;
+const files = [];
+for (let i = 0; i < rest.length; i++) {
+  if (rest[i] === '--crop') { crop = rest[++i].split(',').map(Number); } else { files.push(rest[i]); }
+}
 const half = halfArg === '1';
 const delay = parseInt(delayArg, 10) || 10;
 if (!out || files.length === 0) {
@@ -103,8 +108,12 @@ if (!out || files.length === 0) {
   process.exit(1);
 }
 const first = readBmp(files[0]);
-const W = half ? Math.floor(first.w / 2) : first.w;
-const H = half ? Math.floor(first.h / 2) : first.h;
+const CX = crop ? crop[0] : 0;
+const CY = crop ? crop[1] : 0;
+const CW = crop ? crop[2] : first.w;
+const CH = crop ? crop[3] : first.h;
+const W = half ? Math.floor(CW / 2) : CW;
+const H = half ? Math.floor(CH / 2) : CH;
 const parts = [];
 const head = Buffer.alloc(13);
 head.write('GIF89a', 0, 'ascii');
@@ -121,7 +130,7 @@ for (const f of files) {
   const idx = Buffer.alloc(W * H);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      idx[y * W + x] = fr.px[(half ? y * 2 : y) * fr.w + (half ? x * 2 : x)];
+      idx[y * W + x] = fr.px[(CY + (half ? y * 2 : y)) * fr.w + CX + (half ? x * 2 : x)];
     }
   }
   const gce = Buffer.from([0x21, 0xf9, 0x04, 0x04, delay & 0xff, (delay >> 8) & 0xff, 0x00, 0x00]);

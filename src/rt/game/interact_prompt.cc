@@ -283,7 +283,23 @@ static bool ip_critter_can_converse(Object* obj)
         return true;
     }
 
-    return critter_body_type(obj) == BODY_TYPE_BIPED;
+    // ⚠️ ...AND A PERSON (2026-11-18, his phone, Arroyo's hunting ground: „Furt mi to házelo prompt na povídání“): Fallout 2's
+    // geckos walk on two legs, so step 2 took an Arroyo gecko (ACGecko.int: start, critter, timed_event, destroy, combat,
+    // damage -- no talk) for a person and A talked to it twelve times (trace_2026-11-18_144116 s=580.4-584.1). The bipeds
+    // this step is for are people by kill type; a talking beast (a Vault 13 deathclaw, the brahmin) passes step 1.
+    if (critter_body_type(obj) != BODY_TYPE_BIPED) {
+        return false;
+    }
+    switch (critter_kill_count_type(obj)) {
+    case KILL_TYPE_MAN:
+    case KILL_TYPE_WOMAN:
+    case KILL_TYPE_CHILD:
+    case KILL_TYPE_SUPER_MUTANT:
+    case KILL_TYPE_GHOUL:
+        return true;
+    default:
+        return false;
+    }
 }
 
 // A locked door that has opened for the dude on this map (see ip_door_refused). Kept by TILE and elevation, not by

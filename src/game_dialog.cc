@@ -45,6 +45,7 @@
 #include <SDL.h>
 
 // Realtime / controller (fallout1-ce's gdialog.cc changes, ported).
+#include "rt/game/autotest.h"
 #include "rt/game/combat_rt.h"
 #include "rt/game/game_trace.h"
 #include "rt/game/gamepad_ui.h"
@@ -1162,6 +1163,50 @@ static int gdialog_red_button(int x, int y, int keyCode, unsigned char* badge)
     return buttonCreate(gGameDialogWindow, x, y, 14, 14, -1, -1, -1, keyCode,
         _redButtonNormalFrmImage.getData(), _redButtonPressedFrmImage.getData(), nullptr, BUTTON_FLAG_TRANSPARENT);
 }
+
+// CE: THE PANEL SLIDES WITH ITS SOCKETS EMPTY (2026-11-18, his phone: „když se ukončí rozhovor, tak proběhne animace a ta
+// už nemá tlačítka vidět (Y pro barter atd)“). The slide in and out draws the panel's ART (_gdialog_scroll_subwin), whose
+// red buttons are painted into it -- so with a pad the panel arrived and left with vanilla's red dots, and between the two
+// wore the Y / X badges (play/dbg-talk-end, every step shot as presented). A button shows only while it can be pressed:
+// with a pad the sliding art gets a dark disc with no letter over each socket, the badges come with the buttons once the
+// panel is up and go with them. `sockets` = the badges' top-left (gdialog_red_button's x - 1, y - 1). Returns a copy of
+// the art to slide (internal_malloc) or the art itself (no pad, no memory); gdialog_free_slide_art lets it go.
+static unsigned char* gdialog_slide_art(unsigned char* art, int width, int height, const int (*sockets)[2], int count)
+{
+    if (art == nullptr || gamepad_ui_get_controller() == nullptr) {
+        return art;
+    }
+    unsigned char* copy = (unsigned char*)internal_malloc(width * height);
+    if (copy == nullptr) {
+        return art;
+    }
+    memcpy(copy, art, width * height);
+    unsigned char disc[GD_BADGE_SIZE * GD_BADGE_SIZE];
+    intface_pad_face_fill(disc, GD_BADGE_SIZE, GD_BADGE_SIZE, ' ');
+    for (int i = 0; i < count; i++) {
+        for (int y = 0; y < GD_BADGE_SIZE; y++) {
+            for (int x = 0; x < GD_BADGE_SIZE; x++) {
+                unsigned char v = disc[y * GD_BADGE_SIZE + x];
+                int px = sockets[i][0] + x;
+                int py = sockets[i][1] + y;
+                if (v != 0 && px >= 0 && py >= 0 && px < width && py < height) {
+                    copy[py * width + px] = v;
+                }
+            }
+        }
+    }
+    return copy;
+}
+
+static void gdialog_free_slide_art(unsigned char* slide, unsigned char* art)
+{
+    if (slide != nullptr && slide != art) {
+        internal_free(slide);
+    }
+}
+
+// The talk panel's sockets: TRADE, and COMBAT CONTROL on a party member's panel (gdialog_red_button 593,41 / 593,116).
+static const int gd_talk_sockets[2][2] = { { 592, 40 }, { 592, 115 } };
 
 static void gdialog_free_barter_hints()
 {
@@ -3778,6 +3823,7 @@ void _gdialog_scroll_subwin(int windowIdx, bool scrollUp, unsigned char* windowF
             delay_ms(33);
 
             renderPresent();
+            autotest_talk_frame(true, strips); // `talkshots on`: each step as presented
             sharedFpsLimiter.throttle();
         }
     } else {
@@ -3816,6 +3862,7 @@ void _gdialog_scroll_subwin(int windowIdx, bool scrollUp, unsigned char* windowF
             delay_ms(33);
 
             renderPresent();
+            autotest_talk_frame(false, strips); // `talkshots on`: each step as presented
             sharedFpsLimiter.throttle();
         }
     }
@@ -4032,7 +4079,14 @@ int _gdialog_barter_create_win()
     unsigned char* backgroundWindowBuffer = windowGetBuffer(gGameDialogBackgroundWindow);
     blitBufferToBuffer(backgroundWindowBuffer + width * (480 - _dialogue_subwin_len), width, _dialogue_subwin_len, width, windowBuffer, width);
 
-    _gdialog_scroll_subwin(gGameDialogWindow, true, backgroundData, windowBuffer, nullptr, _dialogue_subwin_len);
+    // With a pad the trade panel slides in with OFFER's and TALK's sockets empty (gdialog_slide_art), as the talk panel does.
+    {
+        int dy = _dialogue_subwin_len - 191;
+        const int sockets[2][2] = { { 40, 162 + dy }, { 583, 161 + dy } };
+        unsigned char* slideArt = gdialog_slide_art(backgroundData, width, _dialogue_subwin_len, sockets, 2);
+        _gdialog_scroll_subwin(gGameDialogWindow, true, slideArt, windowBuffer, nullptr, _dialogue_subwin_len);
+        gdialog_free_slide_art(slideArt, backgroundData);
+    }
 
     backgroundFrmImage.unlock();
 
@@ -4133,7 +4187,13 @@ void _gdialog_barter_destroy_win()
     int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, frmId, 0, 0, 0);
     if (backgroundFrmImage.lock(backgroundFid)) {
         unsigned char* windowBuffer = windowGetBuffer(gGameDialogWindow);
-        _gdialog_scroll_subwin(gGameDialogWindow, false, backgroundFrmImage.getData(), windowBuffer, backgroundWindowBuffer, _dialogue_subwin_len);
+        // With a pad the trade panel leaves with OFFER's and TALK's sockets empty (gdialog_slide_art).
+        int dy = _dialogue_subwin_len - 191;
+        const int sockets[2][2] = { { 40, 162 + dy }, { 583, 161 + dy } };
+        unsigned char* slideArt = gdialog_slide_art(backgroundFrmImage.getData(), GAME_DIALOG_WINDOW_WIDTH, _dialogue_subwin_len,
+            sockets, 2);
+        _gdialog_scroll_subwin(gGameDialogWindow, false, slideArt, windowBuffer, backgroundWindowBuffer, _dialogue_subwin_len);
+        gdialog_free_slide_art(slideArt, backgroundFrmImage.getData());
     }
 
     windowDestroy(gGameDialogWindow);
@@ -5604,13 +5664,17 @@ int _gdialog_window_create()
             // TODO: Not sure about offsets.
             blitBufferToBuffer(bgWindowBuf + screenWidth * (GAME_DIALOG_WINDOW_HEIGHT - _dialogue_subwin_len), screenWidth, _dialogue_subwin_len, screenWidth, windowBuf, screenWidth);
 
+            // With a pad the panel slides in with its sockets empty (gdialog_slide_art); the buttons below bring the badges.
+            unsigned char* slideArt = gdialog_slide_art(backgroundFrmData, screenWidth, _dialogue_subwin_len, gd_talk_sockets,
+                gGameDialogSpeakerIsPartyMember ? 2 : 1);
             if (_dialogue_just_started) {
                 windowRefresh(gGameDialogBackgroundWindow);
-                _gdialog_scroll_subwin(gGameDialogWindow, true, backgroundFrmData, windowBuf, nullptr, _dialogue_subwin_len, true);
+                _gdialog_scroll_subwin(gGameDialogWindow, true, slideArt, windowBuf, nullptr, _dialogue_subwin_len, true);
                 _dialogue_just_started = 0;
             } else {
-                _gdialog_scroll_subwin(gGameDialogWindow, true, backgroundFrmData, windowBuf, nullptr, _dialogue_subwin_len, false);
+                _gdialog_scroll_subwin(gGameDialogWindow, true, slideArt, windowBuf, nullptr, _dialogue_subwin_len, false);
             }
+            gdialog_free_slide_art(slideArt, backgroundFrmData);
 
             // CE: with a controller, the pad's badge Y on the barter button and X on combat control
             // (gdialog_hint_button; matches the pad shortcuts in _gdProcess).
@@ -5728,7 +5792,11 @@ void _gdialog_window_destroy()
     int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, frmId, 0, 0, 0);
     if (backgroundFrmImage.lock(backgroundFid)) {
         unsigned char* windowBuffer = windowGetBuffer(gGameDialogWindow);
-        _gdialog_scroll_subwin(gGameDialogWindow, false, backgroundFrmImage.getData(), windowBuffer, backgroundWindowBuffer, _dialogue_subwin_len);
+        // With a pad the panel leaves with its sockets empty: the buttons and their badges are gone (gdialog_slide_art).
+        unsigned char* slideArt = gdialog_slide_art(backgroundFrmImage.getData(), GAME_DIALOG_WINDOW_WIDTH, _dialogue_subwin_len,
+            gd_talk_sockets, gGameDialogSpeakerIsPartyMember ? 2 : 1);
+        _gdialog_scroll_subwin(gGameDialogWindow, false, slideArt, windowBuffer, backgroundWindowBuffer, _dialogue_subwin_len);
+        gdialog_free_slide_art(slideArt, backgroundFrmImage.getData());
         windowDestroy(gGameDialogWindow);
         _gdialog_window_created = 0;
         gGameDialogWindow = -1;

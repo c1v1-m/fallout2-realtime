@@ -1,0 +1,32 @@
+# DEBUG (2026-11-18, his „když se ukončí rozhovor, tak proběhne animace a ta už nemá tlačítka vidět (Y pro barter atd)“): a
+# talk with Vic, then "That's it for now." ends it; `talkshots on` saves every step of the panel sliding in and out as presented, and
+# `screen` the moments around them.
+name dbg-talk-end
+map DESERT1.MAP
+seed 1
+duration 21
+dude tile 20100 rot 2
+dude hp 400
+talkshots on
+
+spawn 16777278 20102 rot 5 wield 8 party script 50
+
+tap 1500 A
+screen 4500
+# "That's it for now." is the fifth reply: four down, A
+tap 5000 DOWN
+tap 5400 DOWN
+tap 5800 DOWN
+tap 6200 DOWN
+tap 6800 A
+screen 9500
+# then talk again and open the trade (Y), and leave it (B) and the talk: the trade panel slides too
+tap 10500 A
+tap 13000 Y
+tap 15500 B
+screen 17500
+note 12000 end
+
+expect gd-badges\] pad=1
+expect autotest\] talk-screen n=1 dir=in
+expect autotest\] talk-screen n=\d+ dir=out

@@ -181,6 +181,7 @@ bool inven_normal_cursor_over_armor();
 bool inven_equip_under_cursor(int hand);
 bool inven_wear_under_cursor();
 Object* inven_list_item_under_cursor();
+bool inven_cursor_over_item();
 bool inven_gamepad_quick_normal();
 int inven_wield_instant(Object* critter, Object* item, int a3);
 void inven_explosive_dropped_notice();

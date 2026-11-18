@@ -1157,6 +1157,18 @@ static bool _setup_inventory(int inventoryWindowType)
     _inventoryFrmImages[1].lock(fid);
 
     if (_inventoryFrmImages[0].isLocked() && _inventoryFrmImages[1].isLocked()) {
+        // CE: with a pad the little red DONE button wears the pad button that CLOSES this screen -- a dark B disc, on the
+        // inventory's DONE as on the loot window's (2026-11-18, his phone: „otevřu inventory a není tlačítko pro vypnutí
+        // inventory a hráč neví“). The inventory closes with B wherever the pointer is not on an item (gamepad_ui.cc,
+        // inven_cursor_over_item) -- on DONE itself it never is -- and with BACK, the button that opened it. For an hour
+        // DONE wore a BACK pill instead, since BACK closes it even with the pointer on an item: his „proč je tam back, když
+        // to jde taky vypnout béčkem?“ → „ano, dej tam B“ -- B backs out of everything on the pad. The same picture for
+        // both states, transparent outside the disc so the plate shows there.
+        static unsigned char doneB[15 * 16];
+        bool padMarks = gamepad_ui_get_controller() != nullptr;
+        if (padMarks) {
+            intface_pad_face_fill(doneB, 15, 16, 'B');
+        }
         btn = -1;
         switch (inventoryWindowType) {
         case INVENTORY_WINDOW_TYPE_NORMAL:
@@ -1170,8 +1182,8 @@ static bool _setup_inventory(int inventoryWindowType)
                 -1,
                 -1,
                 KEY_ESCAPE,
-                _inventoryFrmImages[0].getData(),
-                _inventoryFrmImages[1].getData(),
+                padMarks ? doneB : _inventoryFrmImages[0].getData(),
+                padMarks ? doneB : _inventoryFrmImages[1].getData(),
                 nullptr,
                 BUTTON_FLAG_TRANSPARENT);
             break;
@@ -1202,8 +1214,8 @@ static bool _setup_inventory(int inventoryWindowType)
                 -1,
                 -1,
                 KEY_ESCAPE,
-                _inventoryFrmImages[0].getData(),
-                _inventoryFrmImages[1].getData(),
+                padMarks ? doneB : _inventoryFrmImages[0].getData(),
+                padMarks ? doneB : _inventoryFrmImages[1].getData(),
                 nullptr,
                 BUTTON_FLAG_TRANSPARENT);
             break;
@@ -2777,6 +2789,29 @@ Object* inven_list_item_under_cursor()
         return NULL;
     }
     return _pud->items[_pud->length - (itemIndex + 1)].item;
+}
+
+// The pad's B in the inventory (gamepad_ui.cc): over an ITEM it does what it always did -- that item into the B hand, or
+// a hand's item back out -- and over ANYTHING ELSE it closes the screen, as B backs out of every other one (2026-11-18,
+// his „když nemířím na item v inventáři tak Bčko mi vypne inventory“). An item = a list row holding one, a hand holding
+// one, the armor being worn; an empty row or hand, the dude, the stats, DONE are not.
+bool inven_cursor_over_item()
+{
+    if (!normal_inventory_open || gInventoryWindow == -1) {
+        return false;
+    }
+    if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_LEFT_HAND_SLOT_X, INVENTORY_LEFT_HAND_SLOT_Y,
+            INVENTORY_LEFT_HAND_SLOT_MAX_X, INVENTORY_LEFT_HAND_SLOT_MAX_Y)) {
+        return gInventoryLeftHandItem != NULL;
+    }
+    if (mouseHitTestInWindow(gInventoryWindow, INVENTORY_RIGHT_HAND_SLOT_X, INVENTORY_RIGHT_HAND_SLOT_Y,
+            INVENTORY_RIGHT_HAND_SLOT_MAX_X, INVENTORY_RIGHT_HAND_SLOT_MAX_Y)) {
+        return gInventoryRightHandItem != NULL;
+    }
+    if (inven_normal_cursor_over_armor()) {
+        return gInventoryArmor != NULL;
+    }
+    return inven_list_item_under_cursor() != NULL;
 }
 
 // A DRUG TAKEN INSIDE THE INVENTORY IS FREE, AS IN VANILLA (fallout1-ce 2026-10-19). For a few minutes it
