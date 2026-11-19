@@ -33,7 +33,7 @@ You need your own copy of Fallout 2 from [Steam](https://store.steampowered.com/
 - Autosaves when you go to another map or a quest moves on, and a quick save on the controller.
 - On the Steam Deck it starts straight from the Steam library, in Game Mode.
 - Widescreen at the original scale, smooth movement and VSync.
-- A MODS page in the options, where most of this can be switched back toward the original, and where you can speed up travel on foot and on the world map.
+- A MODS page in the options, where most of this can be switched back toward the original, and where you can speed up travel on foot and on the world map. To open it, pause the game, open Preferences and press X (M on the keyboard).
 
 ## Install
 

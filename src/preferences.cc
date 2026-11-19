@@ -30,6 +30,7 @@
 
 #include <SDL.h>
 
+#include "rt/game/game_trace.h"
 #include "rt/game/gamepad_ui.h"
 #include "rt/game/mods_page.h"
 #include "rt/rt_hooks.h"
@@ -1662,6 +1663,44 @@ static bool prefs_nav_edge(bool now, int* state, unsigned int* lastFire, bool re
     return false;
 }
 
+// "X Mods" ON THE GRILLE LEFT OF THE HEADING (2026-11-20, his „Ano, obojí“). X opens MODS from here, and once the
+// Pip-Boy's CONTROLS page was gone nothing on screen said so. The heading and its two grilles are painted into the
+// background art, so the left grille (x 12..52, y 12..30) is dimmed into a dark plate and the bar's X badge and the
+// word go on that, in the pause menu's "Y Controls" look. Only with a pad, as that hint is. Fallout 1 Realtime draws
+// the same plate in the same place.
+#define PREFS_HINT_X 10
+#define PREFS_HINT_Y 10
+#define PREFS_HINT_WIDTH 48
+#define PREFS_HINT_HEIGHT 23
+
+static void prefs_draw_pad_hint()
+{
+    if (gPreferencesWindowBuffer == nullptr) {
+        return;
+    }
+
+    for (int y = PREFS_HINT_Y; y < PREFS_HINT_Y + PREFS_HINT_HEIGHT; y++) {
+        unsigned char* row = gPreferencesWindowBuffer + PREFERENCES_WINDOW_WIDTH * y;
+        for (int x = PREFS_HINT_X; x < PREFS_HINT_X + PREFS_HINT_WIDTH; x++) {
+            row[x] = intensityColorTable[row[x]][48];
+        }
+    }
+
+    const char* word = "Mods";
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+    int wordWidth = fontGetStringWidth(word) + 1;
+    int x = PREFS_HINT_X + (PREFS_HINT_WIDTH - (17 + wordWidth)) / 2;
+    int cy = PREFS_HINT_Y + PREFS_HINT_HEIGHT / 2;
+    intface_pad_face(gPreferencesWindowBuffer, PREFERENCES_WINDOW_WIDTH, PREFERENCES_WINDOW_WIDTH, PREFERENCES_WINDOW_HEIGHT,
+        x + 7, cy, 'X');
+    fontDrawText(gPreferencesWindowBuffer + PREFERENCES_WINDOW_WIDTH * (cy - 3) + x + 17, word, wordWidth, PREFERENCES_WINDOW_WIDTH,
+        _colorTable[18979] | FONT_SHADOW);
+    fontSetCurrent(oldFont);
+
+    trace_event(TRACE_FLOW, "prefs-hint", "mods x=%d cy=%d w=%d", x, cy, 17 + wordWidth);
+}
+
 // 0x490798
 int doPreferences(bool animated)
 {
@@ -1710,7 +1749,12 @@ int doPreferences(bool animated)
     // The pause menu blanks the cursor whenever a pad is connected; this screen needs it back.
     gameMouseSetCursor(MOUSE_CURSOR_ARROW);
 
+    // Which route opened MODS, for the trace: X posts the M key below.
+    bool prefModsByPad = false;
+
     if (prefPad != nullptr) {
+        prefs_draw_pad_hint(); // before the highlight takes its save-under
+        windowRefresh(gPreferencesWindow);
         prefs_nav_move(prefSel);
 
         // Self-arming edges: we may have got here BY pressing A, and that press is still down. Seed
@@ -1831,8 +1875,10 @@ int doPreferences(bool animated)
                 enqueueInputEvent(KEY_ESCAPE);
             }
             // X opens the MODS screen (this build's own settings) -- a keypress, not a row: every
-            // position on this panel is baked into its background art.
+            // position on this panel is baked into its background art. "X Mods" on the grille left of
+            // the heading says so (prefs_draw_pad_hint).
             if (prefs_nav_edge(xNow, &prefXState, &prefXAt, false)) {
+                prefModsByPad = true;
                 enqueueInputEvent(KEY_LOWERCASE_M);
             }
             // Y, not START: while the pause menu is open the shared shortcut layer turns START into
@@ -1855,6 +1901,8 @@ int doPreferences(bool animated)
             break;
         case KEY_UPPERCASE_M:
         case KEY_LOWERCASE_M:
+            trace_event(TRACE_FLOW, "mods-open", "by=%s", prefModsByPad ? "x" : "m");
+            prefModsByPad = false;
             mods_page();
             // The MODS window sat on top of this one; repaint so the panel has no hole in it.
             windowRefresh(gPreferencesWindow);
