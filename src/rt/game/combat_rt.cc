@@ -1432,8 +1432,11 @@ static float rt_walk_ap_cost = RT_WALK_AP_COST;
 #define RT_REGEN_NEAR_MULT 1.2f   // multiplier in contact (dist <= 1)
 // ⚠️ 0.6 -> 0.8 ON 2026-11-18: he had asked for „1,2 a 0,8“ as a pair (the self-played comparison above ran exactly that
 // pair: shotgun shots/s 0.28 -> 0.33, a companion at 11-20 tiles a third faster), but his „zkusme 1,2“ was read as the
-// near end alone and the far end stayed -- „vždyť jsem ti říkal taky 0,8“. Still below 1.0: the far end costs, less.
-#define RT_REGEN_FAR_MULT 0.8f    // multiplier at/beyond the falloff distance
+// near end alone and the far end stayed -- „vždyť jsem ti říkal taky 0,8“.
+// ⚠️ 0.8 -> 1.0 ON 2026-11-19, for the release: he tried 1.2 / 1 („Zkusím 1,2 a 1“), then 1 / 1 („ted 1 ku 1“) and went
+// back („shit, dej mi 1.2 a 1“), then picked 1.2 / 1 for the release. The far end no longer costs: standing far away
+// refills at the plain rate, only contact pays a bonus (and moving still costs, see the moving curves below).
+#define RT_REGEN_FAR_MULT 1.0f    // multiplier at/beyond the falloff distance
 #define RT_REGEN_FALLOFF_TILES 12 // tiles at which the multiplier reaches the far value
 static float rt_regen_near_mult = RT_REGEN_NEAR_MULT;
 static float rt_regen_far_mult = RT_REGEN_FAR_MULT;
