@@ -408,26 +408,24 @@ static FrmImage _pipboyFrmImages[PIPBOY_FRM_COUNT];
 
 // --- REALTIME / CONTROLLER (fallout1-ce's pipboy.cc changes, ported) ---------------------------------
 
-// One row of the CONTROLS pages in the archives -- see ctrl_lines.
+// One row of the CONTROLS list -- see ctrl_lines.
 typedef struct PipboyControl {
     const char* button;
     const char* action;
 } PipboyControl;
 
-// The gamepad layout, listed on its own pages of the Pip-Boy archives.
+// The gamepad layout, shown by the pause menu's Y in a window of its own (options.cc, pipboy_controls_row).
+// ⚠️ NO LONGER A PIP-BOY PAGE (2026-11-19, his „controls dej v pipboyovi doprdele“): the archives' CONTROLS entry
+// went; this file keeps the rows and their Deck names (git history has the page).
 //
 // Hardcoded rather than added to pipboy.msg: that file lives inside MASTER.DAT, and adding a
 // handful of message ids would mean shipping a loose override of the WHOLE file, which would
 // then fight every localised or patched pipboy.msg the player might install.
 //
 //   button == NULL, action != NULL -> section heading (underlined)
-//   both NULL                      -> blank spacer, dropped first if the page runs long
+//   both NULL                      -> blank spacer, dropped first if the window runs long
 //
-// ⚠️ EACH PAGE HAS A HARD 40-LINE BUDGET, and it is not a style preference -- pip_ctrl_line piles
-// every row past `gPipboyLinesCount` onto the bottom line, so an overlong table does not scroll, it
-// smears. The budget is 1 (title) + as many entries as fit; blank spacers are dropped wholesale
-// first (`spacious` in ShowControlsPage), which buys back one line per section boundary.
-// ⚠️ ONE PAGE, "CONTROLS", AND IT IS HIS LIST (fallout1-ce 2026-10-23). He dictated it ("nastavení dej jenom tohle"),
+// ⚠️ ONE LIST, "CONTROLS", AND IT IS HIS LIST (fallout1-ce 2026-10-23). He dictated it ("nastavení dej jenom tohle"),
 // then, when the first cut said "X Reload" and kept three more pages: "TY CONTROLS MAJÍ BÝT JEN JEDNY A
 // TO CONTROLS NIC VÍC ... LT+Y JE ZMĚNA MODU A LT+X JE RELOAD". So: one archive entry, his words,
 // LT + X for the reload (X's tap reloads with or without LT; he wants it written as the combo). BACK,
@@ -472,14 +470,6 @@ static const PipboyControl ctrl_lines[] = {
 // The CONTROLS page's title, and the archive entry that opens it -- one string so the list and the
 // page it leads to can never drift apart.
 static const char* ctrl_entry = "CONTROLS";
-
-
-// Set while a CONTROLS page is showing, so the video archive routes BACK to the list instead of
-// treating hot-line codes as movies.
-static unsigned char ctrl_flag;
-
-// x of the CONTROLS page's second column, measured from the widest button label.
-static int ctrl_col;
 
 // Whether the page now up registered a BACK button (vanilla never records it: _hot_back_line stays 0),
 // so B knows whether to back out of a sub-page or close the Pip-Boy.
@@ -683,33 +673,6 @@ static int pip_pad_keycode(bool* armedA, bool* armedB)
     return keyCode;
 }
 
-// One row of a CONTROLS page: the pad button on the left, what it does on the right (the column split
-// measured from the widest label, ctrl_col).
-static void pip_ctrl_line(const char* button, const char* action, int color)
-{
-    int top = gPipboyCurrentLine * fontGetLineHeight() + PIPBOY_WINDOW_CONTENT_VIEW_Y;
-
-    if (button != nullptr) {
-        fontDrawText(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * top + PIPBOY_WINDOW_CONTENT_VIEW_X + 8,
-            button,
-            PIPBOY_WINDOW_WIDTH,
-            PIPBOY_WINDOW_WIDTH,
-            color);
-    }
-
-    if (action != nullptr) {
-        fontDrawText(gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * top + PIPBOY_WINDOW_CONTENT_VIEW_X + ctrl_col,
-            action,
-            PIPBOY_WINDOW_WIDTH,
-            PIPBOY_WINDOW_WIDTH,
-            color);
-    }
-
-    if (gPipboyCurrentLine < gPipboyLinesCount) {
-        gPipboyCurrentLine += 1;
-    }
-}
-
 // A Steam Deck: Steam sets SteamDeck=1 in every game's environment there (Proton passes it on), and
 // under Steam Input the pad may also introduce itself by name.
 static bool ctrl_on_deck()
@@ -756,69 +719,9 @@ static const char* ctrl_deck_names(const char* text, char* out, size_t size)
     return out;
 }
 
-// The CONTROLS page's layout: the title, then button | action rows.
-static void ShowControlsPage(const char* title, const PipboyControl* lines, int count)
-{
-    blitBufferToBuffer(_pipboyFrmImages[PIPBOY_FRM_BACKGROUND].getData() + PIPBOY_WINDOW_WIDTH * PIPBOY_WINDOW_CONTENT_VIEW_Y + PIPBOY_WINDOW_CONTENT_VIEW_X,
-        PIPBOY_WINDOW_CONTENT_VIEW_WIDTH,
-        PIPBOY_WINDOW_CONTENT_VIEW_HEIGHT,
-        PIPBOY_WINDOW_WIDTH,
-        gPipboyWindowBuffer + PIPBOY_WINDOW_WIDTH * PIPBOY_WINDOW_CONTENT_VIEW_Y + PIPBOY_WINDOW_CONTENT_VIEW_X,
-        PIPBOY_WINDOW_WIDTH);
-
-    ctrl_col = 0;
-    for (int index = 0; index < count; index++) {
-        if (lines[index].button != nullptr) {
-            int width = fontGetStringWidth(lines[index].button);
-            if (width > ctrl_col) {
-                ctrl_col = width;
-            }
-        }
-    }
-    ctrl_col += 8 + 12;
-    if (ctrl_col > 160) {
-        ctrl_col = 160;
-    }
-
-    // The blank separator lines are the first thing to go if the page does not fit.
-    int needed = 1 + count;
-    bool spacious = needed <= gPipboyLinesCount;
-
-    if (gPipboyLinesCount >= 0) {
-        gPipboyCurrentLine = 0;
-    }
-
-    pipboyDrawText(title, PIPBOY_TEXT_ALIGNMENT_CENTER | PIPBOY_TEXT_STYLE_UNDERLINE, _colorTable[992]);
-
-    bool deck = ctrl_on_deck();
-    for (int index = 0; index < count; index++) {
-        const PipboyControl* entry = &(lines[index]);
-
-        if (entry->button == nullptr && entry->action == nullptr) {
-            if (spacious) {
-                pip_ctrl_line(nullptr, nullptr, _colorTable[992]);
-            }
-        } else if (entry->button == nullptr) {
-            pipboyDrawText(entry->action, PIPBOY_TEXT_STYLE_UNDERLINE, _colorTable[32747]);
-        } else if (deck) {
-            char button[64];
-            char action[96];
-            pip_ctrl_line(ctrl_deck_names(entry->button, button, sizeof(button)),
-                ctrl_deck_names(entry->action, action, sizeof(action)),
-                _colorTable[992]);
-        } else {
-            pip_ctrl_line(entry->button, entry->action, _colorTable[992]);
-        }
-    }
-
-    pipboyDrawBackButton(_colorTable[992]);
-
-    windowRefreshRect(gPipboyWindow, &gPipboyWindowContentRect);
-}
-
-// The same list for a window of its own: the pause menu's Y (options.cc, approved 2026-11-10), because a new
-// Fallout 2 character has no Pip-Boy until the Temple of Trials is behind him. Read from ctrl_lines and spelt
-// by ctrl_deck_names, so the two screens can never list different buttons.
+// The list for the pause menu's Y, in a window of its own (options.cc, approved 2026-11-10; a new Fallout 2
+// character has no Pip-Boy until the Temple of Trials is behind him) -- the only place it shows since the Pip-Boy
+// page went (2026-11-19). Read from ctrl_lines and spelt by ctrl_deck_names.
 const char* pipboy_controls_title()
 {
     return ctrl_entry;
@@ -1023,7 +926,6 @@ static int pipboyWindowInit(int intent)
     gPipboyLinesCount = PIPBOY_WINDOW_CONTENT_VIEW_HEIGHT / fontGetLineHeight() - 1;
     gPipboyWindowButtonStart = 0;
     _hot_back_line = 0;
-    ctrl_flag = 0;
 
     if (holodiskInit() == -1) {
         return -1;
@@ -2185,22 +2087,9 @@ static int _PrintAMList(int a1)
 static void pipboyHandleVideoArchive(int a1)
 {
     if (a1 == 1024) {
-        ctrl_flag = 0;
         pipboyWindowDestroyButtons();
         _view_page = pipboyRenderVideoArchive(-1);
         pipboyWindowCreateButtons(2, _view_page, false);
-        return;
-    }
-
-    // A CONTROLS page is up: only its BACK button (528 -> 1025) does anything, back to the list.
-    if (ctrl_flag) {
-        if (a1 == 1025) {
-            soundPlayFile("ib1p1xx1");
-            pipboyDrawBackButton(_colorTable[32747]);
-            windowRefreshRect(gPipboyWindow, &gPipboyWindowContentRect);
-            inputPauseForTocks(200);
-            pipboyHandleVideoArchive(1024);
-        }
         return;
     }
 
@@ -2208,19 +2097,6 @@ static void pipboyHandleVideoArchive(int a1)
         soundPlayFile("ib1p1xx1");
 
         pipboyRenderVideoArchive(a1);
-
-        // CONTROLS is the last entry of the list and not a movie: _view_page is the line count the
-        // list returned, so it sits at _view_page.
-        if (a1 == _view_page) {
-            inputPauseForTocks(200);
-            pipboyWindowDestroyButtons();
-            ShowControlsPage(ctrl_entry, ctrl_lines, (int)(sizeof(ctrl_lines) / sizeof(ctrl_lines[0])));
-            pipboyWindowCreateButtons(0, 0, true);
-            // Vanilla never sets this, so its BACK buttons leak; ours is claimed and taken down again.
-            _hot_back_line = 1;
-            ctrl_flag = 1;
-            return;
-        }
 
         int movie;
         for (movie = 2; movie < 16; movie++) {
@@ -2300,12 +2176,6 @@ static int pipboyRenderVideoArchive(int a1)
 
         msg_num++;
     }
-
-    // CONTROLS -- the pad layout, always the LAST entry (the archive fills up as the game is played,
-    // and it must not shuffle around). pipboyHandleVideoArchive finds it at _view_page.
-    v8 = v5++;
-    pipboyDrawText(ctrl_entry, 0, v8 == v12 ? _colorTable[32747] : _colorTable[992]);
-    gPipboyCurrentLine++;
 
     windowRefreshRect(gPipboyWindow, &gPipboyWindowContentRect);
 

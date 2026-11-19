@@ -94,7 +94,7 @@ Run the installer again and click **Uninstall**. On the Deck it is `bash install
 | START | Pause |
 | START hold | Quick save |
 
-The same list is in the game: press Y on the pause menu (START), or open the Pip-Boy's Archives, CONTROLS. A new character gets the Pip-Boy with the vault suit, after the Temple of Trials, so until then the pause menu is the way. On a Steam Deck that list calls the buttons L1, R1, L2, R2, VIEW and MENU.
+The same list is in the game: press Y on the pause menu (START). On a Steam Deck that list calls the buttons L1, R1, L2, R2, VIEW and MENU.
 
 ## Saves
 
