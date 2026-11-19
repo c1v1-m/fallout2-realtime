@@ -4,7 +4,7 @@
 
 <!-- TODO: a screenshot or a short GIF of a fight goes here -->
 
-Fallout 2 where nobody waits for their turn. You walk with the stick, hold the left trigger to lock onto an enemy and pull the right one to shoot, while the geckos, raiders and mutants come at you at the same time. Action points are still there. They refill as you fight, faster when the enemy is close, so standing back and kiting does not pay.
+Fallout 2 where nobody waits for their turn. You walk with the stick, hold the left trigger to lock onto an enemy and pull the right one to shoot, while the geckos, raiders and mutants come at you at the same time. Action points are still there. They refill as you fight, faster when an enemy is close, and walking in a fight spends them, so kiting does not pay.
 
 It is made for a controller, from the first screen on. It builds on [Fallout 1 Realtime](https://github.com/c1v1-m/fallout1-realtime) and is a modified version of Alexander Batalov's [Fallout 2 Community Edition](https://github.com/alexbatalov/fallout2-ce).
 
@@ -17,16 +17,23 @@ You need your own copy of Fallout 2 from [Steam](https://store.steampowered.com/
 
 - Realtime combat. Everyone moves and attacks at the same time, and you can shoot and keep moving.
 - Every shot flies. Bullets leave tracers in a burst. Rockets and plasma you can see coming and step out of, lasers hit at once.
-- Enemies fight smarter. They wait for each other and come round a corner together, cover the door you are holding, shoot from where they can see you, reload out of your sight, jump clear of grenades and step out of your line of fire.
+- Enemies fight smarter. They wait for each other and come round a corner together, cover the door you are holding, shoot from where they can see you, reload out of your sight, jump clear of grenades and step out of your line of fire. They see you only in the open, lose you when you get out of sight and search where they saw you last.
+- At most two enemies attack you at the same time, and two each of your followers. The rest wait their turn.
 - Your stats decide how fast you swing, aim and reload. Agility brings your action points back faster.
-- A stimpack heals over the next few seconds in a fight, so hits still hurt while it works. Hold the button and you inject one after another.
-- The whole game plays on a gamepad: fighting, looting, barter, dialogue, the Pip-Boy, the character screen and your followers' combat settings. The interface bar shows the pad's buttons, the action icon carries an A, and arrows on it mark when the D-pad has more to offer.
+- A stimpack or Healing Powder heals over the next few seconds in a fight, so hits still hurt while it works. Hold the button and you take one after another.
+- Aiming at someone shows how hurt they are each time it gets worse. With the Awareness perk you see their hit points, and red dots on the ground show how far a grenade or rocket will blast.
+- The whole game plays on a gamepad: fighting, looting, barter, dialogue, the world map, the Pip-Boy, character selection, the character screen and your followers' combat settings.
+- With a pad in, the screens show its buttons: the interface bar, the inventory and loot windows, dialogue and barter, the timer on explosives, character selection and the character screen. The action icon carries an A, and arrows on it mark when the D-pad has more to offer.
 - Two quick slots beside the interface bar: LB for a stimpack or any drug or tool, RB for a grenade. Radial menus for skills, weapons, ammo and drugs.
-- Squad orders on LT + D-pad: your followers go for whoever you aim at, follow you, hold their ground or charge. Point them at someone peaceful and they start the fight. LT + A slows the world to a stop and opens the squad command: pick who with LB and RB, then send them to a spot to hold it, at anyone not on your side or to heal you, give one a weapon, tell them to hold fire, or switch off their healing of you with Y. In a fight they keep to the Distance from their combat settings.
+- Hold BACK and you run to the nearest exit. Where the exits lead to more than one place, a wheel lets you pick where to go.
+- Squad orders on LT + D-pad: your followers go for whoever you aim at, follow you, hold their ground or charge. Point them at someone peaceful and they start the fight. In a fight they keep to the Distance from their combat settings.
+- LT + A slows the world to a stop and opens the squad command, which stays open until you press B. Pick who with LB and RB, then send them to a spot to hold it, at anyone not on your side or to heal you. Point at a follower (R3 jumps to the next one) to choose their weapon or have them put on their best armour. X tells them to hold fire, L3 to keep their distance, and Y switches off their healing of you.
+- Your followers heal you with their stimpacks or Healing Powder when you are hurt, and run for cover when they are badly hurt.
+- The pad rumbles when you are hit, harder for a bigger hit, and when something blows up near you.
 - Autosaves when you go to another map or a quest moves on, and a quick save on the controller.
 - On the Steam Deck it starts straight from the Steam library, in Game Mode.
 - Widescreen at the original scale, smooth movement and VSync.
-- A MODS page in the options, where most of this can be switched back toward the original.
+- A MODS page in the options, where most of this can be switched back toward the original, and where you can speed up travel on foot and on the world map.
 
 ## Install
 
@@ -54,7 +61,7 @@ Steam's Fallout 2 includes the High Resolution Patch, whose files give the wider
 
 ### Uninstall
 
-Run the installer again and click **Uninstall**. On the Deck it is `bash install-steamdeck.sh uninstall`. Steam's **Verify integrity of game files** brings the original back as well. Your saves, `fallout2.cfg` and the backups stay. **Screen** and **Internal resolution** on the MODS page write to the High Resolution Patch's `f2_res.ini`, which the installer does not back up, so copy that file somewhere safe before you change them and put it back after you uninstall.
+Run the installer again and click **Uninstall**. On the Deck it is `bash install-steamdeck.sh uninstall`. Steam's **Verify integrity of game files** brings the original back as well. Your saves, `fallout2.cfg` and the backups stay. **Screen resolution** and **Internal resolution** on the MODS page write to the High Resolution Patch's `f2_res.ini`, which the installer does not back up, so copy that file somewhere safe before you change them and put it back after you uninstall.
 
 ## Controls
 
@@ -110,20 +117,19 @@ If you play on more than one machine, Steam Cloud can deliver a slot only partly
 
 ## Status
 
-Version 0.1.0, the first public release, so expect rough edges. So far it has been played from a new character through the Temple of Trials, Klamath and the Den into Modoc. The rest of the game has not been played yet, and the car has not been worked on. If something breaks, please open an [issue](../../issues). It helps a lot if you put `trace_log=1` under `[preferences]` in `fallout2.cfg`, play until it happens again and attach the newest `trace_*.log` from the game folder.
+Version 0.1.0, the first public release, so expect rough edges. So far it has been played from a new character through the Temple of Trials, Klamath, the Den and Modoc into Vault City and Gecko. The rest of the game has not been played yet, and the car has not been worked on. If something breaks, please open an [issue](../../issues). It helps a lot if you put `trace_log=1` under `[preferences]` in `fallout2.cfg`, play until it happens again and attach the newest `trace_*.log` from the game folder.
 
 Known:
 
 - On some PCs (seen with an AMD graphics card) the Steam overlay may not show.
 - If the game shows a small 4:3 picture with black bars and no LB slot (seen on a Steam Deck), step **Internal resolution** on the MODS page to another value and back to **Original**, then restart the game. It may already say Original, but only a change is saved.
 - Fallout 2's own calibres all fly at the same speed for now.
-- Nobody has checked yet whether your followers keep to their Chem use setting in a realtime fight.
 - Some help texts on the MODS page still talk about Fallout 1.
 - In a New Reno boxing match the opponent can keep coming during the break between rounds.
 
 ## What's next
 
-- The rest of the game after Modoc, and polish everywhere it still feels rough.
+- The rest of the game after Vault City and Gecko, and polish everywhere it still feels rough.
 - New hand-made animations, starting with reloading.
 - The Steam overlay on the PCs where it does not show yet.
 
